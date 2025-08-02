@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexusBase NBQL Query</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f4f7f6; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        h1 { color: #2c3e50; text-align: center; border-bottom: 2px solid #e0e0e0; padding-bottom: 15px; margin-top: 0; }
+        h2 { color: #34495e; margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 10px;}
+        textarea {
+            width: 100%;
+            height: 150px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 14px;
+            box-sizing: border-box;
+            resize: vertical;
+        }
+        button {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            margin-top: 15px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        button:disabled {
+            background-color: #bdc3c7;
+            cursor: not-allowed;
+        }
+        #results-container {
+            margin-top: 20px;
+            background-color: #ecf0f1;
+            border: 1px solid #bdc3c7;
+            border-radius: 4px;
+            padding: 15px;
+            min-height: 100px;
+        }
+        #results-output {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 13px;
+            color: #2c3e50;
+        }
+        .error {
+            color: #c0392b;
+            font-weight: bold;
+        }
+        /* Table styles */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            table-layout: fixed;
+        }
+        th, td {
+            padding: 10px 15px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+            word-wrap: break-word;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: 600;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        td pre {
+            margin: 0;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+        }
+        #cursor-container {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #e8f5e9;
+            border: 1px solid #a5d6a7;
+            border-radius: 4px;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>NBQL Query Interface</h1>
+        <textarea id="query-input" placeholder="Enter your NBQL query here... e.g., QUERY btcusdt FROM 1h TO now LIMIT 10"></textarea>
+        <button id="run-query-btn">Run Query</button>
+        <h2>Results</h2>
+        <div id="results-container">Results will appear here...</div>
+        <div id="cursor-container"></div>
+    </div>
+
+    <script>
+        const queryInput = document.getElementById('query-input');
+        const runBtn = document.getElementById('run-query-btn');
+        const resultsContainer = document.getElementById('results-container');
+        const cursorContainer = document.getElementById('cursor-container');
+
+        runBtn.addEventListener('click', async () => {
+            const query = queryInput.value.trim();
+            if (!query) {
+                resultsOutput.textContent = 'Please enter a query.';
+                return;
+            }
+
+            runBtn.disabled = true;
+            resultsContainer.textContent = 'Executing...';
+            resultsContainer.classList.remove('error');
+            cursorContainer.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/nbql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query })
+                });
+
+                const resultText = await response.text();
+
+                if (!response.ok) {
+                    throw new Error(resultText);
+                }
+
+                try {
+                    // First, try to parse as JSON for structured results (QUERY)
+                    const data = JSON.parse(resultText);
+                    renderResultsTable(data);
+                } catch (e) {
+                    // If it's not JSON, it's likely a simple string response (SHOW, etc.)
+                    renderTextResult(resultText);
+                }
+
+            } catch (error) {
+                resultsContainer.textContent = `Error: ${error.message}`;
+                resultsContainer.classList.add('error');
+            } finally {
+                runBtn.disabled = false;
+            }
+        });
+
+        function renderTextResult(text) {
+            resultsContainer.innerHTML = '';
+            cursorContainer.innerHTML = '';
+
+            const pre = document.createElement('pre');
+            pre.id = 'results-output'; // Keep ID for consistency if needed
+            pre.textContent = text;
+            resultsContainer.appendChild(pre);
+        }
+
+        function renderResultsTable(data) {
+            resultsContainer.innerHTML = ''; // Clear previous results
+            cursorContainer.innerHTML = ''; // Clear previous cursor
+
+            if (!data || !Array.isArray(data.Results) || data.Results.length === 0) {
+                resultsContainer.textContent = 'Query returned no results.';
+                return;
+            }
+
+            const results = data.Results;
+            const table = document.createElement('table');
+            const thead = document.createElement('thead');
+            const tbody = document.createElement('tbody');
+            const headerRow = document.createElement('tr');
+
+            // Determine columns from the first result
+            const firstResult = results[0];
+            const headers = [];
+            if (firstResult.IsAggregated) {
+                headers.push('Window Start', 'Metric', 'Tags', 'Aggregated Values');
+            } else {
+                headers.push('Timestamp', 'Metric', 'Tags', 'Fields');
+            }
+
+            // Create header cells
+            headers.forEach(text => {
+                const th = document.createElement('th');
+                th.textContent = text;
+                headerRow.appendChild(th);
+            });
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+
+            // Create body rows
+            results.forEach(row => {
+                const tr = document.createElement('tr');
+                const cells = [];
+                if (row.IsAggregated) {
+                    const ts = row.WindowStartTime > 0 ? new Date(row.WindowStartTime / 1000000).toISOString() : 'N/A';
+                    cells.push(ts, row.Metric, JSON.stringify(row.Tags, null, 2), JSON.stringify(row.AggregatedValues, null, 2));
+                } else {
+                    const ts = row.Timestamp > 0 ? new Date(row.Timestamp / 1000000).toISOString() : 'N/A';
+                    cells.push(ts, row.Metric, JSON.stringify(row.Tags, null, 2), JSON.stringify(row.Fields, null, 2));
+                }
+
+                cells.forEach(content => {
+                    const td = document.createElement('td');
+                    const pre = document.createElement('pre');
+                    pre.textContent = content;
+                    td.appendChild(pre);
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+
+            table.appendChild(tbody);
+            resultsContainer.appendChild(table);
+
+            // Display cursor if it exists
+            if (data.NextCursor) {
+                cursorContainer.innerHTML = `<strong>Next Cursor:</strong> <pre>${data.NextCursor}</pre>`;
+            }
+        }
+    </script>
+</body>
+</html>

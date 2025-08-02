@@ -1,0 +1,84 @@
+// In a file like cmd/server/main.go
+
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/INLOpen/nexusbase/config"
+	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/server"
+)
+
+func main() {
+	// 1. Setup logger and configuration
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	cfg, err := config.LoadConfig("config.yaml") // Assume you have a config file
+	if err != nil {
+		logger.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
+	}
+
+	// 2. Setup storage engine
+	dbEngine, err := engine.NewStorageEngine(cfg.Engine, logger)
+	if err != nil {
+		logger.Error("Failed to initialize storage engine", "error", err)
+		os.Exit(1)
+	}
+
+	// 3. Create the main application server
+	appServer, err := server.NewAppServer(dbEngine, cfg, logger)
+	if err != nil {
+		logger.Error("Failed to create application server", "error", err)
+		os.Exit(1)
+	}
+
+	// 4. Setup graceful shutdown mechanism
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// 5. Run the server in a goroutine so it doesn't block
+	serverErr := make(chan error, 1)
+	go func() {
+		logger.Info("Starting application server...")
+		serverErr <- appServer.Start()
+	}()
+
+	// 6. Block until a shutdown signal is received or the server fails
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			logger.Error("Server exited with an error", "error", err)
+		} else {
+			logger.Info("Server exited gracefully.")
+		}
+	case <-ctx.Done():
+		logger.Info("Shutdown signal received. Starting graceful shutdown...")
+		// Stop listening for new signals
+		stop()
+
+		// Tell the server to stop.
+		// The AppServer's Stop method will trigger the cancellation
+		// in the errgroup, causing appServer.Start() to return.
+		appServer.Stop()
+
+		// Wait for the server to fully shut down.
+		select {
+		case err := <-serverErr:
+			if err != nil {
+				logger.Error("Server shutdown with an error", "error", err)
+			} else {
+				logger.Info("Server shutdown completed.")
+			}
+		case <-time.After(30 * time.Second): // Add a timeout for shutdown
+			logger.Error("Graceful shutdown timed out. Forcing exit.")
+		}
+	}
+
+	logger.Info("Application has been shut down.")
+}

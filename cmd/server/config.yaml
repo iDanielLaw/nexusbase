@@ -1,0 +1,107 @@
+# config.yaml
+server:
+  grpc_port: 50051
+  tcp_port: 50052
+
+  # Enable or disable TLS for the gRPC server.
+  tls_enabled: false
+
+  # Interval in seconds for the gRPC health check loop to run.
+  health_check_interval_seconds: 5
+
+  # Paths to the TLS certificate and key files.
+  cert_file: "certs/server.crt"
+  key_file: "certs/server.key"
+
+debug_mode:
+  enabled: true
+  listen_address: "0.0.0.0:6060"
+  enabled_pprof: true
+  enabled_metrics: true
+  enabled_tracing: true
+  enabled_profiling: true
+  enabled_monitor_ui: true
+
+security: # (FR4.6)
+  enabled: false
+  # Path to the binary user database file.
+  # Use the 'user-admin' utility to manage this file.
+  user_file_path: "data/users.db"
+
+logging:
+  level: "debug"   # ระดับการ Log: "debug", "info", "warn", "error"
+  output: "stdout" # ปลายทาง: "stdout", "file", "none"
+  # file: "nexusbase.log" # ตำแหน่งไฟล์ Log (เมื่อ output เป็น "file")
+
+engine:
+  # Directory to store all database files.
+  data_dir: "./data"
+
+  # Size in Megabytes (MB) at which a memtable is flushed to disk.
+  memtable_threshold_mb: 4
+
+  # Interval in milliseconds between memtable flushes to disk.
+  memtable_flush_interval_ms: 0
+
+  # Number of data blocks to keep in the LRU cache.
+  block_cache_capacity: 1024
+
+  # Number of L0 files that triggers a compaction into L1.
+  max_l0_files: 4
+
+  index_memtable_threshold_mb: 8 # ลดขนาด Memtable ของ Index
+  index_base_target_size_mb: 2   # ลดขนาด SSTable ของ Index
+
+  # Target size in Megabytes (MB) for SSTables created during compaction.
+  target_sstable_size_mb: 16
+
+  # Multiplier for target size of the next level in compaction.
+  # TargetSize(L(N+1)) = TargetSize(LN) * multiplier.
+  levels_target_size_multiplier: 5
+
+  # Maximum number of levels in the LSM tree.
+  max_levels: 7
+
+  # False positive rate for the Bloom filter in SSTables.
+  bloom_filter_false_positive_rate: 0.01
+
+  # Default size in Kilobytes (KB) for data blocks within an SSTable.
+  sstable_default_block_size_kb: 8
+
+  # Interval in seconds to check if compaction is needed.
+  compaction_interval_seconds: 120
+
+  # (Optional) Interval in seconds to periodically sync metadata (manifest, tag index, series/string maps) to disk.
+  # This provides a guarantee on how up-to-date the persisted state is, independent of memtable flushes.
+  # Set to 0 or omit to disable. Default: 60
+  metadata_sync_interval_seconds: 60
+
+  # Compression algorithm for SSTable data blocks.
+  # Supported values: "none", "snappy".
+  sstable_compression: "snappy"
+
+  # WAL (Write-Ahead Log) configuration for durability and performance.
+  wal_sync_mode: "interval" # "always", "batch", "interval", "disabled"
+  wal_batch_size: 1       # Number of WAL entries to buffer before flushing (used with wal_sync_mode: "batch")
+  wal_flush_interval_ms: 1000 # Interval in milliseconds to flush WAL buffer (used with wal_sync_mode: "interval")
+  wal_max_segment_size: 33554432
+  wal_purge_keep_segments: 4
+  # Data retention period. Data older than this will be deleted during compaction.
+  # Format is a duration string like "720h" (30 days), "365d", "1y".
+  # Leave empty or omit to disable retention.
+  retention_period: ""
+
+# Self-monitoring settings
+self_monitoring:
+  enabled: true             # ตั้งเป็น true เพื่อเปิดใช้งาน
+  interval_seconds: 5      # ช่วงเวลาในการเก็บเมตริก (วินาที)
+  metric_prefix: "__" # คำนำหน้าชื่อเมตริกทั้งหมด
+
+query_server:
+  enabled: true
+  listen_address: "0.0.0.0:8088"
+
+tracing:
+  enabled: false
+  endpoint: "localhost:4317"
+  protocol: "grpc"

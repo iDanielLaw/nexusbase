@@ -30,3 +30,16 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+__pycache__
+*.egg-info
+data
+outputs
+node_modules
+build
+dist
+*.log
+certs
+openssl.cnf
+*.out
+*.exe

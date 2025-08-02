@@ -1,0 +1,56 @@
+name: Publish Tag
+
+on:
+  workflow_run:
+    # Trigger after the main Linux build completes.
+    # We will check the Windows build status inside the job.
+    workflows: ["Go Building & Testing"]
+    types:
+      - completed
+    branches:
+      - main
+
+jobs:
+  publish:
+    name: Create and Publish Tag
+    # Run this job only if the triggering workflow (Linux build) was successful
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to create and push a tag
+      contents: write
+      # Needed by wait-on-check-action to query workflow statuses
+      actions: read
+      checks: read
+
+    steps:
+      # The triggering workflow ("Go Building & Testing") is already known to be successful because of the `if` condition on the job.
+      # Now, we must explicitly wait for the Windows build to also complete successfully.
+      - name: Wait for Windows tests to succeed
+        uses: lewagon/wait-on-check-action@v1.4.0
+        with:
+          ref: ${{ github.ref }}
+          check-name: 'build-windows'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15 # Poll every 15 seconds
+          allowed-conclusions: success
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: 'main'
+          # Fetch all history for semantic-versioning to work correctly
+          fetch-depth: 0
+
+      - name: Get next version
+        uses: reecetech/version-increment@2024.10.1
+        id: version
+        with:
+          scheme: semver
+          increment: patch
+
+      - name: Tag snapshot
+        uses: tvdias/github-tagger@v0.0.1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tag: v${{ steps.version.outputs.version }}

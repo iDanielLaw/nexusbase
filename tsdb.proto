@@ -1,0 +1,194 @@
+syntax = "proto3";
+
+package tsdb;
+
+import "google/protobuf/struct.proto"; // Import the Struct message type
+
+// option go_package = "github.com/INLOpen/nexusbase/api/tsdb";
+
+// TSDBService defines the gRPC service for Time Series Database operations.
+service TSDBService {
+  // Put stores a new data point or a structured event for a time series. (FR1.1)
+  rpc Put (PutRequest) returns (PutResponse);
+
+  // PutBatch stores a batch of new data points.
+  rpc PutBatch (PutBatchRequest) returns (PutBatchResponse);
+
+  // Get retrieves a single data point at a specific timestamp. (FR1.3)
+  rpc Get (GetRequest) returns (GetResponse);
+
+  // Delete marks a single data point for deletion. (FR1.2)
+  rpc Delete (DeleteRequest) returns (DeleteResponse);
+
+  // DeleteSeries marks an entire series for deletion. (FR1.5)
+  rpc DeleteSeries (DeleteSeriesRequest) returns (DeleteSeriesResponse);
+
+  // DeleteDataPointsByTimeRange marks a time range within a series for deletion. (FR1.2)
+  rpc DeletesByTimeRange (DeletesByTimeRangeRequest) returns (DeletesByTimeRangeResponse);
+
+  // Query retrieves data points or aggregated results for a specified time range. (FR1.4)
+  rpc Query (QueryRequest) returns (stream QueryResult); // Use stream for potentially large results
+
+  // CreateSnapshot triggers the creation of a database snapshot. (FR5.2)
+  rpc CreateSnapshot (CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+  // GetSeriesByTags retrieves a list of unique series identifiers that match the given criteria. (FR1.6)
+  rpc GetSeriesByTags (GetSeriesByTagsRequest) returns (GetSeriesByTagsResponse);
+
+  // Subscribe listens for real-time data point updates.
+  rpc Subscribe(SubscribeRequest) returns (stream DataPointUpdate);
+
+   // Forces a flush of the current in-memory memtable to an SSTable on disk.
+  // This is primarily for testing and administrative purposes.
+  rpc ForceFlush(ForceFlushRequest) returns (ForceFlushResponse);
+}
+
+// Messages for Put
+message PutRequest {
+  string metric = 1;
+  map<string, string> tags = 2;
+  int64 timestamp = 3;
+  google.protobuf.Struct fields = 4;
+}
+
+message PutResponse {
+  // Empty response indicates success. Errors are handled via gRPC status codes.
+}
+
+// Request for putting a batch of data points.
+message PutBatchRequest {
+  repeated PutRequest points = 1;
+}
+
+message PutBatchResponse {}
+
+
+// Messages for Get
+message GetRequest {
+  string metric = 1;
+  map<string, string> tags = 2;
+  int64 timestamp = 3;
+}
+
+message GetResponse {
+  google.protobuf.Struct fields = 1;
+}
+
+// Messages for Delete
+message DeleteRequest {
+  string metric = 1;
+  map<string, string> tags = 2;
+  int64 timestamp = 3;
+}
+message DeleteResponse {}
+
+// Messages for DeleteSeries
+message DeleteSeriesRequest {
+  string metric = 1;
+  map<string, string> tags = 2;
+}
+message DeleteSeriesResponse {}
+
+// Messages for DeleteDataPointsByTimeRange
+message DeletesByTimeRangeRequest {
+  string metric = 1;
+  map<string, string> tags = 2;
+  int64 start_time = 3;
+  int64 end_time = 4;
+}
+message DeletesByTimeRangeResponse {}
+
+// Messages for Query
+message QueryRequest {
+  string metric = 1;
+  int64 start_time = 2;
+  int64 end_time = 3;
+  map<string, string> tags = 4;
+  repeated AggregationSpec aggregation_specs = 5;
+  string downsample_interval = 6;
+  bool emit_empty_windows = 7;
+  // The maximum number of results (data points or windows) to return. 0 means no limit.
+  int64 limit = 8;
+}
+
+// AggregationSpec defines a single aggregation function to be applied.
+message AggregationSpec {
+  enum AggregationFunc {
+    NONE = 0;
+    SUM = 1;
+    COUNT = 2;
+    AVERAGE = 3;
+    MIN = 4;
+    MAX = 5;
+    FIRST = 6;
+    LAST = 7;
+  }
+  AggregationFunc function = 1;
+  string field = 2;    // The field to aggregate on, or "*" for count(*)
+}
+
+// QueryResult represents a single data point or aggregated result from a query. (FR1.4)
+message QueryResult {
+  // Common fields for both raw and aggregated results
+  string metric = 1;
+  map<string, string> tags = 2; // Tags for the series
+
+  // Fields for raw data points (if is_aggregated is false)
+  int64 timestamp = 3;
+  google.protobuf.Struct fields = 4;
+
+  // Fields for aggregated results (if is_aggregated is true)
+  int64 window_start_time = 5;
+  int64 window_end_time = 6;
+  map<string, double> aggregated_values = 7; // e.g., "avg": 12.5, "sum": 50.0
+
+  bool is_aggregated = 8; // True if this result represents an aggregated window
+}
+
+// Messages for CreateSnapshot
+message CreateSnapshotRequest {
+  // The directory where the snapshot will be stored.
+  // This path is relative to a base directory configured on the server.
+  string snapshot_dir = 1;
+}
+message CreateSnapshotResponse {
+  // Empty response indicates success. Errors are handled via gRPC status codes.
+}
+
+// Messages for GetSeriesByTags (FR1.6)
+message GetSeriesByTagsRequest {
+  string metric = 1;
+  map<string, string> tags = 2;
+}
+message GetSeriesByTagsResponse {
+  repeated string series_keys = 1;
+}
+
+// Messages for Subscribe (real-time updates)
+message SubscribeRequest {
+  // The metric to subscribe to. If empty, subscribes to all metrics.
+  string metric = 1;
+  // The tags to filter by. If empty, no tag filtering is applied for the given metric.
+  map<string, string> tags = 2;
+}
+
+// DataPointUpdate represents a real-time change to a data point.
+message DataPointUpdate {
+  enum UpdateType {
+    PUT = 0;
+    DELETE = 1; // Represents a point tombstone
+    DELETE_SERIES = 2; // New: Represents a series tombstone
+    DELETE_RANGE = 3;  // New: Represents a range tombstone
+  }
+  UpdateType update_type = 1;
+  string metric = 2;
+  map<string, string> tags = 3;
+  int64 timestamp = 4;
+  double value = 5; // Value for PUT, can be ignored for DELETE
+}
+
+// The request message for ForceFlush.
+message ForceFlushRequest {}
+
+// The response message for ForceFlush.
+message ForceFlushResponse {}
