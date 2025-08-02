@@ -11,7 +11,6 @@ require (
 	github.com/arl/statsviz v0.6.0
 	github.com/caio/go-tdigest/v4 v4.0.1
 	github.com/golang/snappy v1.0.0
-	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/compress v1.18.0
 	github.com/pierrec/lz4/v4 v4.1.22
 	github.com/shirou/gopsutil/v3 v3.24.5
@@ -39,6 +38,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.1 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
