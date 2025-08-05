@@ -43,3 +43,4 @@ certs
 openssl.cnf
 *.out
 *.exe
+docs

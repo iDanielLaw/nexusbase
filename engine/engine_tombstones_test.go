@@ -68,7 +68,7 @@ func TestIsCoveredByRangeTombstone(t *testing.T) {
 	seriesKeyBytes := core.EncodeSeriesKey(metricID, encodedTags)
 
 	// Setup range tombstones
-	concreteEng.rangeTombstones[string(seriesKeyBytes)] = []RangeTombstone{
+	concreteEng.rangeTombstones[string(seriesKeyBytes)] = []core.RangeTombstone{
 		{MinTimestamp: 100, MaxTimestamp: 200, SeqNum: 500}, // RT1
 		{MinTimestamp: 180, MaxTimestamp: 220, SeqNum: 550}, // RT2 (Overlapping, newer)
 		{MinTimestamp: 300, MaxTimestamp: 400, SeqNum: 600}, // RT3 (Non-overlapping)

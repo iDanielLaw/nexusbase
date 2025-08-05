@@ -130,3 +130,16 @@ func (c *Client) DeleteSeries(ctx context.Context, metric string, tags map[strin
 	}
 	return nil
 }
+
+// CreateSnapshot
+func (c *Client) CreateSnapshot(ctx context.Context, SnapshotDir string) error {
+	req :=&pb.CreateSnapshotRequest{
+		SnapshotDir: SnapshotDir,
+	}
+	_, err := c.client.CreateSnapshot(ctx, req)
+	if err != nil {
+		return fmt.Errorf("gRPC CreateSnapshot failed: %w", err)
+	}
+	return nil
+
+}

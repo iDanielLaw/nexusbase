@@ -168,7 +168,7 @@ func (sl *StateLoader) loadStateFromDisk() (bool, error) {
 			sl.logger.Error("Failed to read range_tombstones file from manifest.", "file", rangeTombstonesFile, "error", readErr)
 			return false, fmt.Errorf("failed to read range_tombstones file %s: %w", rangeTombstonesFile, readErr)
 		}
-		var rt map[string][]RangeTombstone
+		var rt map[string][]core.RangeTombstone
 		if unmarshalErr := json.Unmarshal(data, &rt); unmarshalErr != nil {
 			sl.logger.Error("Failed to unmarshal range_tombstones file from manifest.", "file", rangeTombstonesFile, "error", unmarshalErr)
 			return false, fmt.Errorf("failed to unmarshal range_tombstones file %s: %w", rangeTombstonesFile, unmarshalErr)
@@ -469,7 +469,7 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 					continue
 				}
 				sl.engine.rangeTombstonesMu.Lock()
-				sl.engine.rangeTombstones[string(entry.Key)] = append(sl.engine.rangeTombstones[string(entry.Key)], RangeTombstone{
+				sl.engine.rangeTombstones[string(entry.Key)] = append(sl.engine.rangeTombstones[string(entry.Key)], core.RangeTombstone{
 					MinTimestamp: minTs,
 					MaxTimestamp: maxTs,
 					SeqNum:       entry.SeqNum,

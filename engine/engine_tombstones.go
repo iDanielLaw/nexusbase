@@ -11,13 +11,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// RangeTombstone represents a time range within a series that is marked for deletion.
-type RangeTombstone struct {
-	MinTimestamp int64 `json:"min_ts"`
-	MaxTimestamp int64 `json:"max_ts"`
-	SeqNum       uint64
-}
-
 // DeleteSeries marks an entire series for deletion.
 func (e *storageEngine) DeleteSeries(ctx context.Context, metric string, tags map[string]string) error {
 	if err := e.checkStarted(); err != nil {
@@ -217,7 +210,7 @@ func (e *storageEngine) DeletesByTimeRange(ctx context.Context, metric string, t
 
 	// Add to in-memory range tombstones map
 	e.rangeTombstonesMu.Lock()
-	e.rangeTombstones[seriesKeyStr] = append(e.rangeTombstones[seriesKeyStr], RangeTombstone{
+	e.rangeTombstones[seriesKeyStr] = append(e.rangeTombstones[seriesKeyStr], core.RangeTombstone{
 		MinTimestamp: startTime,
 		MaxTimestamp: endTime,
 		SeqNum:       currentSeqNum,

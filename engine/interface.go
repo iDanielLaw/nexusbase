@@ -40,6 +40,7 @@ type StorageEngineInterface interface {
 	// ForceFlush triggers a memtable flush. If wait is true, it blocks until the flush to disk is complete.
 	ForceFlush(ctx context.Context, wait bool) error
 	TriggerCompaction()
+	CreateIncrementalSnapshot(snapshotsBaseDir string) error
 	CreateSnapshot(snapshotDir string) error
 	VerifyDataConsistency() []error
 	// CleanupEngine is intended for internal use by the constructor to clean up

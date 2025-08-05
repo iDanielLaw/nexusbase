@@ -19,6 +19,7 @@ import (
 	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/engine/snapshot"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/utils"
@@ -143,9 +144,10 @@ type storageEngine struct {
 
 	deletedSeries     map[string]uint64
 	deletedSeriesMu   sync.RWMutex
-	rangeTombstones   map[string][]RangeTombstone
+	rangeTombstones   map[string][]core.RangeTombstone
 	rangeTombstonesMu sync.RWMutex
 
+	snapshotManager   snapshot.ManagerInterface
 	tagIndexManager   indexer.TagIndexManagerInterface
 	tagIndexManagerMu sync.RWMutex
 
@@ -218,7 +220,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		activeSeries:       make(map[string]struct{}),
 		deletedSeries:      make(map[string]uint64),
 		pubsub:             NewPubSub(), // Initialize PubSub
-		rangeTombstones:    make(map[string][]RangeTombstone),
+		rangeTombstones:    make(map[string][]core.RangeTombstone),
 		logger:             logger,
 		metrics:            opts.Metrics,
 		hookManager:        hooks.NewHookManager(logger.With("component", "HookManager")),
@@ -264,6 +266,9 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		engine = concreteEngine // Assign to return var for cleanup
 		return
 	}
+
+	// Initialize the snapshot manager, passing the engine itself as the provider.
+	concreteEngine.snapshotManager = snapshot.NewManager(concreteEngine)
 
 	return concreteEngine, nil // Return the concrete type which satisfies the interface
 }

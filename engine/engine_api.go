@@ -1710,3 +1710,21 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 
 	return nil
 }
+
+// CreateSnapshot creates a full, self-contained snapshot of the database state.
+// This method now delegates the call to the dedicated snapshot manager.
+func (e *storageEngine) CreateSnapshot(snapshotDir string) error {
+	if err := e.checkStarted(); err != nil {
+		return err
+	}
+	return e.snapshotManager.CreateFull(context.Background(), snapshotDir)
+}
+
+// CreateIncrementalSnapshot creates a snapshot containing only changes since the last one.
+// This method now delegates the call to the dedicated snapshot manager.
+func (e *storageEngine) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
+	if err := e.checkStarted(); err != nil {
+		return err
+	}
+	return e.snapshotManager.CreateIncremental(context.Background(), snapshotsBaseDir)
+}
