@@ -26,7 +26,7 @@ type EngineProvider interface {
 	GetTracer() trace.Tracer
 	GetHookManager() hooks.HookManager
 	GetLevelsManager() levels.Manager
-	GetTagIndexManager() indexer.TagIndexManagerInterface
+	GetTagIndexManager() indexer.TagIndexManager
 	GetStringStore() internal.PrivateManagerStore
 	GetSeriesIDStore() internal.PrivateManagerStore
 	GetSSTableCompressionType() string

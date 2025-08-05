@@ -13,7 +13,7 @@ import (
 
 // DeleteSeries marks an entire series for deletion.
 func (e *storageEngine) DeleteSeries(ctx context.Context, metric string, tags map[string]string) error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 	_, span := e.tracer.Start(ctx, "StorageEngine.DeleteSeries")
@@ -128,7 +128,7 @@ func (e *storageEngine) DeleteSeries(ctx context.Context, metric string, tags ma
 
 // DeletesByTimeRange marks a range of data points within a series for deletion.
 func (e *storageEngine) DeletesByTimeRange(ctx context.Context, metric string, tags map[string]string, startTime, endTime int64) error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 	_, span := e.tracer.Start(ctx, "StorageEngine.DeletesByTimeRange")

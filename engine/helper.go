@@ -72,10 +72,7 @@ func NewLatencyObservingIterator(iter iterator.Interface, engine *storageEngine,
 }
 
 func (it *LatencyObservingIterator) Close() error {
-	clock, err := it.engine.GetClock()
-	if err != nil {
-		return err
-	}
+	clock := it.engine.GetClock()
 	if len(it.aggregations) > 0 && it.engine.metrics.AggregationQueryLatencyHist != nil {
 		duration := clock.Now().Sub(it.startTime).Seconds()
 		observeLatency(it.engine.metrics.AggregationQueryLatencyHist, duration)

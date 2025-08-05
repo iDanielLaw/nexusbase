@@ -57,5 +57,5 @@ type StorageEngineInterface interface {
 	GetDLQDir() string
 	GetDataDir() string
 	GetWALPath() string
-	GetClock() (utils.Clock, error)
+	GetClock() (utils.Clock)
 }

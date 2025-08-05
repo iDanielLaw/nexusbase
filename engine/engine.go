@@ -19,9 +19,9 @@ import (
 	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine/snapshot"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/utils"
 
 	"github.com/INLOpen/nexusbase/levels"
@@ -148,7 +148,7 @@ type storageEngine struct {
 	rangeTombstonesMu sync.RWMutex
 
 	snapshotManager   snapshot.ManagerInterface
-	tagIndexManager   indexer.TagIndexManagerInterface
+	tagIndexManager   *indexer.TagIndexManager
 	tagIndexManagerMu sync.RWMutex
 
 	seriesIDStore   indexer.SeriesIDStoreInterface
@@ -333,7 +333,7 @@ func (e *storageEngine) Start() error {
 }
 
 func (e *storageEngine) GetNextSSTableID() uint64 {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		// This indicates a severe logic error in the engine's lifecycle management.
 		// A component is trying to get a new file ID when the engine is not running.
 		// This should not happen in a correctly functioning system. Panicking makes
@@ -480,7 +480,7 @@ func (e *storageEngine) Close() error {
 	return nil
 }
 
-func (e *storageEngine) checkStarted() error {
+func (e *storageEngine) CheckStarted() error {
 	if !e.isStarted.Load() {
 		return ErrEngineClosed
 	}
@@ -1024,7 +1024,7 @@ func (e *storageEngine) initializeTagIndexManager() error {
 // GetWALPath returns the file path of the WAL.
 // This is primarily for testing purposes.
 func (e *storageEngine) GetWALPath() string {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return ""
 	}
 	if e.wal == nil {
@@ -1106,7 +1106,7 @@ func (e *storageEngine) shutdownTracer() error {
 }
 
 func (e *storageEngine) VerifyDataConsistency() []error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return []error{err}
 	}
 	var allErrors []error
@@ -1126,28 +1126,16 @@ func (e *storageEngine) GetDataDir() string {
 	return e.opts.DataDir
 }
 
-func (e *storageEngine) GetStringStore() indexer.StringStoreInterface {
-	return e.stringStore
-}
-
 func (e *storageEngine) GetHookManager() hooks.HookManager {
 	return e.hookManager
 }
 
 // GetPubSub returns the PubSub instance for the engine.
 func (e *storageEngine) GetPubSub() (PubSubInterface, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	return e.pubsub, nil
-}
-
-// GetClock returns the clock used by the engine.
-func (e *storageEngine) GetClock() (utils.Clock, error) {
-	if err := e.checkStarted(); err != nil {
-		return nil, err
-	}
-	return e.clock, nil
 }
 
 // TriggerCompaction manually signals the compaction manager to check for and
@@ -1160,7 +1148,7 @@ func (e *storageEngine) TriggerCompaction() {
 
 // Metrics returns the Metrics instance for the engine.
 func (e *storageEngine) Metrics() (*EngineMetrics, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	return e.metrics, nil

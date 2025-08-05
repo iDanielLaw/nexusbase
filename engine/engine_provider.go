@@ -32,7 +32,7 @@ func (e *storageEngine) GetTracer() trace.Tracer {
 	return e.tracer
 }
 
-func (e *storageEngine) GetLevelsManager() levels.ManagerInterface {
+func (e *storageEngine) GetLevelsManager() levels.Manager {
 	return e.levelsManager
 }
 
