@@ -164,6 +164,7 @@ type storageEngine struct {
 
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
+	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
 }
 
 const (
@@ -809,7 +810,7 @@ func (e *storageEngine) initializeMetrics() {
 		if e.metrics.PutTotal == nil || e.engineStartTime.IsZero() {
 			return 0.0
 		}
-		durationSeconds := time.Since(e.engineStartTime).Seconds()
+		durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
 		if durationSeconds == 0 {
 			return 0.0
 		}
@@ -819,7 +820,7 @@ func (e *storageEngine) initializeMetrics() {
 		if e.metrics.QueryTotal == nil || e.engineStartTime.IsZero() {
 			return 0.0
 		}
-		durationSeconds := time.Since(e.engineStartTime).Seconds()
+		durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
 		if durationSeconds == 0 {
 			return 0.0
 		}

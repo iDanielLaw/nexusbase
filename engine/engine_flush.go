@@ -60,15 +60,20 @@ func (e *storageEngine) processImmutableMemtables() {
 			// or method (e.g., `LastWALSegmentIndex() uint64`) that returns the index of the
 			// latest WAL segment containing data for that memtable. This value should be
 			// recorded when the mutable memtable is swapped to the immutable list.
-			lastFlushedSegment := memToFlush.LastWALSegmentIndex // This is an assumed field.
+			lastActiveSegment := memToFlush.LastWALSegmentIndex
 
-			if lastFlushedSegment > 0 {
-				cp := checkpoint.Checkpoint{LastSafeSegmentIndex: lastFlushedSegment}
+			// We can only safely checkpoint the segment *before* the one that was active
+			// when this memtable was rotated. This ensures we don't checkpoint a segment
+			// that might still be receiving writes from other operations.
+			safeSegmentToCheckpoint := lastActiveSegment - 1
+
+			if safeSegmentToCheckpoint > 0 {
+				cp := checkpoint.Checkpoint{LastSafeSegmentIndex: safeSegmentToCheckpoint}
 				if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
 					e.logger.Error("Failed to write checkpoint after memtable flush. WAL files will not be purged.", "error", writeErr)
 				} else {
-					e.logger.Info("Checkpoint written successfully.", "last_safe_segment_index", lastFlushedSegment)
-					e.purgeWALSegments(lastFlushedSegment)
+					e.logger.Info("Checkpoint written successfully.", "last_safe_segment_index", safeSegmentToCheckpoint)
+					e.purgeWALSegments(safeSegmentToCheckpoint)
 				}
 			}
 

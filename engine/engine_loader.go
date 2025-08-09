@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/core"
@@ -390,8 +389,8 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 	}
 
 	recoveryStartTime := sl.engine.clock.Now()
-	w, recoveredEntries, walRecoveryErr := wal.Open(walOpts)
-	sl.engine.metrics.WALRecoveryDurationSeconds.Set(time.Since(recoveryStartTime).Seconds())
+	w, recoveredEntries, walRecoveryErr := wal.Open(walOpts) //nolint:govet
+	sl.engine.metrics.WALRecoveryDurationSeconds.Set(sl.engine.clock.Now().Sub(recoveryStartTime).Seconds())
 
 	if walRecoveryErr != nil {
 		sl.logger.Error("Critical error during WAL open/recovery.", "error", walRecoveryErr)

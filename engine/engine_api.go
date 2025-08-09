@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/api/tsdb"
-	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/hooks"
 
 	"github.com/INLOpen/nexusbase/core" // Import core package
@@ -198,7 +197,7 @@ func (e *storageEngine) get(ctx context.Context, key []byte) ([]byte, error) {
 	_, span := e.tracer.Start(ctx, "StorageEngine.Get")
 	startTime := e.clock.Now() // Use the clock interface for time measurement
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		observeLatency(e.metrics.GetLatencyHist, duration) // Assumes observeLatency is accessible
 		span.SetAttributes(attribute.Float64("duration_seconds", duration))
 		span.End()
@@ -315,7 +314,7 @@ func (e *storageEngine) delete(ctx context.Context, key []byte) error {
 	_, span := e.tracer.Start(ctx, "StorageEngine.Delete")
 	startTime := e.clock.Now() // Use the clock interface for time measurement
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		observeLatency(e.metrics.DeleteLatencyHist, duration) // Assumes observeLatency is accessible
 		span.SetAttributes(attribute.Float64("duration_seconds", duration))
 		span.End()
@@ -373,7 +372,7 @@ func (e *storageEngine) rangeScan(ctx context.Context, params rangeScanParams) (
 	_, span := e.tracer.Start(ctx, "StorageEngine.RangeScan")
 	startTime := e.clock.Now()
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		if e.metrics != nil && e.metrics.RangeScanLatencyHist != nil {
 			observeLatency(e.metrics.RangeScanLatencyHist, duration)
 		}
@@ -588,6 +587,9 @@ func (e *storageEngine) Put(ctx context.Context, point core.DataPoint) error {
 // It iterates through the points and calls the single Put method for each.
 // This is the primary write path; single Put calls are wrapped by this method.
 func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (err error) {
+	if e.putBatchInterceptor != nil {
+		return e.putBatchInterceptor(ctx, points)
+	}
 	// Defer a function to capture any error and increment the error metric.
 	defer func() {
 		if err != nil && e.metrics.PutErrorsTotal != nil {
@@ -600,7 +602,7 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 	}
 	startTime := e.clock.Now()
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		if e.metrics != nil && e.metrics.PutLatencyHist != nil {
 			observeLatency(e.metrics.PutLatencyHist, duration)
 		}
@@ -977,8 +979,8 @@ func (it *QueryResultIterator) UnderlyingAt() ([]byte, []byte, core.EntryType, u
 
 // Close closes the underlying iterator.
 func (it *QueryResultIterator) Close() error {
-	if it.engine != nil {
-		duration := time.Since(it.startTime).Seconds()
+	if it.engine != nil && it.engine.clock != nil {
+		duration := it.engine.clock.Now().Sub(it.startTime).Seconds()
 		// Observe general query latency for all query types.
 		if it.engine.metrics.QueryLatencyHist != nil {
 			observeLatency(it.engine.metrics.QueryLatencyHist, duration)
@@ -1248,9 +1250,9 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 	// 'err' is a named return value, so the deferred function can access its final state.
 	overallQueryStartTime := e.clock.Now()
 	defer func() {
-		postQueryPayload := hooks.PostQueryPayload{
+		postQueryPayload := hooks.PostQueryPayload{ //nolint:govet
 			Params:   params, // Use the potentially modified params
-			Duration: time.Since(overallQueryStartTime),
+			Duration: e.clock.Now().Sub(overallQueryStartTime),
 			Error:    err,
 		}
 		e.hookManager.Trigger(ctx, hooks.NewPostQueryEvent(postQueryPayload))
@@ -1694,18 +1696,6 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 		return ctx.Err() // The request was cancelled or timed out
 	case <-e.shutdownChan:
 		return ErrEngineClosed
-	}
-
-	// After a successful synchronous flush, always create a new checkpoint and purge old WALs.
-	// This ensures that even if no data was written, the state is durably checkpointed.
-	lastFlushedSegment := e.wal.ActiveSegmentIndex()
-	if lastFlushedSegment > 0 {
-		cp := checkpoint.Checkpoint{LastSafeSegmentIndex: lastFlushedSegment}
-		if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
-			e.logger.Error("Failed to write checkpoint after synchronous flush.", "error", writeErr)
-			return writeErr // Return this critical error
-		}
-		e.purgeWALSegments(lastFlushedSegment)
 	}
 
 	return nil
