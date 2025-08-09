@@ -113,8 +113,8 @@ type storageEngine struct {
 	stateLoader     *StateLoader    // New: Handles loading state from disk
 	serviceManager  *ServiceManager // New: Manages background services
 	mutableMemtable *memtable.Memtable
-	// For testing override
-	processImmutableMemtablesFunc func()
+	// For testing override, bool indicates if checkpoint should be written
+	processImmutableMemtablesFunc func(writeCheckpoint bool)
 	triggerPeriodicFlushFunc      func()
 	syncMetadataFunc              func()
 	immutableMemtables            []*memtable.Memtable

@@ -234,6 +234,14 @@ func (w *WAL) Sync() error {
 	return nil
 }
 
+// Rotate manually triggers a segment rotation.
+// It closes the current segment and opens a new one for writing.
+func (w *WAL) Rotate() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.rotateLocked()
+}
+
 // Close closes the WAL file.
 func (w *WAL) Close() error {
 	w.mu.Lock()

@@ -29,7 +29,7 @@ const maxFlushRetryDelay = 30 * time.Second
 
 // processImmutableMemtables is the background goroutine logic. It handles retries and DLQ.
 // It takes one memtable from the immutable queue and flushes it to an SSTable.
-func (e *storageEngine) processImmutableMemtables() {
+func (e *storageEngine) processImmutableMemtables(writeCheckpoint bool) {
 	e.mu.Lock()
 	if len(e.immutableMemtables) == 0 {
 		e.mu.Unlock()
@@ -56,24 +56,26 @@ func (e *storageEngine) processImmutableMemtables() {
 			// Now, we can create a checkpoint and purge old WAL segments.
 			e.logger.Info("Memtable flush to SSTable completed. Proceeding with checkpoint.", "memtable_size", memToFlush.Size())
 
-			// NOTE: This implementation assumes that the `memtable.Memtable` struct has a field
-			// or method (e.g., `LastWALSegmentIndex() uint64`) that returns the index of the
-			// latest WAL segment containing data for that memtable. This value should be
-			// recorded when the mutable memtable is swapped to the immutable list.
-			lastActiveSegment := memToFlush.LastWALSegmentIndex
+			if writeCheckpoint {
+				// NOTE: This implementation assumes that the `memtable.Memtable` struct has a field
+				// or method (e.g., `LastWALSegmentIndex() uint64`) that returns the index of the
+				// latest WAL segment containing data for that memtable. This value should be
+				// recorded when the mutable memtable is swapped to the immutable list.
+				lastActiveSegment := memToFlush.LastWALSegmentIndex
 
-			// We can only safely checkpoint the segment *before* the one that was active
-			// when this memtable was rotated. This ensures we don't checkpoint a segment
-			// that might still be receiving writes from other operations.
-			safeSegmentToCheckpoint := lastActiveSegment - 1
+				// We can only safely checkpoint the segment *before* the one that was active
+				// when this memtable was rotated. This ensures we don't checkpoint a segment
+				// that might still be receiving writes from other operations.
+				safeSegmentToCheckpoint := lastActiveSegment - 1
 
-			if safeSegmentToCheckpoint > 0 {
-				cp := checkpoint.Checkpoint{LastSafeSegmentIndex: safeSegmentToCheckpoint}
-				if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
-					e.logger.Error("Failed to write checkpoint after memtable flush. WAL files will not be purged.", "error", writeErr)
-				} else {
-					e.logger.Info("Checkpoint written successfully.", "last_safe_segment_index", safeSegmentToCheckpoint)
-					e.purgeWALSegments(safeSegmentToCheckpoint)
+				if safeSegmentToCheckpoint > 0 {
+					cp := checkpoint.Checkpoint{LastSafeSegmentIndex: safeSegmentToCheckpoint}
+					if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
+						e.logger.Error("Failed to write checkpoint after memtable flush. WAL files will not be purged.", "error", writeErr)
+					} else {
+						e.logger.Info("Checkpoint written successfully.", "last_safe_segment_index", safeSegmentToCheckpoint)
+						e.purgeWALSegments(safeSegmentToCheckpoint)
+					}
 				}
 			}
 

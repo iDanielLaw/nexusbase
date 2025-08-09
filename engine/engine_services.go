@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/memtable"
 )
 
@@ -89,9 +91,9 @@ func (sm *ServiceManager) startFlushLoop() {
 		for {
 			select {
 			case <-sm.engine.flushChan: // Asynchronous flush signal (from Put/Delete)
-				// This is a non-blocking, fire-and-forget flush.
-				// It processes whatever is in the immutable queue.
-				sm.engine.processImmutableMemtablesFunc()
+				// This is a non-blocking, fire-and-forget flush. It processes whatever is in the
+				// immutable queue and writes a conservative checkpoint.
+				sm.engine.processImmutableMemtablesFunc(true)
 
 			case completionChan := <-sm.engine.forceFlushChan: // Synchronous flush signal (from ForceFlush)
 				// 1. Rotate the current mutable memtable to ensure what the user wants to flush is included.
@@ -106,10 +108,30 @@ func (sm *ServiceManager) startFlushLoop() {
 
 				// 2. Process all immutable memtables until the queue is empty.
 				for sm.engine.hasImmutableMemtables() {
-					sm.engine.processImmutableMemtablesFunc()
+					sm.engine.processImmutableMemtablesFunc(false)
 				}
-				completionChan <- nil // 3. Signal completion.
 
+				// 3. After all data is flushed, rotate the WAL to seal the last segment.
+				// This ensures no new data can be written to the segment we are about to checkpoint.
+				if err := sm.engine.wal.Rotate(); err != nil {
+					completionChan <- fmt.Errorf("failed to rotate WAL during synchronous flush: %w", err)
+					continue
+				}
+
+				// 4. The last "safe" segment is now the one *before* the new active segment.
+				lastSafeSegment := sm.engine.wal.ActiveSegmentIndex() - 1
+
+				// 5. After all flushes, write an authoritative checkpoint for the highest segment that was flushed.
+				if lastSafeSegment > 0 {
+					cp := checkpoint.Checkpoint{LastSafeSegmentIndex: lastSafeSegment}
+					if writeErr := checkpoint.Write(sm.engine.opts.DataDir, cp); writeErr != nil {
+						completionChan <- writeErr
+						continue // continue the select loop
+					}
+					sm.engine.purgeWALSegments(lastSafeSegment)
+				}
+
+				completionChan <- nil // 6. Signal completion.
 			case <-tickerChan: // Periodic flush signal
 				sm.engine.triggerPeriodicFlushFunc()
 			case <-sm.engine.shutdownChan:

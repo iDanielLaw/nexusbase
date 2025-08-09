@@ -478,7 +478,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		eng.immutableMemtables = append(eng.immutableMemtables, mem)
 
 		// Action
-		eng.processImmutableMemtables()
+		eng.processImmutableMemtables(true)
 
 		// Assertions
 		if len(eng.immutableMemtables) != 0 {
@@ -505,7 +505,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		eng.immutableMemtables = append(eng.immutableMemtables, mem)
 
 		// Action
-		eng.processImmutableMemtables()
+		eng.processImmutableMemtables(true)
 
 		// Assertions
 		if len(eng.immutableMemtables) != 0 {
@@ -535,7 +535,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		eng.immutableMemtables = append(eng.immutableMemtables, mem)
 
 		// Action
-		eng.processImmutableMemtables()
+		eng.processImmutableMemtables(true)
 
 		// Assertions
 		if len(eng.immutableMemtables) != 0 {
@@ -575,7 +575,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			eng.processImmutableMemtables()
+			eng.processImmutableMemtables(true)
 		}()
 
 		// Wait a moment for the first failure, then signal shutdown
