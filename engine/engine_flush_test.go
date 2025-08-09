@@ -21,6 +21,7 @@ import (
 	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -657,4 +658,142 @@ func Test_flushMemtableToL0SSTable_Helper(t *testing.T) {
 		require.NoError(t, readErr)
 		assert.Empty(t, files, "SSTable directory should be empty")
 	})
+}
+
+func TestStorageEngine_SyncMetadata(t *testing.T) {
+	opts := getBaseOptsForFlushTest(t)
+	eng := setupEngineForFlushTest(t, opts)
+
+	// Add some data to make the manifest non-trivial
+	metricID, _ := eng.stringStore.GetOrCreateID("metric.sync")
+	tsdbKey := core.EncodeTSDBKey(metricID, nil, 12345)
+	eng.mutableMemtable.Put(tsdbKey, makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
+
+	// Manually flush the memtable since background loops are stopped in this test setup.
+	// This creates the initial manifest/CURRENT file state.
+	eng.mu.Lock()
+	eng.immutableMemtables = append(eng.immutableMemtables, eng.mutableMemtable)
+	eng.mutableMemtable = memtable.NewMemtable(eng.opts.MemtableThreshold, eng.clock)
+	eng.mu.Unlock()
+	eng.processImmutableMemtables(true) // Flush and write checkpoint/manifest
+	// Get the modification time of the CURRENT file before the sync
+	currentPath := filepath.Join(opts.DataDir, "CURRENT")
+	statBefore, err := os.Stat(currentPath)
+	require.NoError(t, err)
+	modTimeBefore := statBefore.ModTime()
+
+	// To ensure the new manifest has a different timestamp
+	time.Sleep(2 * time.Millisecond)
+
+	// Action
+	eng.syncMetadata()
+
+	// Verification
+	// 1. Check that the manifest was persisted by looking at the CURRENT file's modification time
+	statAfter, err := os.Stat(currentPath)
+	require.NoError(t, err)
+	modTimeAfter := statAfter.ModTime()
+
+	assert.True(t, modTimeAfter.After(modTimeBefore), "CURRENT file should have been modified by syncMetadata")
+
+	// 2. We can't easily mock the store's Sync methods with this setup,
+	// but we can verify that the function doesn't error out.
+	// A more advanced test would involve injecting mock stores.
+}
+
+func TestStorageEngine_FlushRemainingMemtables(t *testing.T) {
+	opts := getBaseOptsForFlushTest(t)
+	eng := setupEngineForFlushTest(t, opts)
+
+	// Setup: One immutable memtable and one non-empty mutable memtable
+	immutableMem := memtable.NewMemtable(opts.MemtableThreshold, eng.clock)
+	immutableMem.Put(core.EncodeTSDBKey(1, nil, 100), makeTestEventValue(t, "imm_val"), core.EntryTypePutEvent, 1)
+	eng.immutableMemtables = append(eng.immutableMemtables, immutableMem)
+
+	eng.mutableMemtable.Put(core.EncodeTSDBKey(2, nil, 200), makeTestEventValue(t, "mut_val"), core.EntryTypePutEvent, 2)
+
+	initialSSTCount := eng.levelsManager.GetTotalTableCount()
+
+	// Action
+	err := eng.flushRemainingMemtables()
+	require.NoError(t, err)
+
+	// Verification
+	// 1. Both memtables should have been flushed, creating 2 new SSTables
+	finalSSTCount := eng.levelsManager.GetTotalTableCount()
+	assert.Equal(t, initialSSTCount+2, finalSSTCount, "Expected 2 new SSTables to be created")
+
+	// 2. Immutable list should be empty
+	assert.Empty(t, eng.immutableMemtables, "Immutable memtables list should be empty")
+
+	// 3. Mutable memtable should be new and empty
+	assert.NotNil(t, eng.mutableMemtable)
+	assert.Equal(t, int64(0), eng.mutableMemtable.Size(), "Mutable memtable should be empty after final flush")
+
+	// 4. A manifest should have been persisted
+	_, err = os.Stat(filepath.Join(opts.DataDir, "CURRENT"))
+	require.NoError(t, err, "CURRENT file should exist after final flush")
+}
+
+// mockWAL is a mock implementation of the wal.WALInterface for testing.
+type mockWAL struct {
+	mock.Mock
+}
+
+func (m *mockWAL) AppendBatch(entries []core.WALEntry) error { return m.Called(entries).Error(0) }
+func (m *mockWAL) Append(entry core.WALEntry) error          { return m.Called(entry).Error(0) }
+func (m *mockWAL) Sync() error                               { return m.Called().Error(0) }
+func (m *mockWAL) Purge(upToIndex uint64) error              { return m.Called(upToIndex).Error(0) }
+func (m *mockWAL) Close() error                              { return m.Called().Error(0) }
+func (m *mockWAL) Path() string                              { return m.Called().String(0) }
+func (m *mockWAL) SetTestingOnlyInjectCloseError(err error)  { m.Called(err) }
+func (m *mockWAL) ActiveSegmentIndex() uint64 {
+	args := m.Called()
+	if len(args) == 0 {
+		return 0
+	}
+	return args.Get(0).(uint64)
+}
+func (m *mockWAL) Rotate() error { return m.Called().Error(0) }
+
+func TestStorageEngine_PurgeWALSegments(t *testing.T) {
+	testCases := []struct {
+		name               string
+		keepSegments       int
+		lastFlushed        uint64
+		expectPurge        bool
+		expectedPurgeIndex uint64
+	}{
+		{"Purge_Success", 2, 10, true, 8},
+		{"Skip_NotEnoughSegments_Equal", 5, 5, false, 0},
+		{"Skip_NotEnoughSegments_Less", 5, 4, false, 0},
+		{"DefaultKeepCount_Zero", 0, 10, true, 9},
+		{"DefaultKeepCount_Negative", -1, 10, true, 9},
+		{"Skip_ZeroLastFlushed", 2, 0, false, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := getBaseOptsForFlushTest(t)
+			eng, _ := setupServiceManagerTest(t, opts) // Use a lighter setup
+			mockW := &mockWAL{}
+			eng.wal = mockW // Inject the mock
+			eng.opts.WALPurgeKeepSegments = tc.keepSegments
+
+			if tc.expectPurge {
+				mockW.On("Purge", tc.expectedPurgeIndex).Return(nil).Once()
+			}
+
+			// Action
+			eng.purgeWALSegments(tc.lastFlushed)
+
+			// Verification
+			mockW.AssertExpectations(t)
+			if !tc.expectPurge {
+				// A more specific check for when Purge should not be called.
+				// This ensures no unexpected calls are made.
+				mockW.AssertNotCalled(t, "Purge", mock.Anything)
+			}
+		})
+	}
 }
