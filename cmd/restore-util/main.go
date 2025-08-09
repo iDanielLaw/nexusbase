@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/INLOpen/nexusbase/config"
-	"github.com/INLOpen/nexusbase/engine/snapshot"
+	"github.com/INLOpen/nexusbase/snapshot"
 )
 
 func main() {

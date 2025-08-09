@@ -148,7 +148,7 @@ type storageEngine struct {
 	rangeTombstonesMu sync.RWMutex
 
 	snapshotManager   snapshot.ManagerInterface
-	tagIndexManager   *indexer.TagIndexManager
+	tagIndexManager   indexer.TagIndexManagerInterface
 	tagIndexManagerMu sync.RWMutex
 
 	seriesIDStore   indexer.SeriesIDStoreInterface

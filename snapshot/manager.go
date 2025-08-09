@@ -72,8 +72,8 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 		return fmt.Errorf("failed to create snapshot directory: %s", mkdirErr)
 	}
 
-	concreteStringStore := p.GetStringStore()
-	concreteSeriesIDStore := p.GetSeriesIDStore()
+	concreteStringStore := p.GetPrivateStringStore()
+	concreteSeriesIDStore := p.GetPrivateSeriesIDStore()
 
 	defer func() {
 		if err != nil {

@@ -94,12 +94,16 @@ func (m *mockEngineProvider) GetLevelsManager() levels.Manager  { return m.level
 func (m *mockEngineProvider) GetTagIndexManager() indexer.TagIndexManagerInterface {
 	return m.tagIndexManager
 }
-func (m *mockEngineProvider) GetStringStore() internal.PrivateManagerStore   { return m.stringStore }
-func (m *mockEngineProvider) GetSeriesIDStore() internal.PrivateManagerStore { return m.seriesIDStore }
-func (m *mockEngineProvider) GetSSTableCompressionType() string              { return m.sstableCompression }
-func (m *mockEngineProvider) GetSequenceNumber() uint64                      { return m.sequenceNumber }
-func (m *mockEngineProvider) Lock()                                          { m.lockMu.Lock() }
-func (m *mockEngineProvider) Unlock()                                        { m.lockMu.Unlock() }
+func (m *mockEngineProvider) GetPrivateStringStore() internal.PrivateManagerStore {
+	return m.stringStore
+}
+func (m *mockEngineProvider) GetPrivateSeriesIDStore() internal.PrivateManagerStore {
+	return m.seriesIDStore
+}
+func (m *mockEngineProvider) GetSSTableCompressionType() string { return m.sstableCompression }
+func (m *mockEngineProvider) GetSequenceNumber() uint64         { return m.sequenceNumber }
+func (m *mockEngineProvider) Lock()                             { m.lockMu.Lock() }
+func (m *mockEngineProvider) Unlock()                           { m.lockMu.Unlock() }
 
 func (m *mockEngineProvider) GetMemtablesForFlush() ([]*memtable.Memtable, *memtable.Memtable) {
 	m.Called()

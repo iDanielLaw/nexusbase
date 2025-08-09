@@ -36,36 +36,32 @@ func (e *storageEngine) GetLevelsManager() levels.Manager {
 	return e.levelsManager
 }
 
-func (e *storageEngine) GetTagIndexManager() indexer.TagIndexManager {
-	// NOTE: The provider interface requests a concrete `indexer.TagIndexManager`,
-	// but the engine holds an `indexer.TagIndexManagerInterface`. This requires a type assertion.
-	// A better long-term solution would be for the provider to accept the interface.
-	tim, ok := e.tagIndexManager.(indexer.TagIndexManager)
-	if !ok {
-		// This will panic if the concrete type is not what's expected.
-		// This is a design-time check; in production, the types should always match.
-		panic("storageEngine.tagIndexManager is not of concrete type indexer.TagIndexManager")
-	}
-	return tim
+func (e *storageEngine) GetTagIndexManager() indexer.TagIndexManagerInterface {
+	return e.tagIndexManager
 }
 
-func (e *storageEngine) GetStringStore() internal.PrivateManagerStore {
-	// NOTE: Similar to GetTagIndexManager, this requires a type assertion.
-	// The provider needs access to private methods (like GetLogFilePath) not on the public interface.
+func (e *storageEngine) GetStringStore() indexer.StringStoreInterface {
+	return e.stringStore
+}
+
+func (e *storageEngine) GetPrivateStringStore() internal.PrivateManagerStore {
 	ss, ok := e.stringStore.(internal.PrivateManagerStore)
 	if !ok {
-		panic("storageEngine.stringStore does not implement internal.PrivateManagerStore")
+		panic("stringStore is not a PrivateManagerStore")
 	}
 	return ss
 }
 
-func (e *storageEngine) GetSeriesIDStore() internal.PrivateManagerStore {
-	// NOTE: Similar to GetTagIndexManager, this requires a type assertion.
-	sis, ok := e.seriesIDStore.(internal.PrivateManagerStore)
+func (e *storageEngine) GetSeriesIDStore() indexer.SeriesIDStoreInterface {
+	return e.seriesIDStore
+}
+
+func (e *storageEngine) GetPrivateSeriesIDStore() internal.PrivateManagerStore {
+	ss, ok := e.seriesIDStore.(internal.PrivateManagerStore)
 	if !ok {
-		panic("storageEngine.seriesIDStore does not implement internal.PrivateManagerStore")
+		panic("seriesIDStore is not a PrivateManagerStore")
 	}
-	return sis
+	return ss
 }
 
 func (e *storageEngine) GetSSTableCompressionType() string {

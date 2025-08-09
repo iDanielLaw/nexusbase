@@ -578,7 +578,7 @@ func (e *storageEngine) prepareDataPoint(ctx context.Context, p core.DataPoint) 
 // Put is a TSDB-specific API to put a single data point.
 // It's a convenience wrapper around PutBatch.
 func (e *storageEngine) Put(ctx context.Context, point core.DataPoint) error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 	return e.PutBatch(ctx, []core.DataPoint{point})
@@ -595,7 +595,7 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 		}
 	}()
 
-	if errCheck := e.checkStarted(); errCheck != nil {
+	if errCheck := e.CheckStarted(); errCheck != nil {
 		return errCheck
 	}
 	startTime := e.clock.Now()
@@ -732,7 +732,7 @@ func (e *storageEngine) publishAndHook(ctx context.Context, pubsubUpdates []*tsd
 
 // Get is a TSDB-specific API to get a single data point.
 func (e *storageEngine) Get(ctx context.Context, metric string, tags map[string]string, timestamp int64) (result core.FieldValues, err error) {
-	if errCheck := e.checkStarted(); errCheck != nil {
+	if errCheck := e.CheckStarted(); errCheck != nil {
 		err = errCheck
 		return
 	}
@@ -839,7 +839,7 @@ func (e *storageEngine) Get(ctx context.Context, metric string, tags map[string]
 
 // Delete is a TSDB-specific API to delete a single data point (creates a point tombstone).
 func (e *storageEngine) Delete(ctx context.Context, metric string, tags map[string]string, timestamp int64) (err error) {
-	if errCheck := e.checkStarted(); errCheck != nil {
+	if errCheck := e.CheckStarted(); errCheck != nil {
 		err = errCheck
 		return
 	}
@@ -1206,7 +1206,7 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 		}
 	}()
 
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	if err := core.ValidateMetricAndTags(e.validator, params.Metric, params.Tags); err != nil {
@@ -1501,7 +1501,7 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 // If only tags are provided, it will return all series matching those tags across all metrics.
 // If neither is provided, it returns all active series (potentially very large).
 func (e *storageEngine) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	// Custom validation for optional metric
@@ -1551,7 +1551,7 @@ func (e *storageEngine) GetSeriesByTags(metric string, tags map[string]string) (
 
 // GetMetrics returns a sorted list of all unique metric names in the engine.
 func (e *storageEngine) GetMetrics() ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	e.activeSeriesMu.RLock()
@@ -1583,7 +1583,7 @@ func (e *storageEngine) GetMetrics() ([]string, error) {
 
 // GetTagsForMetric returns a sorted list of all unique tag keys for a given metric.
 func (e *storageEngine) GetTagsForMetric(metric string) ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	binarySeriesKeys, err := e.getMatchingBinarySeriesKeys(metric, nil)
@@ -1616,7 +1616,7 @@ func (e *storageEngine) GetTagsForMetric(metric string) ([]string, error) {
 
 // GetTagValues returns a sorted list of all unique tag values for a given metric and tag key.
 func (e *storageEngine) GetTagValues(metric, tagKey string) ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	// This implementation is a placeholder and can be optimized significantly
@@ -1637,7 +1637,7 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 	_, span := e.tracer.Start(ctx, "StorageEngine.ForceFlush", trace.WithAttributes(attribute.Bool("wait", wait)))
 	defer span.End()
 
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 
@@ -1714,7 +1714,7 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 // CreateSnapshot creates a full, self-contained snapshot of the database state.
 // This method now delegates the call to the dedicated snapshot manager.
 func (e *storageEngine) CreateSnapshot(snapshotDir string) error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 	return e.snapshotManager.CreateFull(context.Background(), snapshotDir)
@@ -1723,7 +1723,7 @@ func (e *storageEngine) CreateSnapshot(snapshotDir string) error {
 // CreateIncrementalSnapshot creates a snapshot containing only changes since the last one.
 // This method now delegates the call to the dedicated snapshot manager.
 func (e *storageEngine) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 	return e.snapshotManager.CreateIncremental(context.Background(), snapshotsBaseDir)

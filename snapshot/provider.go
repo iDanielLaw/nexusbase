@@ -27,8 +27,8 @@ type EngineProvider interface {
 	GetHookManager() hooks.HookManager
 	GetLevelsManager() levels.Manager
 	GetTagIndexManager() indexer.TagIndexManagerInterface
-	GetStringStore() internal.PrivateManagerStore
-	GetSeriesIDStore() internal.PrivateManagerStore
+	GetPrivateStringStore() internal.PrivateManagerStore
+	GetPrivateSeriesIDStore() internal.PrivateManagerStore
 	GetSSTableCompressionType() string
 	GetSequenceNumber() uint64
 
