@@ -228,4 +228,3 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 
 	return manifest, nil
 }
-

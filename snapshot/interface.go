@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/INLOpen/nexusbase/internal"
 )
 
 // SnapshotType defines the type of a snapshot.
@@ -16,7 +18,7 @@ const (
 
 // Info holds metadata about a single snapshot, useful for listing.
 type Info struct {
-	ID        string       // e.g., the timestamp-based directory name
+	ID        string // e.g., the timestamp-based directory name
 	Type      SnapshotType
 	CreatedAt time.Time
 	Size      int64 // Approximate size on disk
@@ -28,6 +30,8 @@ type Info struct {
 type RestoreOptions struct {
 	DataDir string
 	Logger  *slog.Logger
+
+	wrapper internal.PrivateSnapshotHelper
 }
 
 // ManagerInterface defines a high-level API for managing database snapshots.
@@ -41,4 +45,3 @@ type ManagerInterface interface {
 	// ListSnapshots scans a base directory and returns information about all snapshots in the chain.
 	ListSnapshots(snapshotsBaseDir string) ([]Info, error)
 }
-

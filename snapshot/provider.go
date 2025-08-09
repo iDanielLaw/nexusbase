@@ -26,7 +26,7 @@ type EngineProvider interface {
 	GetTracer() trace.Tracer
 	GetHookManager() hooks.HookManager
 	GetLevelsManager() levels.Manager
-	GetTagIndexManager() indexer.TagIndexManager
+	GetTagIndexManager() indexer.TagIndexManagerInterface
 	GetStringStore() internal.PrivateManagerStore
 	GetSeriesIDStore() internal.PrivateManagerStore
 	GetSSTableCompressionType() string
@@ -42,4 +42,3 @@ type EngineProvider interface {
 	GetDeletedSeries() map[string]uint64
 	GetRangeTombstones() map[string][]core.RangeTombstone
 }
-

@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +11,8 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/internal"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -22,12 +23,27 @@ const (
 
 // manager implements the ManagerInterface.
 type manager struct {
-	provider EngineProvider
+	provider          EngineProvider
+	writeManifestFunc func(w io.Writer, manifest *core.SnapshotManifest) error
+
+	wrapper internal.PrivateSnapshotHelper
 }
 
 // NewManager creates a new snapshot manager.
 func NewManager(provider EngineProvider) ManagerInterface {
-	return &manager{provider: provider}
+	return NewManagerWithTesting(provider, newHelperSnapshot())
+}
+
+func NewManagerWithTesting(provider EngineProvider, wrapper internal.PrivateSnapshotHelper) ManagerInterface {
+	if wrapper == nil {
+		wrapper = newHelperSnapshot()
+	}
+
+	return &manager{
+		provider:          provider,
+		writeManifestFunc: writeManifestBinary,
+		wrapper:           wrapper,
+	}
 }
 
 func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error) {
@@ -47,12 +63,12 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	}
 
 	// 1. Prepare snapshot directory: ensure it's clean.
-	if _, statErr := os.Stat(snapshotDir); !os.IsNotExist(statErr) {
-		if removeErr := os.RemoveAll(snapshotDir); removeErr != nil {
+	if _, statErr := m.wrapper.Stat(snapshotDir); !os.IsNotExist(statErr) {
+		if removeErr := m.wrapper.RemoveAll(snapshotDir); removeErr != nil {
 			return fmt.Errorf("failed to clean existing snapshot directory %s: %w", snapshotDir, removeErr)
 		}
 	}
-	if mkdirErr := os.MkdirAll(snapshotDir, 0755); mkdirErr != nil {
+	if mkdirErr := m.wrapper.MkdirAll(snapshotDir, 0755); mkdirErr != nil {
 		return fmt.Errorf("failed to create snapshot directory: %s", mkdirErr)
 	}
 
@@ -107,7 +123,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 				return fmt.Errorf("failed to create sst subdirectory in snapshot: %w", err)
 			}
-			if copyErr := linkOrCopyFile(table.FilePath(), destPath); copyErr != nil {
+			if copyErr := m.wrapper.LinkOrCopyFile(table.FilePath(), destPath); copyErr != nil {
 				return fmt.Errorf("failed to link or copy SSTable %s to %s for snapshot: %w", table.FilePath(), destPath, copyErr)
 			}
 			levelManifest.Tables = append(levelManifest.Tables, core.SSTableMetadata{
@@ -134,22 +150,22 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	// 7. Serialize and save auxiliary state files.
 	if len(deletedSeriesToSave) > 0 {
 		manifest.DeletedSeriesFile = "deleted_series.json"
-		if err := saveJSON(deletedSeriesToSave, filepath.Join(snapshotDir, manifest.DeletedSeriesFile)); err != nil {
+		if err := m.wrapper.SaveJSON(deletedSeriesToSave, filepath.Join(snapshotDir, manifest.DeletedSeriesFile)); err != nil {
 			return fmt.Errorf("failed to save deleted_series for snapshot: %w", err)
 		}
 	}
 	if len(rangeTombstonesToSave) > 0 {
 		manifest.RangeTombstonesFile = "range_tombstones.json"
-		if err := saveJSON(rangeTombstonesToSave, filepath.Join(snapshotDir, manifest.RangeTombstonesFile)); err != nil {
+		if err := m.wrapper.SaveJSON(rangeTombstonesToSave, filepath.Join(snapshotDir, manifest.RangeTombstonesFile)); err != nil {
 			return fmt.Errorf("failed to save range_tombstones for snapshot: %w", err)
 		}
 	}
 
 	// 8. Copy mapping and WAL files.
-	if err := copyAuxiliaryFile(concreteStringStore.GetLogFilePath(), "string_mapping.log", snapshotDir, &manifest.StringMappingFile, p.GetLogger()); err != nil {
+	if err := m.wrapper.CopyAuxiliaryFile(concreteStringStore.GetLogFilePath(), "string_mapping.log", snapshotDir, &manifest.StringMappingFile, p.GetLogger()); err != nil {
 		return err
 	}
-	if err := copyAuxiliaryFile(concreteSeriesIDStore.GetLogFilePath(), "series_mapping.log", snapshotDir, &manifest.SeriesMappingFile, p.GetLogger()); err != nil {
+	if err := m.wrapper.CopyAuxiliaryFile(concreteSeriesIDStore.GetLogFilePath(), "series_mapping.log", snapshotDir, &manifest.SeriesMappingFile, p.GetLogger()); err != nil {
 		return err
 	}
 	srcWALDir := p.GetWALPath()
@@ -159,7 +175,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 		if err := os.MkdirAll(destWALDir, 0755); err != nil {
 			return fmt.Errorf("failed to create wal directory in snapshot: %w", err)
 		}
-		if err := linkOrCopyDirectoryContents(srcWALDir, destWALDir); err != nil {
+		if err := m.wrapper.LinkOrCopyDirectoryContents(srcWALDir, destWALDir); err != nil {
 			return fmt.Errorf("failed to copy WAL directory to snapshot: %w", err)
 		}
 		manifest.WALFile = destWALDirName
@@ -173,13 +189,13 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	if createErr != nil {
 		return fmt.Errorf("failed to create snapshot manifest file %s: %w", manifestPath, createErr)
 	}
-	if writeErr := writeManifestBinary(manifestFile, &manifest); writeErr != nil {
+	if writeErr := m.writeManifestFunc(manifestFile, &manifest); writeErr != nil {
 		manifestFile.Close()
 		return fmt.Errorf("failed to write binary snapshot manifest: %w", writeErr)
 	}
 	manifestFile.Close()
 
-	if err := os.WriteFile(filepath.Join(snapshotDir, CURRENT_FILE_NAME), []byte(uniqueManifestFileName), 0644); err != nil {
+	if err := m.wrapper.WriteFile(filepath.Join(snapshotDir, CURRENT_FILE_NAME), []byte(uniqueManifestFileName), 0644); err != nil {
 		return fmt.Errorf("failed to write CURRENT file to snapshot directory: %w", err)
 	}
 
@@ -212,44 +228,49 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 	if restoreLogger == nil {
 		restoreLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+
+	if opts.wrapper == nil {
+		opts.wrapper = newHelperSnapshot()
+	}
+
 	restoreLogger = restoreLogger.With("component", "RestoreFromSnapshot")
 	restoreLogger.Info("Starting restore from snapshot.", "snapshot_dir", snapshotDir, "target_data_dir", opts.DataDir)
 
 	// 1. Safety checks
-	if _, err := os.Stat(snapshotDir); os.IsNotExist(err) {
+	if _, err := opts.wrapper.Stat(snapshotDir); os.IsNotExist(err) {
 		return fmt.Errorf("snapshot directory %s does not exist", snapshotDir)
 	}
 	currentFileInSnapshotPath := filepath.Join(snapshotDir, CURRENT_FILE_NAME)
-	manifestFileNameBytes, err := os.ReadFile(currentFileInSnapshotPath)
+	manifestFileNameBytes, err := opts.wrapper.ReadFile(currentFileInSnapshotPath)
 	if err != nil {
 		return fmt.Errorf("failed to read CURRENT file from snapshot directory %s: %w", snapshotDir, err)
 	}
 	manifestFileName := strings.TrimSpace(string(manifestFileNameBytes))
 	manifestFilePath := filepath.Join(snapshotDir, manifestFileName)
-	if _, err := os.Stat(manifestFilePath); os.IsNotExist(err) {
+	if _, err := opts.wrapper.Stat(manifestFilePath); os.IsNotExist(err) {
 		return fmt.Errorf("snapshot manifest file %s (from CURRENT) not found in %s", manifestFileName, snapshotDir)
 	}
 
 	// 2. Create a temporary directory for restore.
-	tempRestoreDir, err := os.MkdirTemp(filepath.Dir(opts.DataDir), filepath.Base(opts.DataDir)+".restore-tmp-*")
+	tempRestoreDir, err := opts.wrapper.MkdirTemp(filepath.Dir(opts.DataDir), filepath.Base(opts.DataDir)+".restore-tmp-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary restore directory: %w", err)
 	}
 	restoreLogger.Info("Created temporary directory for restore.", "temp_dir", tempRestoreDir)
 	defer func() {
-		if _, statErr := os.Stat(tempRestoreDir); !os.IsNotExist(statErr) {
+		if _, statErr := opts.wrapper.Stat(tempRestoreDir); !os.IsNotExist(statErr) {
 			restoreLogger.Info("Cleaning up temporary restore directory.", "temp_dir", tempRestoreDir)
-			os.RemoveAll(tempRestoreDir)
+			opts.wrapper.RemoveAll(tempRestoreDir)
 		}
 	}()
 
 	// 3. Read manifest and copy all files listed.
-	manifestFile, err := os.Open(manifestFilePath)
+	manifestFile, err := opts.wrapper.Open(manifestFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to read snapshot manifest file %s: %w", manifestFilePath, err)
 	}
 	defer manifestFile.Close()
-	manifest, err := readManifestBinary(manifestFile)
+	manifest, err := opts.wrapper.ReadManifestBinary(manifestFile)
 	if err != nil {
 		return fmt.Errorf("failed to read binary snapshot manifest: %w", err)
 	}
@@ -258,20 +279,21 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 	// 3a. Pre-create all necessary subdirectories in the temporary location.
 	requiredDirs := []string{
 		filepath.Join(tempRestoreDir, "sst"),
-		filepath.Join(tempRestoreDir, "index_sst"),
+		// Use the constant from the indexer package to avoid hardcoding the directory name.
+		filepath.Join(tempRestoreDir, indexer.IndexSSTDirName),
 		filepath.Join(tempRestoreDir, "wal"),
 	}
 	for _, dir := range requiredDirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := opts.wrapper.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to pre-create required subdirectory %s: %w", dir, err)
 		}
 	}
 
 	// Restore the tag index
-	srcIndexDir := filepath.Join(snapshotDir, "index")
+	srcIndexDir := filepath.Join(snapshotDir, indexer.IndexDirName)
 	destIndexDir := filepath.Join(tempRestoreDir, "index_sst")
-	if _, err := os.Stat(srcIndexDir); !os.IsNotExist(err) {
-		if err := copyDirectoryContents(srcIndexDir, destIndexDir); err != nil {
+	if _, err := opts.wrapper.Stat(srcIndexDir); !os.IsNotExist(err) {
+		if err := opts.wrapper.CopyDirectoryContents(srcIndexDir, destIndexDir); err != nil {
 			return fmt.Errorf("failed to copy tag index files from snapshot: %w", err)
 		}
 	}
@@ -291,11 +313,11 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 		}
 		srcPath := filepath.Join(snapshotDir, fileName)
 		destPath := filepath.Join(tempRestoreDir, fileName)
-		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		if _, err := opts.wrapper.Stat(srcPath); os.IsNotExist(err) {
 			restoreLogger.Warn("File listed in manifest not found in snapshot directory, skipping.", "file", fileName)
 			continue
 		}
-		if err := CopyFile(srcPath, destPath); err != nil {
+		if err := opts.wrapper.CopyFile(srcPath, destPath); err != nil {
 			return fmt.Errorf("failed to copy file %s to temporary restore directory: %w", srcPath, err)
 		}
 		restoreLogger.Debug("Restored file to temporary directory.", "file", fileName)
@@ -305,13 +327,13 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 	if manifest.WALFile != "" {
 		srcWALPath := filepath.Join(snapshotDir, manifest.WALFile)
 		destWALPath := filepath.Join(tempRestoreDir, manifest.WALFile)
-		if stat, err := os.Stat(srcWALPath); err == nil {
+		if stat, err := opts.wrapper.Stat(srcWALPath); err == nil {
 			if stat.IsDir() {
-				if err := copyDirectoryContents(srcWALPath, destWALPath); err != nil {
+				if err := opts.wrapper.CopyDirectoryContents(srcWALPath, destWALPath); err != nil {
 					return fmt.Errorf("failed to copy WAL directory from snapshot: %w", err)
 				}
 			} else {
-				if err := CopyFile(srcWALPath, destWALPath); err != nil {
+				if err := opts.wrapper.CopyFile(srcWALPath, destWALPath); err != nil {
 					return fmt.Errorf("failed to copy legacy WAL file from snapshot: %w", err)
 				}
 			}
@@ -321,13 +343,13 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 	}
 
 	// 4. Final swap
-	if _, err := os.Stat(opts.DataDir); !os.IsNotExist(err) {
+	if _, err := opts.wrapper.Stat(opts.DataDir); !os.IsNotExist(err) {
 		restoreLogger.Info("Removing original data directory before replacing.", "original_data_dir", opts.DataDir)
-		if err := os.RemoveAll(opts.DataDir); err != nil {
+		if err := opts.wrapper.RemoveAll(opts.DataDir); err != nil {
 			return fmt.Errorf("failed to remove original data directory %s: %w", opts.DataDir, err)
 		}
 	}
-	if err := os.Rename(tempRestoreDir, opts.DataDir); err != nil {
+	if err := opts.wrapper.Rename(tempRestoreDir, opts.DataDir); err != nil {
 		return fmt.Errorf("failed to rename temporary restore directory %s to %s: %w", tempRestoreDir, opts.DataDir, err)
 	}
 
@@ -340,107 +362,3 @@ func RestoreFromLatest(opts RestoreOptions, snapshotsBaseDir string) error {
 	// This is a placeholder for brevity.
 	return fmt.Errorf("RestoreFromLatest not implemented yet")
 }
-
-// --- Helper Functions ---
-
-func saveJSON(v interface{}, path string) error {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-func copyAuxiliaryFile(srcPath, destFileName, snapshotDir string, manifestField *string, logger *slog.Logger) error {
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		logger.Warn("Source file does not exist, skipping copy for snapshot.", "path", srcPath)
-		return nil
-	}
-	destPath := filepath.Join(snapshotDir, destFileName)
-	if err := linkOrCopyFile(srcPath, destPath); err != nil {
-		return fmt.Errorf("failed to link or copy %s to snapshot: %w", destFileName, err)
-	}
-	*manifestField = destFileName
-	logger.Info("Copied auxiliary file to snapshot.", "source", srcPath, "destination", destPath)
-	return nil
-}
-
-func copyDirectoryContents(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return fmt.Errorf("failed to read source directory %s: %w", src, err)
-	}
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-
-		if entry.IsDir() {
-			if err := os.MkdirAll(dstPath, 0755); err != nil {
-				return fmt.Errorf("failed to create destination subdirectory %s: %w", dstPath, err)
-			}
-			if err := copyDirectoryContents(srcPath, dstPath); err != nil {
-				return err
-			}
-		} else {
-			if err := CopyFile(srcPath, dstPath); err != nil {
-				return fmt.Errorf("failed to copy file from %s to %s: %w", srcPath, dstPath, err)
-			}
-		}
-	}
-	return nil
-}
-
-func linkOrCopyFile(src, dst string) error {
-	err := os.Link(src, dst)
-	if err == nil {
-		return nil
-	}
-	return CopyFile(src, dst)
-}
-
-func linkOrCopyDirectoryContents(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return fmt.Errorf("failed to read source directory %s: %w", src, err)
-	}
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-
-		if entry.IsDir() {
-			if err := os.MkdirAll(dstPath, 0755); err != nil {
-				return fmt.Errorf("failed to create destination subdirectory %s: %w", dstPath, err)
-			}
-			if err := linkOrCopyDirectoryContents(srcPath, dstPath); err != nil {
-				return err
-			}
-		} else {
-			if err := linkOrCopyFile(srcPath, dstPath); err != nil {
-				return fmt.Errorf("failed to link or copy file from %s to %s: %w", srcPath, dstPath, err)
-			}
-		}
-	}
-	return nil
-}
-
-// CopyFile copies a file from src to dst.
-func CopyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	if err != nil {
-		return err
-	}
-	return out.Close()
-}
-
