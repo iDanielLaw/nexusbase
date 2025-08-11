@@ -14,27 +14,27 @@ import (
 )
 
 // Helper for memtable tests to create a valid encoded FieldValues byte slice from a simple string value.
-func makeTestEventValue(t *testing.T, val string) []byte {
-	t.Helper()
+func makeTestEventValue(tb testing.TB, val string) []byte {
+	tb.Helper()
 	// An empty string value in the test case represents a nil value for tombstones.
 	if val == "" {
 		return nil
 	}
 	fields, err := core.NewFieldValuesFromMap(map[string]interface{}{"value": val})
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	encoded, err := fields.Encode()
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	return encoded
 }
 
 // Helper to decode and extract the simple "value" field for verification.
-func getTestEventValue(t *testing.T, data []byte) string {
-	t.Helper()
+func getTestEventValue(tb testing.TB, data []byte) string {
+	tb.Helper()
 	if data == nil {
 		return ""
 	}
 	fields, err := core.DecodeFieldsFromBytes(data)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	if val, ok := fields["value"]; ok {
 		if strVal, okStr := val.ValueString(); okStr {
 			return strVal
@@ -602,4 +602,202 @@ func TestMemtable_Iterator_ComplexPutDelete(t *testing.T) {
 			assert.Equal(t, expected.pointID, actualEntries[i].PointID, "PointID mismatch at index %d", i)
 		}
 	})
+}
+
+// TestMemtableIterator_Empty tests the iterator on an empty memtable.
+func TestMemtableIterator_Empty(t *testing.T) {
+	mt := NewMemtable(1024, &utils.SystemClock{})
+
+	// Ascending
+	iterAsc := mt.NewIterator(nil, nil, core.Ascending)
+	assert.False(t, iterAsc.Next(), "Next() on empty memtable should be false for ascending")
+	key, val, et, pid := iterAsc.At()
+	assert.Nil(t, key)
+	assert.Nil(t, val)
+	assert.Equal(t, core.EntryType(0), et)
+	assert.Equal(t, uint64(0), pid)
+	assert.NoError(t, iterAsc.Error())
+	assert.NoError(t, iterAsc.Close())
+
+	// Descending
+	iterDesc := mt.NewIterator(nil, nil, core.Descending)
+	assert.False(t, iterDesc.Next(), "Next() on empty memtable should be false for descending")
+	key, val, et, pid = iterDesc.At()
+	assert.Nil(t, key)
+	assert.Nil(t, val)
+	assert.Equal(t, core.EntryType(0), et)
+	assert.Equal(t, uint64(0), pid)
+	assert.NoError(t, iterDesc.Error())
+	assert.NoError(t, iterDesc.Close())
+}
+
+// TestMemtableIterator_SingleItem tests the iterator on a memtable with one item.
+func TestMemtableIterator_SingleItem(t *testing.T) {
+	mt := NewMemtable(1024, &utils.SystemClock{})
+	key1 := []byte("key1")
+	val1 := makeTestEventValue(t, "val1")
+	mt.Put(key1, val1, core.EntryTypePutEvent, 1)
+
+	// Ascending
+	t.Run("Ascending", func(t *testing.T) {
+		iter := mt.NewIterator(nil, nil, core.Ascending)
+		defer iter.Close()
+
+		// First Next() should succeed
+		require.True(t, iter.Next(), "First Next() should succeed")
+		key, val, et, pid := iter.At()
+		assert.Equal(t, key1, key)
+		assert.Equal(t, val1, val)
+		assert.Equal(t, core.EntryTypePutEvent, et)
+		assert.Equal(t, uint64(1), pid)
+
+		// Second Next() should fail
+		assert.False(t, iter.Next(), "Second Next() should fail")
+	})
+
+	// Descending
+	t.Run("Descending", func(t *testing.T) {
+		iter := mt.NewIterator(nil, nil, core.Descending)
+		defer iter.Close()
+
+		// First Next() should succeed
+		require.True(t, iter.Next(), "First Next() should succeed")
+		key, val, et, pid := iter.At()
+		assert.Equal(t, key1, key)
+		assert.Equal(t, val1, val)
+		assert.Equal(t, core.EntryTypePutEvent, et)
+		assert.Equal(t, uint64(1), pid)
+
+		// Second Next() should fail
+		assert.False(t, iter.Next(), "Second Next() should fail")
+	})
+}
+
+// TestMemtableIterator_DescendingBoundsEdgeCase tests a specific edge case for descending iteration
+// where the initial seek lands on a key that is >= endKey, requiring the iterator to advance
+// to the next distinct key before starting.
+func TestMemtableIterator_DescendingBoundsEdgeCase(t *testing.T) {
+	mt := NewMemtable(1024, &utils.SystemClock{})
+	keys := []string{"a", "b", "d", "e"} // Note: "c" is missing
+	for i, k := range keys {
+		valueBytes := makeTestEventValue(t, "v"+k)
+		mt.Put([]byte(k), valueBytes, core.EntryTypePutEvent, uint64(i+1))
+	}
+
+	// Range: startKey="b", endKey="d" (exclusive). Expected: "b"
+	// The iterator should start by seeking to "d", realize it's out of bounds,
+	// advance to the next distinct key ("b"), and yield that.
+	startKey := []byte("b")
+	endKey := []byte("d")
+	iter := mt.NewIterator(startKey, endKey, core.Descending)
+	defer iter.Close()
+
+	// 1. Expect "b"
+	require.True(t, iter.Next(), "Should find key 'b'")
+	key, _, _, _ := iter.At()
+	assert.Equal(t, []byte("b"), key)
+
+	// 2. Expect no more items
+	assert.False(t, iter.Next(), "Should be no more items in range")
+}
+
+// TestMemtableIterator_Close ensures the Close method works correctly.
+func TestMemtableIterator_Close(t *testing.T) {
+	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt.Put([]byte("a"), makeTestEventValue(t, "a"), core.EntryTypePutEvent, 1)
+
+	iter := mt.NewIterator(nil, nil, core.Ascending)
+
+	// First close and subsequent closes should be safe and not panic
+	require.NoError(t, iter.Close())
+	require.NoError(t, iter.Close())
+
+	// After close, valid should be false and At() should return nils
+	assert.False(t, iter.valid, "iterator should be invalid after close")
+	key, _, _, _ := iter.At()
+	assert.Nil(t, key, "key should be nil after close")
+}
+
+// --- Benchmarks ---
+
+// createBenchmarkMemtable creates and populates a memtable for benchmark tests.
+func createBenchmarkMemtable(b *testing.B, numItems int, versionsPerKey int) *Memtable {
+	b.Helper()
+	mt := NewMemtable(int64(numItems*versionsPerKey*200), &utils.SystemClock{}) // Estimate size
+	for i := 0; i < numItems; i++ {
+		key := []byte(fmt.Sprintf("key-%09d", i))
+		for v := 0; v < versionsPerKey; v++ {
+			val := makeTestEventValue(b, fmt.Sprintf("value-%09d-v%d", i, v))
+			// PointID is descending to make newer versions "smaller" in the skiplist
+			pointID := uint64(i*versionsPerKey + (versionsPerKey - v))
+			err := mt.Put(key, val, core.EntryTypePutEvent, pointID)
+			if err != nil {
+				b.Fatalf("Failed to setup benchmark memtable: %v", err)
+			}
+		}
+	}
+	return mt
+}
+
+func BenchmarkMemtableIterator_Ascending_FullScan(b *testing.B) {
+	mt := createBenchmarkMemtable(b, 10000, 1) // 10,000 items, 1 version each
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		iter := mt.NewIterator(nil, nil, core.Ascending)
+		for iter.Next() {
+			// Access the data to prevent the compiler from optimizing the loop away.
+			_, _, _, _ = iter.At()
+		}
+		iter.Close() // Must close to release the lock
+	}
+}
+
+func BenchmarkMemtableIterator_Descending_FullScan(b *testing.B) {
+	mt := createBenchmarkMemtable(b, 10000, 1) // 10,000 items, 1 version each
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		iter := mt.NewIterator(nil, nil, core.Descending)
+		for iter.Next() {
+			_, _, _, _ = iter.At()
+		}
+		iter.Close()
+	}
+}
+
+func BenchmarkMemtableIterator_Ascending_RangeScan(b *testing.B) {
+	const numItems = 10000
+	mt := createBenchmarkMemtable(b, numItems, 1)
+	// Scan about 10% of the keys in the middle
+	startKey := []byte(fmt.Sprintf("key-%09d", numItems/2))
+	endKey := []byte(fmt.Sprintf("key-%09d", numItems/2+numItems/10))
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		iter := mt.NewIterator(startKey, endKey, core.Ascending)
+		for iter.Next() {
+			_, _, _, _ = iter.At()
+		}
+		iter.Close()
+	}
+}
+
+func BenchmarkMemtableIterator_Ascending_MultiVersion(b *testing.B) {
+	// 10,000 distinct keys, but 5 versions each. The iterator must skip 4 versions for each key.
+	mt := createBenchmarkMemtable(b, 10000, 5)
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		iter := mt.NewIterator(nil, nil, core.Ascending)
+		for iter.Next() {
+			_, _, _, _ = iter.At()
+		}
+		iter.Close()
+	}
 }
