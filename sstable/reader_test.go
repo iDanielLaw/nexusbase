@@ -134,9 +134,9 @@ func TestSSTable_readBlock_ErrorPaths(t *testing.T) {
 	})
 }
 
-func TestSSTable_VerifyIntegrity_Failures(t *testing.T) {
-	// Create a base valid SSTable to modify in memory for tests
-	baseSST := &SSTable{
+// getBaseSSTForIntegrityTest creates a new base SSTable instance for integrity tests.
+func getBaseSSTForIntegrityTest() *SSTable {
+	return &SSTable{
 		minKey: []byte("b"),
 		maxKey: []byte("d"),
 		index: &Index{
@@ -147,9 +147,11 @@ func TestSSTable_VerifyIntegrity_Failures(t *testing.T) {
 		},
 		logger: slog.Default(),
 	}
+}
 
+func TestSSTable_VerifyIntegrity(t *testing.T) {
 	t.Run("MinKeyGreaterThanMaxKey", func(t *testing.T) {
-		sst := *baseSST          // Copy
+		sst := getBaseSSTForIntegrityTest()
 		sst.minKey = []byte("e") // "e" > "d"
 		sst.maxKey = []byte("d")
 
@@ -168,7 +170,8 @@ func TestSSTable_VerifyIntegrity_Failures(t *testing.T) {
 	})
 
 	t.Run("UnsortedIndex", func(t *testing.T) {
-		sst := *baseSST // Copy
+		// Create a fresh instance for the test to avoid copying the lock.
+		sst := getBaseSSTForIntegrityTest()
 		// Create a new index with unsorted entries
 		sst.index = &Index{
 			entries: []BlockIndexEntry{
