@@ -192,8 +192,8 @@ func newMockPrivateManagerStore(path string) *mockPrivateManagerStore {
 }
 
 func (m *mockPrivateManagerStore) GetLogFilePath() string {
-	m.Called()
-	return m.path
+	args := m.Called()
+	return args.String(0)
 }
 
 // --- mock Helper
@@ -377,8 +377,8 @@ func TestManager_CreateFull(t *testing.T) {
 	provider.On("GetDeletedSeries").Return()
 	provider.On("GetRangeTombstones").Return()
 	provider.tagIndexManager.On("CreateSnapshot", filepath.Join(snapshotDir, "index")).Return(nil)
-	provider.stringStore.On("GetLogFilePath").Return()
-	provider.seriesIDStore.On("GetLogFilePath").Return()
+	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
+	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 
 	// 2. Execution
 	manager := NewManager(provider)
@@ -1425,4 +1425,80 @@ func TestRestoreFromFull_RenameError(t *testing.T) {
 	require.NotEmpty(t, tempRestoreDir, "Temporary restore directory path should have been captured")
 	_, statErr := os.Stat(tempRestoreDir)
 	assert.True(t, os.IsNotExist(statErr), "Temporary restore directory should be cleaned up on failure")
+}
+
+func TestRestoreFromFull_TargetIsAFile(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	snapshotDir := filepath.Join(tempDir, "snapshot_target_is_file")
+	targetDataDir := filepath.Join(tempDir, "target_is_a_file")
+
+	// Create a minimal valid snapshot
+	require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+	manifestFileName := "MANIFEST_1.bin"
+	manifestPath := filepath.Join(snapshotDir, manifestFileName)
+	f, err := os.Create(manifestPath)
+	require.NoError(t, err)
+	require.NoError(t, writeManifestBinary(f, &core.SnapshotManifest{}))
+	f.Close()
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+	// Create the target as a file instead of a directory
+	require.NoError(t, os.WriteFile(targetDataDir, []byte("i am a file"), 0644))
+
+	// 2. Execution
+	restoreOpts := RestoreOptions{DataDir: targetDataDir}
+	err = RestoreFromFull(restoreOpts, snapshotDir)
+
+	// 3. Verification
+	// The operation should succeed. os.RemoveAll works on files, so the old file
+	// is removed, and then the temporary directory is renamed to the target path.
+	require.NoError(t, err, "Restore should succeed even if the target data directory is a file")
+
+	// Verify that the target is now a directory.
+	info, statErr := os.Stat(targetDataDir)
+	require.NoError(t, statErr, "Target data path should exist after restore")
+	assert.True(t, info.IsDir(), "Target data path should be a directory after restore")
+}
+
+func TestCreateFull_AuxiliaryFileNotExist(t *testing.T) {
+	// This test ensures that if an auxiliary file (e.g., string mapping log)
+	// does not exist, the snapshot creation proceeds without error, and the
+	// manifest field is simply left empty.
+
+	// 1. Setup
+	tempDir := t.TempDir()
+	snapshotDir := filepath.Join(tempDir, "snapshot_aux_missing")
+	dataDir := filepath.Join(tempDir, "data_aux_missing")
+	require.NoError(t, os.MkdirAll(dataDir, 0755))
+
+	provider := newMockEngineProvider(t, dataDir)
+
+	// Simulate non-existent auxiliary files by having GetLogFilePath return an empty string
+	provider.stringStore.On("GetLogFilePath").Return("")
+	provider.seriesIDStore.On("GetLogFilePath").Return("")
+
+	// Set up other mock expectations for a successful run
+	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetDeletedSeries").Return()
+	provider.On("GetRangeTombstones").Return()
+	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+
+	// 2. Execution
+	manager := NewManager(provider)
+	err := manager.CreateFull(context.Background(), snapshotDir)
+	require.NoError(t, err, "Snapshot creation should succeed even if auxiliary files are missing")
+
+	// 3. Verification
+	currentBytes, err := os.ReadFile(filepath.Join(snapshotDir, "CURRENT"))
+	require.NoError(t, err)
+	manifestFileName := string(currentBytes)
+	f, err := os.Open(filepath.Join(snapshotDir, manifestFileName))
+	require.NoError(t, err)
+	defer f.Close()
+	manifest, err := readManifestBinary(f)
+	require.NoError(t, err)
+
+	assert.Empty(t, manifest.StringMappingFile, "StringMappingFile should be empty in manifest")
+	assert.Empty(t, manifest.SeriesMappingFile, "SeriesMappingFile should be empty in manifest")
 }

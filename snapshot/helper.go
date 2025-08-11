@@ -136,6 +136,10 @@ func (h *helperSnapshot) ReadManifestBinary(r io.Reader) (*core.SnapshotManifest
 }
 
 func (h *helperSnapshot) CopyAuxiliaryFile(srcPath, destFileName, snapshotDir string, manifestField *string, logger *slog.Logger) error {
+	if srcPath == "" {
+		logger.Debug("Source path for auxiliary file is empty, skipping copy.", "file", destFileName)
+		return nil
+	}
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
 		logger.Warn("Source file does not exist, skipping copy for snapshot.", "path", srcPath)
 		return nil
