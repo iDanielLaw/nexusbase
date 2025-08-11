@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -49,18 +48,13 @@ func TestStorageEngine_PeriodicFlush_Success(t *testing.T) {
 	}
 
 	engine, err := NewStorageEngine(opts)
-	if err != nil {
-		t.Fatalf("NewStorageEngine failed: %v", err)
-	}
-	if err = engine.Start(); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
+	require.NoError(t, err, "NewStorageEngine should not fail")
+	err = engine.Start()
+	require.NoError(t, err, "Start should not fail")
 	defer engine.Close()
 
 	// Check initial state
-	if flushCount := testMetrics.FlushTotal.Value(); flushCount != 0 {
-		t.Fatalf("Initial flush count should be 0, got %d", flushCount)
-	}
+	require.Equal(t, int64(0), testMetrics.FlushTotal.Value(), "Initial flush count should be 0")
 
 	point := HelperDataPoint(
 		t,
@@ -71,27 +65,19 @@ func TestStorageEngine_PeriodicFlush_Success(t *testing.T) {
 	)
 
 	// Put one data point, which should not trigger a size-based flush
-	if err := engine.Put(context.Background(), point); err != nil {
-		t.Fatalf("Put failed: %v", err)
-	}
+	require.NoError(t, engine.Put(context.Background(), point), "Put should not fail")
 
 	// Wait for a duration longer than the flush interval
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify that a flush has occurred
-	if flushCount := testMetrics.FlushTotal.Value(); flushCount != 1 {
-		t.Errorf("Expected flush count to be 1 after interval, got %d", flushCount)
-	}
+	assert.Equal(t, int64(1), testMetrics.FlushTotal.Value(), "Expected flush count to be 1 after interval")
 
 	// Verify that an SSTable file was created in L0
 	sstDir := filepath.Join(tempDir, "sst")
 	files, err := os.ReadDir(sstDir)
-	if err != nil {
-		t.Fatalf("Could not read sst directory: %v", err)
-	}
-	if len(files) == 0 {
-		t.Error("Expected at least one SSTable file to be created by periodic flush, but found none")
-	}
+	require.NoError(t, err, "Could not read sst directory")
+	assert.NotEmpty(t, files, "Expected at least one SSTable file to be created by periodic flush, but found none")
 }
 
 // TestStorageEngine_PeriodicFlush_NoData verifies that the periodic flush is not
@@ -113,21 +99,16 @@ func TestStorageEngine_PeriodicFlush_NoData(t *testing.T) {
 	}
 
 	engine, err := NewStorageEngine(opts)
-	if err != nil {
-		t.Fatalf("NewStorageEngine failed: %v", err)
-	}
-	if err = engine.Start(); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
+	require.NoError(t, err, "NewStorageEngine should not fail")
+	err = engine.Start()
+	require.NoError(t, err, "Start should not fail")
 	defer engine.Close()
 
 	// Wait for a duration longer than the flush interval
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify that no flush has occurred because no data was written
-	if flushCount := testMetrics.FlushTotal.Value(); flushCount != 0 {
-		t.Errorf("Expected flush count to be 0 when no data is written, got %d", flushCount)
-	}
+	assert.Equal(t, int64(0), testMetrics.FlushTotal.Value(), "Expected flush count to be 0 when no data is written")
 }
 
 // TestStorageEngine_PeriodicFlush_SizeTriggerFirst verifies that a size-based flush
@@ -149,12 +130,9 @@ func TestStorageEngine_PeriodicFlush_SizeTriggerFirst(t *testing.T) {
 	}
 
 	engine, err := NewStorageEngine(opts)
-	if err != nil {
-		t.Fatalf("NewStorageEngine failed: %v", err)
-	}
-	if err = engine.Start(); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
+	require.NoError(t, err, "NewStorageEngine should not fail")
+	err = engine.Start()
+	require.NoError(t, err, "Start should not fail")
 	defer engine.Close()
 
 	// Put enough data to exceed the memtable threshold
@@ -169,9 +147,7 @@ func TestStorageEngine_PeriodicFlush_SizeTriggerFirst(t *testing.T) {
 			int64(i),
 			fields,
 		)
-		if err := engine.Put(context.Background(), point); err != nil {
-			t.Fatalf("Put failed: %v", err)
-		}
+		require.NoError(t, engine.Put(context.Background(), point), "Put should not fail")
 	}
 
 	// The size-based flush should be triggered almost immediately by the Put call.
@@ -179,9 +155,7 @@ func TestStorageEngine_PeriodicFlush_SizeTriggerFirst(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Verify that a flush has occurred due to size
-	if flushCount := testMetrics.FlushTotal.Value(); flushCount != 1 {
-		t.Errorf("Expected flush count to be 1 after size trigger, got %d", flushCount)
-	}
+	assert.Equal(t, int64(1), testMetrics.FlushTotal.Value(), "Expected flush count to be 1 after size trigger")
 }
 
 // TestStorageEngine_TriggerPeriodicFlush unit tests the triggerPeriodicFlush function directly.
@@ -222,26 +196,16 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 		// We don't use Put to avoid the complexity of the full write path.
 		concreteEngine.mutableMemtable.Put([]byte("key1"), makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
 		originalMutable := concreteEngine.mutableMemtable
-		if originalMutable.Size() == 0 {
-			t.Fatal("Mutable memtable should have data after Put")
-		}
+		require.NotZero(t, originalMutable.Size(), "Mutable memtable should have data after Put")
 
 		// Action
 		concreteEngine.triggerPeriodicFlush()
 
 		// Assertions
-		if len(concreteEngine.immutableMemtables) != 1 {
-			t.Errorf("Expected 1 immutable memtable, got %d", len(concreteEngine.immutableMemtables))
-		}
-		if concreteEngine.immutableMemtables[0] != originalMutable {
-			t.Error("The original mutable memtable was not moved to the immutable list")
-		}
-		if concreteEngine.mutableMemtable.Size() != 0 {
-			t.Errorf("Expected new mutable memtable to be empty, but size is %d", concreteEngine.mutableMemtable.Size())
-		}
-		if concreteEngine.mutableMemtable == originalMutable {
-			t.Error("Expected mutable memtable to be a new instance, but it's the same")
-		}
+		assert.Len(t, concreteEngine.immutableMemtables, 1, "Expected 1 immutable memtable")
+		assert.Equal(t, originalMutable, concreteEngine.immutableMemtables[0], "The original mutable memtable was not moved to the immutable list")
+		assert.Zero(t, concreteEngine.mutableMemtable.Size(), "Expected new mutable memtable to be empty")
+		assert.NotEqual(t, originalMutable, concreteEngine.mutableMemtable, "Expected mutable memtable to be a new instance")
 
 		// Check if flushChan was signaled. Since there's no background loop consuming it,
 		// we should be able to receive the signal.
@@ -249,7 +213,7 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 		case <-concreteEngine.flushChan:
 			// Success
 		default:
-			t.Error("Expected flushChan to be signaled, but it was not")
+			t.Fatal("Expected flushChan to be signaled, but it was not")
 		}
 	})
 
@@ -271,12 +235,8 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 		concreteEngine.triggerPeriodicFlush()
 
 		// Assertions
-		if len(concreteEngine.immutableMemtables) != 0 {
-			t.Errorf("Expected 0 immutable memtables, got %d", len(concreteEngine.immutableMemtables))
-		}
-		if concreteEngine.mutableMemtable != originalMutable {
-			t.Error("Mutable memtable should not have been replaced")
-		}
+		assert.Empty(t, concreteEngine.immutableMemtables, "Expected 0 immutable memtables")
+		assert.Equal(t, originalMutable, concreteEngine.mutableMemtable, "Mutable memtable should not have been replaced")
 	})
 
 	t.Run("Skip_ImmutableIsNotEmpty", func(t *testing.T) {
@@ -305,12 +265,8 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 		concreteEngine.triggerPeriodicFlush()
 
 		// Assertions
-		if len(concreteEngine.immutableMemtables) != 1 {
-			t.Errorf("Expected immutable memtable count to remain 1, got %d", len(concreteEngine.immutableMemtables))
-		}
-		if concreteEngine.mutableMemtable != originalMutable {
-			t.Error("Mutable memtable should not have been replaced when backlogged")
-		}
+		assert.Len(t, concreteEngine.immutableMemtables, 1, "Expected immutable memtable count to remain 1")
+		assert.Equal(t, originalMutable, concreteEngine.mutableMemtable, "Mutable memtable should not have been replaced when backlogged")
 	})
 }
 
@@ -333,25 +289,17 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 
 		// Action
 		err := eng.moveToDLQ(mem)
-		if err != nil {
-			t.Fatalf("moveToDLQ failed unexpectedly: %v", err)
-		}
+		require.NoError(t, err, "moveToDLQ failed unexpectedly")
 
 		// Verification
 		files, err := os.ReadDir(eng.dlqDir)
-		if err != nil {
-			t.Fatalf("Failed to read DLQ directory: %v", err)
-		}
-		if len(files) != 1 {
-			t.Fatalf("Expected 1 file in DLQ directory, got %d", len(files))
-		}
+		require.NoError(t, err, "Failed to read DLQ directory")
+		require.Len(t, files, 1, "Expected 1 file in DLQ directory")
 
 		// Verify content of the DLQ file
 		dlqFilePath := filepath.Join(eng.dlqDir, files[0].Name())
 		file, err := os.Open(dlqFilePath)
-		if err != nil {
-			t.Fatalf("Failed to open DLQ file: %v", err)
-		}
+		require.NoError(t, err, "Failed to open DLQ file")
 		defer file.Close()
 
 		// Simplified verification: just check that the file is not empty.
@@ -369,28 +317,18 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 
 		// Action
 		err := eng.moveToDLQ(mem)
-		if err != nil {
-			t.Fatalf("moveToDLQ with empty memtable failed unexpectedly: %v", err)
-		}
+		require.NoError(t, err, "moveToDLQ with empty memtable failed unexpectedly")
 
 		// Verification
 		files, err := os.ReadDir(eng.dlqDir)
-		if err != nil {
-			t.Fatalf("Failed to read DLQ directory: %v", err)
-		}
-		if len(files) != 1 {
-			t.Fatalf("Expected 1 file in DLQ directory, got %d", len(files))
-		}
+		require.NoError(t, err, "Failed to read DLQ directory")
+		require.Len(t, files, 1, "Expected 1 file in DLQ directory")
 
 		// Verify the file is empty
 		dlqFilePath := filepath.Join(eng.dlqDir, files[0].Name())
 		stat, err := os.Stat(dlqFilePath)
-		if err != nil {
-			t.Fatalf("Failed to stat DLQ file: %v", err)
-		}
-		if stat.Size() != 0 {
-			t.Errorf("Expected empty DLQ file for empty memtable, but size is %d", stat.Size())
-		}
+		require.NoError(t, err, "Failed to stat DLQ file")
+		assert.Zero(t, stat.Size(), "Expected empty DLQ file for empty memtable")
 	})
 
 	t.Run("Failure_DLQDirNotConfigured", func(t *testing.T) {
@@ -406,12 +344,8 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 		err := eng.moveToDLQ(mem)
 
 		// Verification
-		if err == nil {
-			t.Fatal("Expected moveToDLQ to fail when dlqDir is not configured, but it succeeded")
-		}
-		if !strings.Contains(err.Error(), "DLQ directory not configured") {
-			t.Errorf("Expected error message to contain 'DLQ directory not configured', but got: %v", err)
-		}
+		require.Error(t, err, "Expected moveToDLQ to fail when dlqDir is not configured, but it succeeded")
+		assert.Contains(t, err.Error(), "DLQ directory not configured", "Error message mismatch")
 	})
 }
 
@@ -434,18 +368,12 @@ func setupEngineForFlushTest(t *testing.T, opts StorageEngineOptions) *storageEn
 	opts.MetadataSyncIntervalSeconds = 0
 
 	eng, err := NewStorageEngine(opts)
-	if err != nil {
-		t.Fatalf("NewStorageEngine failed: %v", err)
-	}
-
-	if err = eng.Start(); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
+	require.NoError(t, err, "NewStorageEngine should not fail")
+	err = eng.Start()
+	require.NoError(t, err, "Start should not fail")
 
 	concreteEngine, ok := eng.(*storageEngine)
-	if !ok {
-		t.Fatalf("Failed to cast StorageEngineInterface to *storageEngine")
-	}
+	require.True(t, ok, "Failed to cast StorageEngineInterface to *storageEngine")
 
 	// Stop all background loops that were started by NewStorageEngine.
 	// This gives us a fully initialized but quiescent engine for testing.
@@ -482,13 +410,9 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		eng.processImmutableMemtables(true)
 
 		// Assertions
-		if len(eng.immutableMemtables) != 0 {
-			t.Errorf("Expected immutable memtables queue to be empty, but has %d items", len(eng.immutableMemtables))
-		}
+		assert.Empty(t, eng.immutableMemtables, "Expected immutable memtables queue to be empty")
 		files, _ := os.ReadDir(eng.sstDir)
-		if len(files) != 1 {
-			t.Errorf("Expected 1 SSTable file to be created, but found %d", len(files))
-		}
+		assert.Len(t, files, 1, "Expected 1 SSTable file to be created")
 	})
 
 	t.Run("Success_AfterOneRetry", func(t *testing.T) {
@@ -509,16 +433,10 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		eng.processImmutableMemtables(true)
 
 		// Assertions
-		if len(eng.immutableMemtables) != 0 {
-			t.Errorf("Expected immutable memtables queue to be empty, but has %d items", len(eng.immutableMemtables))
-		}
+		assert.Empty(t, eng.immutableMemtables, "Expected immutable memtables queue to be empty")
 		files, _ := os.ReadDir(eng.sstDir)
-		if len(files) != 1 {
-			t.Errorf("Expected 1 SSTable file to be created after retry, but found %d", len(files))
-		}
-		if mem.FlushRetries != 1 {
-			t.Errorf("Expected memtable FlushRetries to be 1, got %d", mem.FlushRetries)
-		}
+		assert.Len(t, files, 1, "Expected 1 SSTable file to be created after retry")
+		assert.Equal(t, 1, mem.FlushRetries, "Expected memtable FlushRetries to be 1")
 	})
 
 	t.Run("Failure_MovesToDLQ", func(t *testing.T) {
@@ -539,22 +457,14 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		eng.processImmutableMemtables(true)
 
 		// Assertions
-		if len(eng.immutableMemtables) != 0 {
-			t.Errorf("Expected immutable memtables queue to be empty, but has %d items", len(eng.immutableMemtables))
-		}
+		assert.Empty(t, eng.immutableMemtables, "Expected immutable memtables queue to be empty")
 		// No SSTable should be created
 		sstFiles, _ := os.ReadDir(eng.sstDir)
-		if len(sstFiles) != 0 {
-			t.Errorf("Expected 0 SSTable files to be created, but found %d", len(sstFiles))
-		}
+		assert.Empty(t, sstFiles, "Expected 0 SSTable files to be created")
 		// A DLQ file should be created
 		dlqFiles, _ := os.ReadDir(eng.dlqDir)
-		if len(dlqFiles) != 1 {
-			t.Errorf("Expected 1 DLQ file to be created, but found %d", len(dlqFiles))
-		}
-		if mem.FlushRetries != maxFlushRetries {
-			t.Errorf("Expected memtable FlushRetries to be %d, got %d", maxFlushRetries, mem.FlushRetries)
-		}
+		assert.Len(t, dlqFiles, 1, "Expected 1 DLQ file to be created")
+		assert.Equal(t, maxFlushRetries, mem.FlushRetries, "Expected memtable FlushRetries to be maxFlushRetries")
 	})
 
 	t.Run("Failure_RequeuedOnShutdown", func(t *testing.T) {
@@ -585,11 +495,8 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		wg.Wait() // Wait for the goroutine to exit
 
 		// Assertions
-		if len(eng.immutableMemtables) != 1 {
-			t.Errorf("Expected memtable to be re-queued on shutdown, but queue has %d items", len(eng.immutableMemtables))
-		} else if eng.immutableMemtables[0] != mem {
-			t.Error("The re-queued memtable is not the original one")
-		}
+		require.Len(t, eng.immutableMemtables, 1, "Expected memtable to be re-queued on shutdown")
+		assert.Equal(t, mem, eng.immutableMemtables[0], "The re-queued memtable is not the original one")
 	})
 }
 
