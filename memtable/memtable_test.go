@@ -718,6 +718,65 @@ func TestMemtableIterator_Close(t *testing.T) {
 	assert.Nil(t, key, "key should be nil after close")
 }
 
+// TestMemtableIterator_Descending_MultiVersion_Correctness specifically tests the logic
+// for descending iteration over a key with multiple versions. This logic was refactored
+// to use an internal Prev() call to correctly position the iterator on the latest version
+// without extra memory allocations.
+func TestMemtableIterator_Descending_MultiVersion_Correctness(t *testing.T) {
+	mt := NewMemtable(1024, &utils.SystemClock{})
+
+	// Add multiple versions for "key-b"
+	mt.Put([]byte("key-b"), makeTestEventValue(t, "v1"), core.EntryTypePutEvent, 10)
+	mt.Put([]byte("key-b"), makeTestEventValue(t, "v2"), core.EntryTypePutEvent, 20)
+	mt.Put([]byte("key-b"), makeTestEventValue(t, "v3_latest"), core.EntryTypePutEvent, 30) // This is the latest version
+
+	// Add other keys around it
+	mt.Put([]byte("key-a"), makeTestEventValue(t, "va"), core.EntryTypePutEvent, 5)
+	mt.Put([]byte("key-c"), makeTestEventValue(t, "vc"), core.EntryTypePutEvent, 40)
+
+	// Expected order for descending scan: key-c, key-b (latest version), key-a
+	expected := []struct {
+		key     []byte
+		value   string
+		pointID uint64
+	}{
+		{[]byte("key-c"), "vc", 40},
+		{[]byte("key-b"), "v3_latest", 30},
+		{[]byte("key-a"), "va", 5},
+	}
+
+	iter := mt.NewIterator(nil, nil, core.Descending)
+	defer iter.Close()
+
+	var actual []struct {
+		key     []byte
+		value   string
+		pointID uint64
+	}
+
+	for iter.Next() {
+		k, v, _, pid := iter.At()
+		actual = append(actual, struct {
+			key     []byte
+			value   string
+			pointID uint64
+		}{
+			key:     append([]byte(nil), k...),
+			value:   getTestEventValue(t, v),
+			pointID: pid,
+		})
+	}
+
+	require.NoError(t, iter.Error())
+	require.Len(t, actual, len(expected), "Should have iterated over the correct number of distinct keys")
+
+	for i := range expected {
+		assert.Equal(t, expected[i].key, actual[i].key, "Key mismatch at index %d", i)
+		assert.Equal(t, expected[i].value, actual[i].value, "Value mismatch for key %s", string(expected[i].key))
+		assert.Equal(t, expected[i].pointID, actual[i].pointID, "PointID mismatch for key %s", string(expected[i].key))
+	}
+}
+
 // --- Benchmarks ---
 
 // createBenchmarkMemtable creates and populates a memtable for benchmark tests.

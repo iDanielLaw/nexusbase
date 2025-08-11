@@ -41,7 +41,11 @@ func (it *MemtableIterator) Next() bool {
 		var found bool
 		if it.order == core.Ascending {
 			if it.startKey != nil {
-				found = it.iter.Seek(&MemtableKey{Key: it.startKey, PointID: ^uint64(0)})
+				seekKey := KeyPool.Get()
+				seekKey.Key = it.startKey
+				seekKey.PointID = ^uint64(0)
+				found = it.iter.Seek(seekKey)
+				KeyPool.Put(seekKey)
 			} else {
 				found = it.iter.First()
 			}
@@ -49,7 +53,11 @@ func (it *MemtableIterator) Next() bool {
 			if it.endKey != nil {
 				// For a descending scan, we want to start at the greatest key that is < endKey.
 				// A reversed iterator's Seek should find the first element <= key.
-				found = it.iter.Seek(&MemtableKey{Key: it.endKey, PointID: 0})
+				seekKey := KeyPool.Get()
+				seekKey.Key = it.endKey
+				seekKey.PointID = 0
+				found = it.iter.Seek(seekKey)
+				KeyPool.Put(seekKey)
 				// If Seek fails, it means all keys are less than endKey, so we should start from the very last element.
 				if !found {
 					found = it.iter.Last()
