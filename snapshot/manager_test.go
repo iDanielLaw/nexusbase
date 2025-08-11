@@ -792,6 +792,163 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to write binary snapshot manifest")
 }
 
+func TestManager_CreateFull_EngineNotStarted(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	snapshotDir := filepath.Join(tempDir, "snapshot_not_started")
+	dataDir := filepath.Join(tempDir, "data_not_started")
+	provider := newMockEngineProvider(t, dataDir)
+	provider.isStarted = false // Simulate engine not started
+
+	// 2. Execution
+	manager := NewManager(provider)
+	err := manager.CreateFull(context.Background(), snapshotDir)
+
+	// 3. Verification
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "engine not started")
+}
+
+func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	snapshotDir := filepath.Join(tempDir, "snapshot_empty")
+	dataDir := filepath.Join(tempDir, "data_empty")
+	require.NoError(t, os.MkdirAll(dataDir, 0755))
+
+	provider := newMockEngineProvider(t, dataDir)
+
+	// Configure empty state
+	provider.sequenceNumber = 1
+	provider.memtablesToFlush = []*memtable.Memtable{} // No memtables
+	provider.deletedSeries = nil
+	provider.rangeTombstones = nil
+	// Levels manager is already empty by default
+
+	// Set up mock expectations for an empty run
+	provider.On("GetMemtablesForFlush").Return()
+	// FlushMemtableToL0 should not be called
+	provider.On("GetDeletedSeries").Return()
+	provider.On("GetRangeTombstones").Return()
+	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+	provider.stringStore.On("GetLogFilePath").Return()
+	provider.seriesIDStore.On("GetLogFilePath").Return()
+
+	// 2. Execution
+	manager := NewManager(provider)
+	err := manager.CreateFull(context.Background(), snapshotDir)
+	require.NoError(t, err)
+
+	// 3. Verification
+	currentBytes, err := os.ReadFile(filepath.Join(snapshotDir, "CURRENT"))
+	require.NoError(t, err)
+	manifestFileName := string(currentBytes)
+	manifestPath := filepath.Join(snapshotDir, manifestFileName)
+	require.FileExists(t, manifestPath)
+
+	f, err := os.Open(manifestPath)
+	require.NoError(t, err)
+	defer f.Close()
+	manifest, err := readManifestBinary(f)
+	require.NoError(t, err)
+
+	// Verify manifest for an empty state
+	assert.Equal(t, uint64(1), manifest.SequenceNumber)
+	assert.Empty(t, manifest.Levels, "Manifest should have no levels")
+	assert.Empty(t, manifest.DeletedSeriesFile)
+	assert.Empty(t, manifest.RangeTombstonesFile)
+	// WAL might still be copied if the directory exists, which is fine.
+}
+
+// mockListener is a mock implementation of HookListener for testing.
+type mockThrowErrorListener struct {
+	err error
+}
+
+func (m *mockThrowErrorListener) OnEvent(ctx context.Context, event hooks.HookEvent) error {
+	return m.err
+}
+
+func (m *mockThrowErrorListener) Priority() int {
+	return 10
+}
+
+func (m *mockThrowErrorListener) IsAsync() bool {
+	return false
+}
+
+func TestManager_CreateFull_HookCancellation(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	snapshotDir := filepath.Join(tempDir, "snapshot_hook_cancel")
+	dataDir := filepath.Join(tempDir, "data_hook_cancel")
+
+	provider := newMockEngineProvider(t, dataDir)
+	expectedHookError := fmt.Errorf("snapshot creation cancelled by hook")
+
+	// Register a hook that returns an error
+	lis := &mockThrowErrorListener{err: expectedHookError}
+	provider.GetHookManager().Register(hooks.EventPreCreateSnapshot, lis)
+
+	// 2. Execution
+	manager := NewManager(provider)
+	err := manager.CreateFull(context.Background(), snapshotDir)
+
+	// 3. Verification
+	require.Error(t, err, "CreateFull should fail when a pre-hook returns an error")
+	assert.ErrorIs(t, err, expectedHookError)
+	assert.Contains(t, err.Error(), "operation cancelled by pre-hook")
+
+	// Snapshot directory should not exist
+	_, statErr := os.Stat(snapshotDir)
+	assert.True(t, os.IsNotExist(statErr), "Snapshot directory should not be created if hook cancels operation")
+}
+
+func TestRestoreFromFull_ManifestWithMissingFile(t *testing.T) {
+	// 1. Setup: Create a snapshot where the manifest lists a file that doesn't exist.
+	tempDir := t.TempDir()
+	snapshotDir := filepath.Join(tempDir, "snapshot_missing_file")
+	targetDataDir := filepath.Join(tempDir, "restored_data_missing_file")
+	require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "sst"), 0755))
+
+	// Create one valid file that should be copied
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("sst1"), 0644))
+
+	// Create a manifest that lists the valid file AND a missing file
+	manifest := &core.SnapshotManifest{
+		SequenceNumber: 1,
+		Levels: []core.SnapshotLevelManifest{
+			{
+				LevelNumber: 0,
+				Tables: []core.SSTableMetadata{
+					{ID: 1, FileName: filepath.Join("sst", "1.sst")},
+					{ID: 2, FileName: filepath.Join("sst", "2.sst")}, // This file does not exist
+				},
+			},
+		},
+	}
+	manifestFileName := "MANIFEST_missing.bin"
+	manifestPath := filepath.Join(snapshotDir, manifestFileName)
+	f, err := os.Create(manifestPath)
+	require.NoError(t, err)
+	require.NoError(t, writeManifestBinary(f, manifest))
+	f.Close()
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+	// 2. Execution
+	restoreOpts := RestoreOptions{DataDir: targetDataDir}
+	err = RestoreFromFull(restoreOpts, snapshotDir)
+	require.NoError(t, err, "Restore should succeed even with a missing file, logging a warning")
+
+	// 3. Verification
+	// The valid file should be restored
+	assert.FileExists(t, filepath.Join(targetDataDir, "sst", "1.sst"))
+	// The missing file should not exist
+	_, err = os.Stat(filepath.Join(targetDataDir, "sst", "2.sst"))
+	assert.True(t, os.IsNotExist(err), "The missing file should not have been created in the target directory")
+}
+
 func TestManager_CreateFull_WriteCurrentFileError(t *testing.T) {
 	// This test replaces the package-level osWriteFile function to simulate errors.
 	helper := &mockSnapshotHelper{
