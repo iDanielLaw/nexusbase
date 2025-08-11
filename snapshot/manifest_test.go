@@ -38,12 +38,12 @@ func TestManifest_RoundTrip_Full(t *testing.T) {
 
 	// 2. Serialize to buffer
 	var buf bytes.Buffer
-	err := writeManifestBinary(&buf, manifest)
+	err := WriteManifestBinary(&buf, manifest)
 	require.NoError(t, err)
 	require.NotEmpty(t, buf.Bytes(), "Serialized buffer should not be empty")
 
 	// 3. Deserialize from buffer
-	deserializedManifest, err := readManifestBinary(&buf)
+	deserializedManifest, err := ReadManifestBinary(&buf)
 	require.NoError(t, err)
 	require.NotNil(t, deserializedManifest)
 
@@ -98,10 +98,10 @@ func TestManifest_RoundTrip_EmptyAndNil(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			err := writeManifestBinary(&buf, tc.manifest)
+			err := WriteManifestBinary(&buf, tc.manifest)
 			require.NoError(t, err)
 
-			deserialized, err := readManifestBinary(&buf)
+			deserialized, err := ReadManifestBinary(&buf)
 			require.NoError(t, err)
 
 			// Special handling for nil vs empty slices for DeepEqual
@@ -126,7 +126,7 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 		},
 	}
 	var validBuf bytes.Buffer
-	err := writeManifestBinary(&validBuf, validManifest)
+	err := WriteManifestBinary(&validBuf, validManifest)
 	require.NoError(t, err)
 	validBytes := validBuf.Bytes()
 
@@ -172,9 +172,9 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 				// This is tricky to construct manually. We serialize a manifest
 				// with a non-empty final string field, and then truncate the
 				// last byte of that string's data.
-				m := &core.SnapshotManifest{SequenceNumber: 1, SSTableCompression: "snappy"}
+				m := &core.SnapshotManifest{SequenceNumber: 1, SSTableCompression: "snappy"} //nolint:govet
 				var b bytes.Buffer
-				writeManifestBinary(&b, m)
+				WriteManifestBinary(&b, m)
 				// Truncate the last byte of the "snappy" string data
 				return b.Bytes()[:b.Len()-1]
 			}(),
@@ -184,7 +184,7 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := readManifestBinary(bytes.NewReader(tc.data))
+			_, err := ReadManifestBinary(bytes.NewReader(tc.data))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.errContain)
 		})

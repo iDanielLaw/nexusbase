@@ -213,7 +213,7 @@ func TestHelperSnapshot_ReadManifestBinary(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := writeManifestBinary(&buf, manifest)
+	err := WriteManifestBinary(&buf, manifest)
 	require.NoError(t, err)
 
 	decodedManifest, err := h.ReadManifestBinary(&buf)

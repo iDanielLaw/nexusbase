@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"expvar"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -32,8 +30,6 @@ import (
 
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -485,122 +481,6 @@ func (e *storageEngine) CheckStarted() error {
 	if !e.isStarted.Load() {
 		return ErrEngineClosed
 	}
-	return nil
-}
-
-// persistManifest triggers the creation of a new manifest file.
-// This function is called periodically or on significant state changes.
-// It should NOT delete the data directory.
-// persistManifest expects e.mu to be locked by the caller.
-func (e *storageEngine) persistManifest() error {
-	_, span := e.tracer.Start(context.Background(), "StorageEngine.persistManifest")
-	defer span.End()
-
-	// Read the name of the current (old) manifest file before acquiring the lock
-	// to avoid holding the lock while doing I/O for reading the CURRENT file.
-	oldManifestFileName := ""
-	currentFilePath := filepath.Join(e.opts.DataDir, CURRENT_FILE_NAME)
-	if oldCurrentFileContent, err := os.ReadFile(currentFilePath); err == nil {
-		oldManifestFileName = strings.TrimSpace(string(oldCurrentFileContent))
-	} else if !os.IsNotExist(err) {
-		e.logger.Warn("Error reading existing CURRENT file for old manifest cleanup.", "error", err)
-	}
-
-	// Construct the manifest based on current levels state and sequence number
-	manifest := core.SnapshotManifest{
-		SequenceNumber:     e.sequenceNumber.Load(),
-		Levels:             make([]core.SnapshotLevelManifest, 0, e.levelsManager.MaxLevels()),
-		SSTableCompression: e.opts.SSTableCompressor.Type().String(),
-	}
-
-	levelStates, unlockFunc := e.levelsManager.GetSSTablesForRead() // Get a consistent view of SSTables
-	defer unlockFunc()
-	for levelNum, levelState := range levelStates {
-		tablesInLevel := levelState.GetTables()
-		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0, len(tablesInLevel))}
-		for _, table := range tablesInLevel {
-			baseFileName := filepath.Base(table.FilePath())
-			manifestFileName := filepath.Join("sst", baseFileName) // Store relative path
-			levelManifest.Tables = append(levelManifest.Tables, core.SSTableMetadata{
-				ID:       table.ID(),
-				FileName: manifestFileName,
-				MinKey:   table.MinKey(),
-				MaxKey:   table.MaxKey(),
-			})
-		}
-		if len(levelManifest.Tables) > 0 {
-			manifest.Levels = append(manifest.Levels, levelManifest)
-		}
-	}
-
-	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, e.clock.Now().UnixNano())
-	manifestFilePath := filepath.Join(e.opts.DataDir, uniqueManifestFileName)
-
-	// --- DEBUG LOGGING ---
-	e.logger.Debug("Persisting manifest with current state.", "manifest_file", uniqueManifestFileName)
-	for levelNum, levelManifest := range manifest.Levels {
-		tableIDs := make([]uint64, len(levelManifest.Tables))
-		for i, t := range levelManifest.Tables {
-			tableIDs[i] = t.ID
-		}
-		e.logger.Debug("Manifest content", "level", levelNum, "tables", tableIDs)
-	}
-	// --- END DEBUG LOGGING ---
-	file, err := os.Create(manifestFilePath)
-	if err != nil {
-		e.logger.Error("Failed to create manifest file for writing.", "path", manifestFilePath, "error", err)
-		span.SetStatus(codes.Error, "write_manifest_failed")
-		return fmt.Errorf("failed to write manifest file: %w", err)
-	}
-	defer file.Close()
-
-	if err := writeManifestBinary(file, &manifest); err != nil {
-		e.logger.Error("Failed to write binary manifest data.", "path", manifestFilePath, "error", err)
-		span.SetStatus(codes.Error, "write_manifest_failed")
-		return fmt.Errorf("failed to write binary manifest data: %w", err)
-	}
-
-	// Update nextSSTableID to file
-	nextSSTableIDFilePath := filepath.Join(e.opts.DataDir, NEXTID_FILE_NAME)
-	numByte := make([]byte, 8)
-	binary.BigEndian.PutUint64(numByte, e.nextSSTableID.Load())
-
-	if err := os.WriteFile(nextSSTableIDFilePath, numByte, 0644); err != nil {
-		e.logger.Error("Failed to update NEXTID file.", "path", nextSSTableIDFilePath, "error", err)
-		span.SetStatus(codes.Error, "update_next_id_file_failed")
-		return fmt.Errorf("failed to update NEXTID file: %w", err)
-	}
-
-	// Update the CURRENT file to point to the new manifest
-	if err := os.WriteFile(currentFilePath, []byte(uniqueManifestFileName), 0644); err != nil {
-		e.logger.Error("Failed to update CURRENT file.", "path", currentFilePath, "error", err)
-		span.SetStatus(codes.Error, "update_current_file_failed")
-		return fmt.Errorf("failed to update CURRENT file: %w", err)
-	}
-
-	// Attempt to delete the old manifest file AFTER successfully writing the new one and updating CURRENT
-	if oldManifestFileName != "" && oldManifestFileName != uniqueManifestFileName { // This check is correct
-		oldManifestFilePath := filepath.Join(e.opts.DataDir, oldManifestFileName)
-		if _, err := os.Stat(oldManifestFilePath); err == nil { // Check if old manifest file actually exists
-			if err := os.Remove(oldManifestFilePath); err != nil {
-				e.logger.Warn("Failed to delete old manifest file.", "path", oldManifestFilePath, "error", err)
-				// Log the error but don't fail the persistence operation.
-			} else {
-				e.logger.Info("Old manifest file deleted.", "path", oldManifestFilePath)
-			}
-		}
-	}
-
-	e.logger.Info("Manifest persisted successfully.", "manifest_file", uniqueManifestFileName)
-	span.SetAttributes(attribute.String("manifest.file", uniqueManifestFileName))
-
-	// --- Post-Manifest-Write Hook ---
-	postManifestPayload := hooks.ManifestWritePayload{
-		Path: manifestFilePath,
-	}
-	// This is a post-hook, so it's typically async and we don't handle the error.
-	e.hookManager.Trigger(context.Background(), hooks.NewPostManifestWriteEvent(postManifestPayload))
-
 	return nil
 }
 

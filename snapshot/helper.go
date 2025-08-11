@@ -132,7 +132,7 @@ func (h *helperSnapshot) CopyFile(src, dst string) error {
 }
 
 func (h *helperSnapshot) ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
-	return readManifestBinary(r)
+	return ReadManifestBinary(r)
 }
 
 func (h *helperSnapshot) CopyAuxiliaryFile(srcPath, destFileName, snapshotDir string, manifestField *string, logger *slog.Logger) error {

@@ -400,7 +400,7 @@ func TestManager_CreateFull(t *testing.T) {
 	f, err := os.Open(manifestPath)
 	require.NoError(t, err)
 	defer f.Close()
-	manifest, err := readManifestBinary(f)
+	manifest, err := ReadManifestBinary(f)
 	require.NoError(t, err)
 
 	assert.Equal(t, provider.sequenceNumber, manifest.SequenceNumber)
@@ -656,7 +656,7 @@ func TestManager_CreateFull_CopyAuxiliaryFileError(t *testing.T) {
 		provider.On("GetDeletedSeries").Return()
 		provider.On("GetRangeTombstones").Return()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-		provider.stringStore.On("GetLogFilePath").Return()
+		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 
 		// 2. Simulate the error condition
 		expectedErr := fmt.Errorf("simulated copy auxiliary file error")
@@ -684,9 +684,7 @@ func TestManager_CreateFull_WALCopyError(t *testing.T) {
 
 	t.Run("OnWALDirectoryCopy", func(t *testing.T) {
 		// 1. Setup
-		defer func() {
-			helper.InterceptCopyAuxiliaryFile = nil
-		}()
+		defer func() { helper.InterceptLinkOrCopyDirectoryContents = nil }()
 		tempDir := t.TempDir()
 		snapshotDir := filepath.Join(tempDir, "snapshot_wal_copy_error")
 		dataDir := filepath.Join(tempDir, "data_wal_copy_error")
@@ -704,8 +702,8 @@ func TestManager_CreateFull_WALCopyError(t *testing.T) {
 		provider.On("GetDeletedSeries").Return()
 		provider.On("GetRangeTombstones").Return()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-		provider.stringStore.On("GetLogFilePath").Return()
-		provider.seriesIDStore.On("GetLogFilePath").Return()
+		provider.stringStore.On("GetLogFilePath").Return("")   // Return empty string to simulate no file
+		provider.seriesIDStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
 
 		// 2. Simulate the error condition
 		expectedErr := fmt.Errorf("simulated WAL copy error")
@@ -771,8 +769,8 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	provider.On("GetDeletedSeries").Return()
 	provider.On("GetRangeTombstones").Return()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.stringStore.On("GetLogFilePath").Return()
-	provider.seriesIDStore.On("GetLogFilePath").Return()
+	provider.stringStore.On("GetLogFilePath").Return("")   // Return empty string to simulate no file
+	provider.seriesIDStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
 
 	// 2. Simulate the error condition
 	mgr := NewManager(provider)
@@ -831,8 +829,8 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	provider.On("GetDeletedSeries").Return()
 	provider.On("GetRangeTombstones").Return()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.stringStore.On("GetLogFilePath").Return()
-	provider.seriesIDStore.On("GetLogFilePath").Return()
+	provider.stringStore.On("GetLogFilePath").Return("")
+	provider.seriesIDStore.On("GetLogFilePath").Return("")
 
 	// 2. Execution
 	manager := NewManager(provider)
@@ -849,7 +847,7 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	f, err := os.Open(manifestPath)
 	require.NoError(t, err)
 	defer f.Close()
-	manifest, err := readManifestBinary(f)
+	manifest, err := ReadManifestBinary(f)
 	require.NoError(t, err)
 
 	// Verify manifest for an empty state
@@ -931,8 +929,8 @@ func TestRestoreFromFull_ManifestWithMissingFile(t *testing.T) {
 	manifestFileName := "MANIFEST_missing.bin"
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	f, err := os.Create(manifestPath)
-	require.NoError(t, err)
-	require.NoError(t, writeManifestBinary(f, manifest))
+	require.NoError(t, err) //nolint:staticcheck
+	require.NoError(t, WriteManifestBinary(f, manifest))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
 
@@ -976,8 +974,8 @@ func TestManager_CreateFull_WriteCurrentFileError(t *testing.T) {
 	provider.On("GetDeletedSeries").Return()
 	provider.On("GetRangeTombstones").Return()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.stringStore.On("GetLogFilePath").Return()
-	provider.seriesIDStore.On("GetLogFilePath").Return()
+	provider.stringStore.On("GetLogFilePath").Return("")
+	provider.seriesIDStore.On("GetLogFilePath").Return("")
 
 	// 2. Simulate the error condition
 	expectedErr := fmt.Errorf("simulated write CURRENT error")
@@ -1037,7 +1035,7 @@ func TestRestoreFromFull(t *testing.T) {
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	f, err := os.Create(manifestPath)
 	require.NoError(t, err)
-	require.NoError(t, writeManifestBinary(f, manifest))
+	require.NoError(t, WriteManifestBinary(f, manifest))
 	f.Close()
 
 	// สร้างไฟล์ CURRENT
@@ -1084,8 +1082,8 @@ func TestRestoreFromFull_TargetExists(t *testing.T) {
 	manifestFileName := "MANIFEST_1.bin"
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	f, err := os.Create(manifestPath)
-	require.NoError(t, err)
-	require.NoError(t, writeManifestBinary(f, &core.SnapshotManifest{}))
+	require.NoError(t, err) //nolint:staticcheck
+	require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "new_file.txt"), []byte("new"), 0644))
@@ -1268,7 +1266,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
 		f, err := os.Create(manifestPath)
 		require.NoError(t, err)
-		require.NoError(t, writeManifestBinary(f, &core.SnapshotManifest{}))
+		require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 		f.Close()
 		defer os.Remove(manifestPath)
 
@@ -1297,8 +1295,8 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
 		f, err := os.Create(manifestPath)
 		require.NoError(t, err)
-		manifestWithFile := &core.SnapshotManifest{DeletedSeriesFile: "deleted_series.json"}
-		require.NoError(t, writeManifestBinary(f, manifestWithFile))
+		manifestWithFile := &core.SnapshotManifest{DeletedSeriesFile: "deleted_series.json"} //nolint:govet
+		require.NoError(t, WriteManifestBinary(f, manifestWithFile))
 		f.Close()
 		defer os.Remove(manifestPath)
 		srcFilePath := filepath.Join(snapshotDir, "deleted_series.json")
@@ -1317,9 +1315,9 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		manifestFileName := "MANIFEST_remove_err.bin"
 		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
-		f, err := os.Create(manifestPath)
-		require.NoError(t, err)
-		require.NoError(t, writeManifestBinary(f, &core.SnapshotManifest{})) // Create a valid, empty manifest
+		f, err := os.Create(manifestPath)                                    //nolint:staticcheck
+		require.NoError(t, err)                                              //nolint:staticcheck
+		require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{})) // Create a valid, empty manifest
 		f.Close()
 
 		require.NoError(t, os.MkdirAll(targetDataDir, 0755))
@@ -1359,7 +1357,7 @@ func TestRestoreFromFull_CopyDirectoryError(t *testing.T) {
 	f, err := os.Create(manifestPath)
 	require.NoError(t, err)
 	// An empty manifest is fine for this test, as we fail before copying its contents
-	require.NoError(t, writeManifestBinary(f, &core.SnapshotManifest{}))
+	require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
 
@@ -1399,8 +1397,8 @@ func TestRestoreFromFull_RenameError(t *testing.T) {
 	manifestFileName := "MANIFEST_rename_err.bin"
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	f, err := os.Create(manifestPath)
-	require.NoError(t, err)
-	require.NoError(t, writeManifestBinary(f, &core.SnapshotManifest{}))
+	require.NoError(t, err) //nolint:staticcheck
+	require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
 
@@ -1438,8 +1436,8 @@ func TestRestoreFromFull_TargetIsAFile(t *testing.T) {
 	manifestFileName := "MANIFEST_1.bin"
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	f, err := os.Create(manifestPath)
-	require.NoError(t, err)
-	require.NoError(t, writeManifestBinary(f, &core.SnapshotManifest{}))
+	require.NoError(t, err) //nolint:staticcheck
+	require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
 
@@ -1496,7 +1494,7 @@ func TestCreateFull_AuxiliaryFileNotExist(t *testing.T) {
 	f, err := os.Open(filepath.Join(snapshotDir, manifestFileName))
 	require.NoError(t, err)
 	defer f.Close()
-	manifest, err := readManifestBinary(f)
+	manifest, err := ReadManifestBinary(f)
 	require.NoError(t, err)
 
 	assert.Empty(t, manifest.StringMappingFile, "StringMappingFile should be empty in manifest")

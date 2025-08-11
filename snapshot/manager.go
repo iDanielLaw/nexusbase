@@ -41,7 +41,7 @@ func NewManagerWithTesting(provider EngineProvider, wrapper internal.PrivateSnap
 
 	return &manager{
 		provider:          provider,
-		writeManifestFunc: writeManifestBinary,
+		writeManifestFunc: WriteManifestBinary,
 		wrapper:           wrapper,
 	}
 }
