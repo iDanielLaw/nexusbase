@@ -90,53 +90,94 @@ func TestWAL_AppendAndRecover(t *testing.T) {
 }
 
 func TestWAL_Rotation(t *testing.T) {
-	tempDir := t.TempDir()
-	opts := testWALOptions(t, tempDir)
-	opts.MaxSegmentSize = 256 // Very small size to force rotation
+	t.Run("RotationOnMultipleSmallWrites", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		opts.MaxSegmentSize = 256 // Very small size to force rotation
 
-	wal, _, err := Open(opts)
-	require.NoError(t, err)
-	defer wal.Close()
-
-	assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "Initial segment index should be 1")
-
-	// Write entries until rotation occurs
-	var totalEntries []core.WALEntry
-	for i := 0; i < 100; i++ {
-		entry := core.WALEntry{
-			Key:       []byte(fmt.Sprintf("key-for-rotation-%d", i)),
-			Value:     []byte("a somewhat long value to ensure we fill the segment"),
-			SeqNum:    uint64(i + 1),
-			EntryType: core.EntryTypePutEvent,
-		}
-		err := wal.Append(entry)
+		wal, _, err := Open(opts)
 		require.NoError(t, err)
-		totalEntries = append(totalEntries, entry)
-	}
+		defer wal.Close()
 
-	assert.Greater(t, wal.ActiveSegmentIndex(), uint64(1), "WAL should have rotated to a new segment")
-	rotatedIndex := wal.ActiveSegmentIndex()
+		assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "Initial segment index should be 1")
 
-	// Append one more entry after rotation
-	finalEntry := core.WALEntry{Key: []byte("final"), Value: []byte("entry"), SeqNum: 11, EntryType: core.EntryTypePutEvent}
-	err = wal.Append(finalEntry)
-	require.NoError(t, err)
-	totalEntries = append(totalEntries, finalEntry)
+		// Write entries until rotation occurs
+		var totalEntries []core.WALEntry
+		var seqNum uint64 = 0
+		for i := 0; i < 10; i++ {
+			seqNum++
+			entry := core.WALEntry{
+				Key:       []byte(fmt.Sprintf("key-for-rotation-%d", i)),
+				Value:     []byte("a somewhat long value to ensure we fill the segment"),
+				SeqNum:    seqNum,
+				EntryType: core.EntryTypePutEvent,
+			}
+			err := wal.Append(entry)
+			require.NoError(t, err)
+			totalEntries = append(totalEntries, entry)
+		}
 
-	assert.Equal(t, rotatedIndex, wal.ActiveSegmentIndex(), "Segment index should not change after one more append")
+		assert.Greater(t, wal.ActiveSegmentIndex(), uint64(1), "WAL should have rotated to a new segment")
+		rotatedIndex := wal.ActiveSegmentIndex()
 
-	// Close and recover to verify all data is intact
-	err = wal.Close()
-	require.NoError(t, err)
+		// Append one more entry after rotation
+		seqNum++
+		finalEntry := core.WALEntry{Key: []byte("final"), Value: []byte("entry"), SeqNum: seqNum, EntryType: core.EntryTypePutEvent}
+		err = wal.Append(finalEntry)
+		require.NoError(t, err)
+		totalEntries = append(totalEntries, finalEntry)
 
-	wal2, recovered, err := Open(opts)
-	require.NoError(t, err)
-	defer wal2.Close()
+		assert.Equal(t, rotatedIndex, wal.ActiveSegmentIndex(), "Segment index should not change after one more append")
 
-	require.Len(t, recovered, len(totalEntries), "Should recover all entries across rotated segments")
-	// Simple check on first and last entry
-	assert.Equal(t, totalEntries[0].Key, recovered[0].Key)
-	assert.Equal(t, totalEntries[len(totalEntries)-1].Key, recovered[len(recovered)-1].Key)
+		// Close and recover to verify all data is intact
+		err = wal.Close()
+		require.NoError(t, err)
+
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
+
+		require.Len(t, recovered, len(totalEntries), "Should recover all entries across rotated segments")
+		// Simple check on first and last entry
+		assert.Equal(t, totalEntries[0].Key, recovered[0].Key)
+		assert.Equal(t, totalEntries[len(totalEntries)-1].Key, recovered[len(recovered)-1].Key)
+	})
+
+	t.Run("LargeWriteForcesRotationOnNextWrite", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		opts.MaxSegmentSize = 256 // Small size
+
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		// 1. First write is large, but into an empty segment. Should not rotate yet.
+		largeValue := make([]byte, 300) // Larger than MaxSegmentSize
+		largeEntry := core.WALEntry{Key: []byte("large_entry"), Value: largeValue, SeqNum: 1, EntryType: core.EntryTypePutEvent}
+		err = wal.Append(largeEntry)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "Should not rotate when writing a large record to an empty segment")
+
+		// 2. Second write (any size) should trigger rotation because the current segment is now over the limit.
+		smallEntry := core.WALEntry{Key: []byte("small_entry"), Value: []byte("v"), SeqNum: 2, EntryType: core.EntryTypePutEvent}
+		err = wal.Append(smallEntry)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), wal.ActiveSegmentIndex(), "Should rotate on the next write after a large record filled the previous segment")
+
+		// 3. Close and recover to verify data integrity
+		err = wal.Close()
+		require.NoError(t, err)
+
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
+
+		require.Len(t, recovered, 2, "Should recover both entries")
+		assert.Equal(t, largeEntry.Key, recovered[0].Key, "First recovered entry should be the large one")
+		assert.Equal(t, largeEntry.Value, recovered[0].Value)
+		assert.Equal(t, smallEntry.Key, recovered[1].Key, "Second recovered entry should be the small one")
+	})
 }
 
 func TestWAL_Purge(t *testing.T) {

@@ -32,6 +32,7 @@ type Segment struct {
 type SegmentWriter struct {
 	*Segment
 	writer *bufio.Writer
+	size   int64 // Tracks the current size including buffered writes
 }
 
 // SegmentReader handles reading records from a segment.
@@ -62,6 +63,12 @@ func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 		return nil, fmt.Errorf("failed to create segment file %s: %w", path, err)
 	}
 
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to stat new segment file %s: %w", path, err)
+	}
+
 	// Write header
 	header := core.NewFileHeader(core.WALMagic, core.CompressionNone)
 	if err := binary.Write(file, binary.LittleEndian, &header); err != nil {
@@ -77,6 +84,7 @@ func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 	return &SegmentWriter{
 		Segment: seg,
 		writer:  bufio.NewWriter(file),
+		size:    stat.Size(), // Initialize with header size
 	}, nil
 }
 
@@ -141,6 +149,9 @@ func (sw *SegmentWriter) WriteRecord(data []byte) error {
 		return fmt.Errorf("failed to write record checksum: %w", err)
 	}
 
+	// Update internal size tracker
+	sw.size += int64(4 + len(data) + 4) // length + data + checksum
+
 	return nil
 }
 
@@ -179,6 +190,15 @@ func (sr *SegmentReader) Close() error {
 	err := sr.file.Close()
 	sr.file = nil
 	return err
+}
+
+// Size returns the current size of the segment file, including buffered data.
+// This overrides the embedded Segment.Size method.
+func (sw *SegmentWriter) Size() (int64, error) {
+	if sw.file == nil {
+		return 0, os.ErrClosed
+	}
+	return sw.size, nil
 }
 
 // Size returns the current size of the segment file.

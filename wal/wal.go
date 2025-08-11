@@ -194,12 +194,15 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 	}
 
 	// Check if we need to rotate the segment BEFORE writing the new record.
-	// Rotate if the current file is not empty and adding the new record would exceed the max size.
+	// Rotate if the current file already contains data and adding the new record would exceed the max size.
 	currentSize, err := w.activeSegment.Size()
 	if err != nil {
 		return fmt.Errorf("could not get active segment size: %w", err)
 	}
-	if currentSize > 0 && (currentSize+newRecordSize) > w.opts.MaxSegmentSize {
+	// The check `currentSize > int64(binary.Size(core.FileHeader{}))` ensures we only rotate
+	// if the segment already contains at least one record. This allows a single large
+	// record to be written to an empty segment, even if it exceeds the max size.
+	if currentSize > int64(binary.Size(core.FileHeader{})) && (currentSize+newRecordSize) > w.opts.MaxSegmentSize {
 		w.logger.Debug("Rotating WAL segment due to size", "current_size", currentSize, "new_record_size", newRecordSize, "max_size", w.opts.MaxSegmentSize)
 		if err := w.rotateLocked(); err != nil {
 			return fmt.Errorf("failed to rotate WAL segment: %w", err)
