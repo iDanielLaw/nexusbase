@@ -107,6 +107,12 @@ func (e *storageEngine) persistManifest() (err error) {
 		return fmt.Errorf("failed to atomically update CURRENT file: %w", err)
 	}
 
+	// Force a modification time update to assist tests on low-resolution filesystems.
+	// This is a best-effort operation and should not fail the entire manifest persistence.
+	if chtimesErr := os.Chtimes(currentFilePath, e.clock.Now(), e.clock.Now()); chtimesErr != nil {
+		e.logger.Warn("Failed to update modification time for CURRENT file, this might affect tests on some filesystems", "path", currentFilePath, "error", chtimesErr)
+	}
+
 	// Clean up old manifest file (best effort)
 	if oldManifestFileName != "" && oldManifestFileName != uniqueManifestFileName {
 		oldManifestFilePath := filepath.Join(e.opts.DataDir, oldManifestFileName)
