@@ -33,7 +33,7 @@ func readStringWithLength(r io.Reader) (string, error) {
 	}
 	sBytes := make([]byte, length)
 	if _, err := io.ReadFull(r, sBytes); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read string data (expected %d bytes): %w", length, err)
 	}
 	return string(sBytes), nil
 }
@@ -62,7 +62,7 @@ func readBytesWithLength(r io.Reader) ([]byte, error) {
 	}
 	bBytes := make([]byte, length)
 	if _, err := io.ReadFull(r, bBytes); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read bytes data (expected %d bytes): %w", length, err)
 	}
 	return bBytes, nil
 }
@@ -164,10 +164,10 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	for i := uint32(0); i < numLevels; i++ {
 		var levelNum, numTables uint32
 		if err := binary.Read(r, binary.LittleEndian, &levelNum); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read level number for level index %d: %w", i, err)
 		}
 		if err := binary.Read(r, binary.LittleEndian, &numTables); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read table count for level %d: %w", levelNum, err)
 		}
 
 		manifest.Levels[i].LevelNumber = int(levelNum)
@@ -176,23 +176,23 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 		for j := uint32(0); j < numTables; j++ {
 			var table core.SSTableMetadata
 			if err := binary.Read(r, binary.LittleEndian, &table.ID); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read table ID for level %d, table %d: %w", levelNum, j, err)
 			}
 
 			fileNameBytes, err := readBytesWithLength(r)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read FileName for level %d, table %d: %w", levelNum, j, err)
 			}
 			table.FileName = string(fileNameBytes)
 
 			table.MinKey, err = readBytesWithLength(r)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read MinKey for level %d, table %d: %w", levelNum, j, err)
 			}
 
 			table.MaxKey, err = readBytesWithLength(r)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read MaxKey for level %d, table %d: %w", levelNum, j, err)
 			}
 
 			manifest.Levels[i].Tables[j] = table
@@ -203,27 +203,27 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	var err error
 	manifest.WALFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read WALFile: %w", err)
 	}
 	manifest.DeletedSeriesFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read DeletedSeriesFile: %w", err)
 	}
 	manifest.RangeTombstonesFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read RangeTombstonesFile: %w", err)
 	}
 	manifest.StringMappingFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read StringMappingFile: %w", err)
 	}
 	manifest.SeriesMappingFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read SeriesMappingFile: %w", err)
 	}
 	manifest.SSTableCompression, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read SSTableCompression: %w", err)
 	}
 
 	return manifest, nil
