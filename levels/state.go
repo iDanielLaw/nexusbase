@@ -10,12 +10,23 @@ import (
 
 // LevelState represents the state of a single level in the LSM tree.
 type LevelState struct {
-	levelNumber int
+	levelNumber int // หมายเลขของ level
 	// tables is the source of truth for the order of tables.
 	// L0: sorted by creation time (newest first for lookups)
 	// L1+: sorted by minKey
-	tables   []*sstable.SSTable
-	tableMap map[uint64]*sstable.SSTable
+	tables    []*sstable.SSTable
+	tableMap  map[uint64]*sstable.SSTable
+	totalSize int64 // ขนาดรวมของตารางทั้งหมดใน level นี้ (bytes)
+}
+
+// newLevelState creates a new, empty LevelState.
+func newLevelState(levelNumber int) *LevelState {
+	return &LevelState{
+		levelNumber: levelNumber,
+		tables:      make([]*sstable.SSTable, 0),
+		tableMap:    make(map[uint64]*sstable.SSTable),
+		totalSize:   0,
+	}
 }
 
 // Add adds a table to the level, maintaining the correct order.
@@ -36,19 +47,18 @@ func (ls *LevelState) Add(table *sstable.SSTable) error {
 		// For L0, prepend to keep newest first.
 		ls.tables = append([]*sstable.SSTable{table}, ls.tables...)
 	} else {
-		// For L1+, append and then re-sort by MinKey.
-		ls.tables = append(ls.tables, table)
-		sort.Slice(ls.tables, func(i, j int) bool {
-			// Handle nil keys just in case, though they shouldn't exist in L1+
-			if ls.tables[i].MinKey() == nil {
-				return true
-			}
-			if ls.tables[j].MinKey() == nil {
-				return false
-			}
-			return bytes.Compare(ls.tables[i].MinKey(), ls.tables[j].MinKey()) < 0
+		// สำหรับ L1+ ค้นหาตำแหน่งที่ถูกต้องเพื่อแทรกและรักษลำดับการเรียงตาม MinKey
+		// ซึ่งมีประสิทธิภาพมากกว่าการเพิ่มแล้วเรียงใหม่ทั้งหมดสำหรับการเพิ่มทีละรายการ
+		idx := sort.Search(len(ls.tables), func(i int) bool {
+			return bytes.Compare(ls.tables[i].MinKey(), table.MinKey()) >= 0
 		})
+
+		// แทรกตารางในตำแหน่งที่ค้นพบ
+		ls.tables = append(ls.tables, nil) // ขยาย slice
+		copy(ls.tables[idx+1:], ls.tables[idx:])
+		ls.tables[idx] = table
 	}
+	ls.totalSize += table.Size()
 	return nil
 }
 
@@ -67,6 +77,7 @@ func (ls *LevelState) AddBatch(tablesToAdd []*sstable.SSTable) error {
 		if _, exists := ls.tableMap[table.ID()]; exists {
 			return fmt.Errorf("table with ID %d already exists in level %d", table.ID(), ls.levelNumber)
 		}
+		ls.totalSize += table.Size()
 		ls.tableMap[table.ID()] = table
 		ls.tables = append(ls.tables, table)
 	}
@@ -89,12 +100,14 @@ func (ls *LevelState) AddBatch(tablesToAdd []*sstable.SSTable) error {
 
 // Remove removes a table from the level by its ID.
 func (ls *LevelState) Remove(sstID uint64) error {
-	if _, ok := ls.tableMap[sstID]; !ok {
+	tableToRemove, ok := ls.tableMap[sstID]
+	if !ok {
 		return fmt.Errorf("SSTable with ID %d not found in LevelState %d", sstID, ls.levelNumber)
 	}
 
 	// Remove from map
 	delete(ls.tableMap, sstID)
+	ls.totalSize -= tableToRemove.Size()
 
 	// Remove from slice without allocating a new underlying array if possible
 	newTables := ls.tables[:0]
@@ -113,6 +126,11 @@ func (ls *LevelState) Size() int {
 	return len(ls.tables)
 }
 
+// TotalSize returns the total size of all tables in the level in bytes.
+func (ls *LevelState) TotalSize() int64 {
+	return ls.totalSize
+}
+
 // GetTables returns a copy of the tables slice, preserving order.
 func (ls *LevelState) GetTables() []*sstable.SSTable {
 	// Return a copy to prevent external modification of the internal slice.
@@ -125,13 +143,16 @@ func (ls *LevelState) GetTables() []*sstable.SSTable {
 // It ensures the map and slice are consistent with the new set.
 // For L1+, it also sorts the provided tables.
 func (ls *LevelState) SetTables(tables []*sstable.SSTable) {
+	var newTotalSize int64
 	newTableMap := make(map[uint64]*sstable.SSTable, len(tables))
 	for _, table := range tables {
 		newTableMap[table.ID()] = table
+		newTotalSize += table.Size()
 	}
 
 	ls.tables = tables // The provided slice becomes the new source of truth for order
 	ls.tableMap = newTableMap
+	ls.totalSize = newTotalSize
 
 	// Ensure L1+ levels are sorted correctly after setting.
 	if ls.levelNumber > 0 {

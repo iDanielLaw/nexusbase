@@ -455,6 +455,36 @@ func TestLevelsManager_GetLevelForTable(t *testing.T) {
 	assert.False(t, found, "Should not find table 2 after removal")
 	assert.Equal(t, -1, level, "Level for removed table should be -1")
 }
+
+func TestLevelsManager_AddTablesToLevel(t *testing.T) {
+	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	defer lm.Close()
+
+	// Test adding to a valid level
+	tbl1 := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("keyC"), []byte("v")}})
+	defer tbl1.Close()
+	tbl2 := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("keyA"), []byte("v")}})
+	defer tbl2.Close()
+
+	tables := []*sstable.SSTable{tbl1, tbl2}
+	err := lm.AddTablesToLevel(1, tables)
+	require.NoError(t, err)
+
+	l1Tables := lm.GetTablesForLevel(1)
+	require.Len(t, l1Tables, 2)
+	// Check if they are sorted by MinKey
+	assert.Equal(t, uint64(2), l1Tables[0].ID()) // keyA
+	assert.Equal(t, uint64(1), l1Tables[1].ID()) // keyC
+
+	// Test adding to an invalid level
+	err = lm.AddTablesToLevel(3, tables) // Level 3 is out of bounds
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid level number")
+
+	// Test adding empty slice
+	err = lm.AddTablesToLevel(2, []*sstable.SSTable{})
+	require.NoError(t, err, "Adding an empty slice of tables should not produce an error")
+}
 func TestLevelsManager_AddTableToLevel(t *testing.T) {
 
 	lm, _ := NewLevelsManager(3, 4, 1024, nil)

@@ -6,6 +6,7 @@ import "github.com/INLOpen/nexusbase/sstable"
 type Manager interface {
 	GetSSTablesForRead() ([]*LevelState, func())
 	AddL0Table(table *sstable.SSTable) error
+	AddTablesToLevel(level int, tables []*sstable.SSTable) error
 	AddTableToLevel(level int, table *sstable.SSTable) error
 	Close() error
 	VerifyConsistency() []error

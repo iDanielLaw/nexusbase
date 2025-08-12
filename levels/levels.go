@@ -46,11 +46,7 @@ func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, trace
 		tracer:         tracer,
 	}
 	for i := 0; i < maxLevels; i++ {
-		lm.levels[i] = &LevelState{
-			levelNumber: i,
-			tables:      make([]*sstable.SSTable, 0), // Initialize tables slice for each level
-			tableMap:    make(map[uint64]*sstable.SSTable),
-		}
+		lm.levels[i] = newLevelState(i)
 	}
 	return lm, nil
 }
@@ -74,6 +70,22 @@ func (lm *LevelsManager) AddTableToLevel(levelNum int, table *sstable.SSTable) e
 	return lm.addTableToLevelUnsafe(levelNum, table)
 }
 
+// AddTablesToLevel adds multiple SSTables to a specific level.
+// This is more efficient than calling AddTableToLevel in a loop,
+// especially for L1+ levels. It's intended for use during recovery.
+func (lm *LevelsManager) AddTablesToLevel(levelNum int, tables []*sstable.SSTable) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	if levelNum < 0 || levelNum >= len(lm.levels) {
+		return fmt.Errorf("invalid level number %d", levelNum)
+	}
+	if len(tables) == 0 {
+		return nil
+	}
+
+	return lm.levels[levelNum].AddBatch(tables)
+}
 func (lm *LevelsManager) addTableToLevelUnsafe(levelNum int, table *sstable.SSTable) error {
 	if levelNum < 0 || levelNum >= len(lm.levels) {
 		return fmt.Errorf("invalid level number %d", levelNum)
@@ -140,13 +152,7 @@ func (lm *LevelsManager) getTotalSizeForLevelUnSafe(levelNum int) int64 {
 	if levelNum < 0 || levelNum >= len(lm.levels) {
 		return 0
 	}
-	var totalSize int64
-	sstables := lm.levels[levelNum].GetTables()
-	for _, table := range sstables {
-		totalSize += table.Size()
-	}
-
-	return totalSize
+	return lm.levels[levelNum].TotalSize()
 }
 
 // NeedsLevelNCompaction checks if a level N (N > 0) needs compaction based on its total size.
