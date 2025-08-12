@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -286,4 +288,51 @@ func TestWAL_StartRecoveryIndex(t *testing.T) {
 	assert.Equal(t, []byte("b"), recovered[0].Key)
 	assert.Equal(t, uint64(3), recovered[1].SeqNum)
 	assert.Equal(t, []byte("c"), recovered[1].Key)
+}
+
+func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	segmentPath := filepath.Join(tempDir, formatSegmentFileName(1))
+
+	// 1. Manually construct a batch payload where one of the inner entries is corrupted.
+	// The overall record will have a valid checksum, but parsing the batch will fail.
+	var payloadBuf bytes.Buffer
+
+	// Batch header
+	require.NoError(t, payloadBuf.WriteByte(byte(core.EntryTypePutBatch)))
+	numEntries := uint32(3) // We'll say there are 3, but only write 1.5 of them
+	require.NoError(t, binary.Write(&payloadBuf, binary.LittleEndian, numEntries))
+
+	// Entry 1 (Good)
+	entry1 := core.WALEntry{EntryType: core.EntryTypePutEvent, SeqNum: 1, Key: []byte("key1"), Value: []byte("val1")}
+	require.NoError(t, encodeEntryData(&payloadBuf, &entry1))
+
+	// Entry 2 (Corrupted by truncation)
+	entry2 := core.WALEntry{EntryType: core.EntryTypePutEvent, SeqNum: 2, Key: []byte("key2_a_bit_longer"), Value: []byte("val2_also_longer")}
+	var entry2Buf bytes.Buffer
+	require.NoError(t, encodeEntryData(&entry2Buf, &entry2))
+	// Truncate the encoded entry 2 data to cause a parsing error (e.g., unexpected EOF)
+	corruptedEntry2Bytes := entry2Buf.Bytes()[:entry2Buf.Len()-5]
+	_, err := payloadBuf.Write(corruptedEntry2Bytes)
+	require.NoError(t, err)
+
+	// 2. Write this corrupted payload as a single, validly-checksummed record to a segment file.
+	sw, err := CreateSegment(tempDir, 1)
+	require.NoError(t, err)
+	require.NoError(t, sw.WriteRecord(payloadBuf.Bytes()))
+	require.NoError(t, sw.Close())
+
+	// 3. Attempt to recover from the segment.
+	recoveredEntries, err := recoverFromSegment(segmentPath, logger)
+
+	// 4. Verify the outcome.
+	require.Error(t, err, "Recovery should fail due to corruption inside the batch")
+	assert.Contains(t, err.Error(), "error decoding entry 1 in batch", "Error message should point to the corrupted entry")
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF, "Underlying error should be unexpected EOF due to truncation")
+
+	// We should have recovered the entries that came before the corruption.
+	require.Len(t, recoveredEntries, 1, "Should have recovered the first valid entry")
+	assert.Equal(t, entry1.Key, recoveredEntries[0].Key)
+	assert.Equal(t, entry1.SeqNum, recoveredEntries[0].SeqNum)
 }
