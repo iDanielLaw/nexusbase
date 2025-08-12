@@ -1,6 +1,8 @@
 package levels
 
-import "github.com/INLOpen/nexusbase/sstable"
+import (
+	"github.com/INLOpen/nexusbase/sstable"
+)
 
 // Manager defines the public interface for a levels manager.
 type Manager interface {
