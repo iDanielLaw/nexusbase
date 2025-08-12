@@ -457,7 +457,7 @@ func TestManager_CreateFull(t *testing.T) {
 	assert.Equal(t, 1, manifest.Levels[1].LevelNumber)
 	require.Len(t, manifest.Levels[1].Tables, 1)
 	assert.Equal(t, sst2.ID(), manifest.Levels[1].Tables[0].ID)
-	assert.Equal(t, string(SnapshotTypeFull), string(manifest.Type))
+	assert.Equal(t, string(core.SnapshotTypeFull), string(manifest.Type))
 	assert.Empty(t, manifest.ParentID)
 	assert.False(t, manifest.CreatedAt.IsZero())
 	assert.Equal(t, uint64(1), manifest.LastWALSegmentIndex)
@@ -933,122 +933,6 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	// WAL might still be copied if the directory exists, which is fine.
 }
 
-func TestManager_CreateIncremental(t *testing.T) {
-	// 1. Setup
-	tempDir := t.TempDir()
-	snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
-	dataDir := filepath.Join(tempDir, "data")
-	require.NoError(t, os.MkdirAll(dataDir, 0755))
-	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
-
-	provider := newMockEngineProvider(t, dataDir)
-	mockClock, ok := provider.clock.(*utils.MockClock)
-	require.True(t, ok, "provider clock should be a mock clock")
-
-	require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
-	require.NoError(t, os.MkdirAll(provider.walDir, 0755))
-
-	// --- Create a Full Parent Snapshot First ---
-	// Use the mock clock to generate the name for consistency
-	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
-	require.NoError(t, os.MkdirAll(parentSnapshotDir, 0755))
-
-	parentSST := createDummySSTable(t, provider.sstDir, 1)
-	provider.levelsManager.AddTableToLevel(0, parentSST)
-	provider.sequenceNumber = 100
-
-	// Mock calls for the parent snapshot creation
-	provider.On("GetMemtablesForFlush").Once().Return()
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Once().Return(nil)
-	provider.On("GetDeletedSeries").Once().Return(nil)
-	provider.On("GetRangeTombstones").Once().Return(nil)
-	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Once().Return(nil)
-	provider.wal.On("ActiveSegmentIndex").Once().Return(1)
-	// Add missing mocks for CreateFull part
-	provider.stringStore.On("GetLogFilePath").Once().Return(provider.stringStore.path)
-	provider.seriesIDStore.On("GetLogFilePath").Once().Return(provider.seriesIDStore.path)
-	provider.wal.On("Path").Return(provider.walDir)
-
-	manager := NewManager(provider)
-	err := manager.CreateFull(context.Background(), parentSnapshotDir)
-	require.NoError(t, err)
-
-	// Advance the clock to ensure the next snapshot has a new timestamp
-	mockClock.Advance(time.Second)
-
-	// --- Prepare for Incremental Snapshot ---
-	// Add a new SSTable
-	newSST := createDummySSTable(t, provider.sstDir, 2)
-	provider.levelsManager.AddTableToLevel(0, newSST)
-	provider.sequenceNumber = 150 // Advance sequence number
-
-	// Mock calls for the incremental snapshot
-	provider.On("GetMemtablesForFlush").Once().Return()
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Once().Return(nil)
-	provider.On("GetDeletedSeries").Once().Return(map[string]uint64{"new_deleted": 140})
-	provider.On("GetRangeTombstones").Once().Return(nil)
-	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Once().Return(nil)
-	provider.wal.On("ActiveSegmentIndex").Once().Return(2) // New WAL segment
-	// Add missing mocks for CreateIncremental part
-	provider.stringStore.On("GetLogFilePath").Once().Return(provider.stringStore.path)
-	provider.seriesIDStore.On("GetLogFilePath").Once().Return(provider.seriesIDStore.path)
-	// This was the missing mock. The incremental creation also calls copyAuxiliaryAndWALFiles.
-	provider.wal.On("Path").Return(provider.walDir)
-
-	// 2. Execution
-	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
-	require.NoError(t, err)
-
-	// 3. Verification
-	// Find the new incremental snapshot directory
-	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
-	require.NoError(t, err)
-	require.NotEqual(t, filepath.Base(parentSnapshotDir), latestID, "A new snapshot directory should have been created")
-	assert.True(t, strings.HasSuffix(latestID, "_incr"), "New snapshot should be marked as incremental")
-
-	// Verify its contents
-	manifest, _, err := readManifestFromDir(latestPath, newHelperSnapshot())
-	require.NoError(t, err)
-
-	assert.Equal(t, string(SnapshotTypeIncremental), string(manifest.Type))
-	assert.Equal(t, filepath.Base(parentSnapshotDir), manifest.ParentID)
-	assert.Equal(t, uint64(150), manifest.SequenceNumber)
-	assert.Equal(t, uint64(2), manifest.LastWALSegmentIndex)
-
-	// Check that only the NEW sstable is in the manifest
-	require.Len(t, manifest.Levels, 1)
-	require.Len(t, manifest.Levels[0].Tables, 1)
-	assert.Equal(t, newSST.ID(), manifest.Levels[0].Tables[0].ID)
-
-	// Check that the new SSTable file was physically copied
-	assert.FileExists(t, filepath.Join(latestPath, "sst", "2.sst"))
-	// Check that the OLD SSTable file was NOT copied
-	_, err = os.Stat(filepath.Join(latestPath, "sst", "1.sst"))
-	assert.True(t, os.IsNotExist(err))
-
-	// Check that auxiliary files were copied
-	assert.FileExists(t, filepath.Join(latestPath, "deleted_series.json"))
-}
-
-func TestManager_CreateIncremental_NoParent(t *testing.T) {
-	// 1. Setup
-	tempDir := t.TempDir()
-	snapshotsBaseDir := filepath.Join(tempDir, "snapshots_no_parent")
-	dataDir := filepath.Join(tempDir, "data_no_parent")
-	require.NoError(t, os.MkdirAll(dataDir, 0755))
-	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
-
-	provider := newMockEngineProvider(t, dataDir)
-
-	// 2. Execution
-	manager := NewManager(provider)
-	err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
-
-	// 3. Verification
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no parent snapshot found")
-}
-
 // mockListener is a mock implementation of HookListener for testing.
 type mockThrowErrorListener struct {
 	err error
@@ -1096,6 +980,190 @@ func TestManager_CreateFull_HookCancellation(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "Snapshot directory should not be created if hook cancels operation")
 }
 
+func TestManager_CreateIncremental(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		dataDir := filepath.Join(tempDir, "data")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+		mockClock, ok := provider.clock.(*utils.MockClock)
+		require.True(t, ok, "provider clock should be a mock clock")
+
+		require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
+		require.NoError(t, os.MkdirAll(provider.walDir, 0755))
+
+		manager := NewManager(provider)
+
+		// --- Create a Full Parent Snapshot First ---
+		parentTime := mockClock.Now()
+		parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d", parentTime.UnixNano()))
+		parentSnapshotID := filepath.Base(parentSnapshotDir)
+
+		parentSST := createDummySSTable(t, provider.sstDir, 1)
+		provider.levelsManager.AddTableToLevel(0, parentSST)
+		provider.sequenceNumber = 100
+
+		// Mock calls for the parent snapshot creation
+		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+		provider.On("GetDeletedSeries").Return(nil).Once()
+		provider.On("GetRangeTombstones").Return(nil).Once()
+		provider.tagIndexManager.On("CreateSnapshot", filepath.Join(parentSnapshotDir, "index")).Return(nil).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path).Once()
+		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path).Once()
+		provider.wal.On("Path").Return(provider.walDir).Once()
+
+		err := manager.CreateFull(context.Background(), parentSnapshotDir)
+		require.NoError(t, err)
+
+		// --- Prepare for Incremental Snapshot ---
+		mockClock.Advance(time.Second) // Advance time for new snapshot ID
+
+		// Add a new SSTable and advance sequence number
+		newSST := createDummySSTable(t, provider.sstDir, 2)
+		provider.levelsManager.AddTableToLevel(0, newSST)
+		provider.sequenceNumber = 150
+
+		// Mock calls for the incremental snapshot
+		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+		provider.On("GetDeletedSeries").Return(map[string]uint64{"new_deleted": 140}).Once()
+		provider.On("GetRangeTombstones").Return(nil).Once()
+		// The path for CreateSnapshot will be determined inside CreateIncremental
+		provider.tagIndexManager.On("CreateSnapshot", mock.MatchedBy(func(path string) bool {
+			return strings.HasSuffix(path, "index") && strings.Contains(path, "_incr")
+		})).Return(nil).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(2).Once() // New WAL segment
+		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path).Once()
+		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path).Once()
+		provider.wal.On("Path").Return(provider.walDir).Once()
+
+		// 2. Execution
+		err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+		require.NoError(t, err)
+
+		// 3. Verification
+		// Find the new incremental snapshot directory
+		latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+		require.NoError(t, err)
+		require.NotEqual(t, parentSnapshotID, latestID, "A new snapshot directory should have been created")
+		assert.True(t, strings.HasSuffix(latestID, "_incr"), "New snapshot should be marked as incremental")
+
+		// Verify its contents
+		manifest, _, err := readManifestFromDir(latestPath, newHelperSnapshot())
+		require.NoError(t, err)
+
+		assert.Equal(t, core.SnapshotTypeIncremental, manifest.Type)
+		assert.Equal(t, parentSnapshotID, manifest.ParentID)
+		assert.Equal(t, uint64(150), manifest.SequenceNumber)
+		assert.Equal(t, uint64(2), manifest.LastWALSegmentIndex)
+
+		// Check that only the NEW sstable is in the manifest
+		require.Len(t, manifest.Levels, 1)
+		require.Len(t, manifest.Levels[0].Tables, 1)
+		assert.Equal(t, newSST.ID(), manifest.Levels[0].Tables[0].ID)
+
+		// Check that the new SSTable file was physically copied
+		assert.FileExists(t, filepath.Join(latestPath, "sst", "2.sst"))
+		// Check that the OLD SSTable file was NOT copied
+		assert.NoFileExists(t, filepath.Join(latestPath, "sst", "1.sst"))
+
+		// Check that auxiliary files were copied
+		assert.FileExists(t, filepath.Join(latestPath, "deleted_series.json"))
+
+		provider.AssertExpectations(t)
+		provider.tagIndexManager.AssertExpectations(t)
+	})
+
+	t.Run("NoParent", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots_no_parent")
+		dataDir := filepath.Join(tempDir, "data_no_parent")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+
+		// 2. Execution
+		manager := NewManager(provider)
+		err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no parent snapshot found")
+	})
+
+	t.Run("NoChanges", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots_no_changes")
+		dataDir := filepath.Join(tempDir, "data_no_changes")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+		manager := NewManager(provider)
+
+		// Create a full parent snapshot
+		parentSnapshotDir := filepath.Join(snapshotsBaseDir, "parent")
+		provider.sequenceNumber = 100
+		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+		provider.On("GetDeletedSeries").Return(nil).Once()
+		provider.On("GetRangeTombstones").Return(nil).Once()
+		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.stringStore.On("GetLogFilePath").Return("").Once()
+		provider.seriesIDStore.On("GetLogFilePath").Return("").Once()
+		provider.wal.On("Path").Return(provider.walDir).Once()
+		err := manager.CreateFull(context.Background(), parentSnapshotDir)
+		require.NoError(t, err)
+
+		// Do not make any changes to the provider state. The sequence number is still 100.
+
+		// 2. Execution
+		err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.NoError(t, err, "CreateIncremental should not return an error when there are no changes")
+
+		// Check that no new snapshot directory was created
+		entries, err := os.ReadDir(snapshotsBaseDir)
+		require.NoError(t, err)
+		assert.Len(t, entries, 1, "No new snapshot directory should be created")
+	})
+
+	t.Run("ParentManifestReadError", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots_parent_err")
+		dataDir := filepath.Join(tempDir, "data_parent_err")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		// Create a "valid" parent snapshot directory structure
+		parentSnapshotDir := filepath.Join(snapshotsBaseDir, "parent")
+		require.NoError(t, os.MkdirAll(parentSnapshotDir, 0755))
+
+		// Create a corrupted MANIFEST file
+		manifestPath := filepath.Join(parentSnapshotDir, "MANIFEST_corrupt.bin")
+		require.NoError(t, os.WriteFile(manifestPath, []byte("this is not a valid manifest"), 0644))
+
+		// Create the CURRENT file pointing to the corrupted manifest
+		require.NoError(t, os.WriteFile(filepath.Join(parentSnapshotDir, "CURRENT"), []byte("MANIFEST_corrupt.bin"), 0644))
+
+		// 2. Execution
+		manager := NewManager(newMockEngineProvider(t, dataDir))
+		err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to read parent snapshot manifest")
+	})
+}
 func TestRestoreFromFull_ManifestWithMissingFile(t *testing.T) {
 	// 1. Setup: Create a snapshot where the manifest lists a file that doesn't exist.
 	tempDir := t.TempDir()
