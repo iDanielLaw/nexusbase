@@ -1164,49 +1164,140 @@ func TestManager_CreateIncremental(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to read parent snapshot manifest")
 	})
 }
-func TestRestoreFromFull_ManifestWithMissingFile(t *testing.T) {
-	// 1. Setup: Create a snapshot where the manifest lists a file that doesn't exist.
-	tempDir := t.TempDir()
-	snapshotDir := filepath.Join(tempDir, "snapshot_missing_file")
-	targetDataDir := filepath.Join(tempDir, "restored_data_missing_file")
-	require.NoError(t, os.MkdirAll(snapshotDir, 0755))
-	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "sst"), 0755))
 
-	// Create one valid file that should be copied
-	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("sst1"), 0644))
-
-	// Create a manifest that lists the valid file AND a missing file
-	manifest := &core.SnapshotManifest{
-		SequenceNumber: 1,
-		Levels: []core.SnapshotLevelManifest{
-			{
-				LevelNumber: 0,
-				Tables: []core.SSTableMetadata{
-					{ID: 1, FileName: filepath.Join("sst", "1.sst")},
-					{ID: 2, FileName: filepath.Join("sst", "2.sst")}, // This file does not exist
-				},
-			},
-		},
-	}
-	manifestFileName := "MANIFEST_missing.bin"
+// writeTestManifest is a helper to reduce boilerplate in tests.
+func writeTestManifest(snapshotDir string, manifest *core.SnapshotManifest) (string, error) {
+	manifestFileName := fmt.Sprintf("MANIFEST_%d.bin", time.Now().UnixNano())
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	f, err := os.Create(manifestPath)
-	require.NoError(t, err)
-	require.NoError(t, WriteManifestBinary(f, manifest))
-	f.Close()
-	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if err := WriteManifestBinary(f, manifest); err != nil {
+		return "", err
+	}
+	return manifestFileName, nil
+}
 
-	// 2. Execution
-	restoreOpts := RestoreOptions{DataDir: targetDataDir}
-	err = RestoreFromFull(restoreOpts, snapshotDir)
-	require.NoError(t, err, "Restore should succeed even with a missing file, logging a warning")
+func TestRestoreFromFull_MissingFiles(t *testing.T) {
+	// This test verifies that the restore process can handle cases where files
+	// listed in the manifest, or expected directories, are missing from the
+	// snapshot source. The restore should log a warning and continue, rather
+	// than failing.
 
-	// 3. Verification
-	// The valid file should be restored
-	assert.FileExists(t, filepath.Join(targetDataDir, "sst", "1.sst"))
-	// The missing file should not exist
-	_, err = os.Stat(filepath.Join(targetDataDir, "sst", "2.sst"))
-	assert.True(t, os.IsNotExist(err), "The missing file should not have been created in the target directory")
+	t.Run("MissingSSTable", func(t *testing.T) {
+		// 1. Setup: Create a snapshot where the manifest lists an SSTable that doesn't exist.
+		tempDir := t.TempDir()
+		snapshotDir := filepath.Join(tempDir, "snapshot_missing_sst")
+		targetDataDir := filepath.Join(tempDir, "restored_data_missing_sst")
+		require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+		require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "sst"), 0755))
+
+		// Create one valid file that should be copied
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("sst1"), 0644))
+
+		// Create a manifest that lists the valid file AND a missing file
+		manifest := &core.SnapshotManifest{
+			Levels: []core.SnapshotLevelManifest{
+				{
+					LevelNumber: 0,
+					Tables: []core.SSTableMetadata{
+						{ID: 1, FileName: filepath.Join("sst", "1.sst")},
+						{ID: 2, FileName: filepath.Join("sst", "2.sst")}, // This file does not exist
+					},
+				},
+			},
+		}
+		manifestFileName, err := writeTestManifest(snapshotDir, manifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+		// 2. Execution
+		restoreOpts := RestoreOptions{DataDir: targetDataDir}
+		err = RestoreFromFull(restoreOpts, snapshotDir)
+		require.NoError(t, err, "Restore should succeed even with a missing SSTable, logging a warning")
+
+		// 3. Verification
+		assert.FileExists(t, filepath.Join(targetDataDir, "sst", "1.sst"))
+		assert.NoFileExists(t, filepath.Join(targetDataDir, "sst", "2.sst"))
+	})
+
+	t.Run("MissingAuxiliaryFile", func(t *testing.T) {
+		// 1. Setup: Create a snapshot where the manifest lists an auxiliary file that doesn't exist.
+		tempDir := t.TempDir()
+		snapshotDir := filepath.Join(tempDir, "snapshot_missing_aux")
+		targetDataDir := filepath.Join(tempDir, "restored_data_missing_aux")
+		require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+
+		// Create one valid file that should be copied
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "string_mapping.log"), []byte("str"), 0644))
+
+		// Create a manifest that lists the valid file AND a missing file
+		manifest := &core.SnapshotManifest{
+			StringMappingFile: "string_mapping.log",  // This file exists
+			DeletedSeriesFile: "deleted_series.json", // This file does not exist
+		}
+		manifestFileName, err := writeTestManifest(snapshotDir, manifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+		// 2. Execution
+		restoreOpts := RestoreOptions{DataDir: targetDataDir}
+		err = RestoreFromFull(restoreOpts, snapshotDir)
+		require.NoError(t, err, "Restore should succeed even with a missing auxiliary file")
+
+		// 3. Verification
+		assert.FileExists(t, filepath.Join(targetDataDir, "string_mapping.log"))
+		assert.NoFileExists(t, filepath.Join(targetDataDir, "deleted_series.json"))
+	})
+
+	t.Run("MissingWALDirectory", func(t *testing.T) {
+		// 1. Setup: Create a snapshot where the manifest lists a WAL directory, but it doesn't exist.
+		tempDir := t.TempDir()
+		snapshotDir := filepath.Join(tempDir, "snapshot_missing_wal")
+		targetDataDir := filepath.Join(tempDir, "restored_data_missing_wal")
+		require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+
+		// Create a manifest that lists the WAL directory
+		manifest := &core.SnapshotManifest{
+			WALFile: "wal", // This directory does not exist in the snapshot source
+		}
+		manifestFileName, err := writeTestManifest(snapshotDir, manifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+		// 2. Execution
+		restoreOpts := RestoreOptions{DataDir: targetDataDir}
+		err = RestoreFromFull(restoreOpts, snapshotDir)
+		require.NoError(t, err, "Restore should succeed even when the WAL directory is missing")
+
+		// 3. Verification
+		assert.NoFileExists(t, filepath.Join(targetDataDir, "wal"))
+	})
+
+	t.Run("MissingIndexDirectory", func(t *testing.T) {
+		// 1. Setup: Create a snapshot that is missing the 'index' directory entirely.
+		tempDir := t.TempDir()
+		snapshotDir := filepath.Join(tempDir, "snapshot_missing_index")
+		targetDataDir := filepath.Join(tempDir, "restored_data_missing_index")
+		require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+
+		// Create a minimal valid manifest and CURRENT file. The 'index' directory is
+		// copied by convention if it exists, it's not listed in the manifest.
+		manifest := &core.SnapshotManifest{}
+		manifestFileName, err := writeTestManifest(snapshotDir, manifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+		// 2. Execution
+		restoreOpts := RestoreOptions{DataDir: targetDataDir}
+		err = RestoreFromFull(restoreOpts, snapshotDir)
+		require.NoError(t, err, "Restore should succeed even when the index directory is missing")
+
+		// 3. Verification
+		assert.NoFileExists(t, filepath.Join(targetDataDir, indexer.IndexSSTDirName))
+	})
 }
 
 func TestManager_CreateFull_WriteCurrentFileError(t *testing.T) {
