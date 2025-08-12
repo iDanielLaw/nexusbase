@@ -323,3 +323,44 @@ func TestSnapshot_E2E_CreateAndRestore(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, bitmap.Contains(1), "Restored tag index should contain the original series ID")
 }
+
+// TestSnapshot_E2E_RestoreFailure_MissingManifest tests the restore process when the manifest file
+// pointed to by CURRENT is missing from the snapshot.
+func TestSnapshot_E2E_RestoreFailure_MissingManifest(t *testing.T) {
+	// --- 1. Setup: Create a valid snapshot first ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotDir := filepath.Join(baseDir, "snapshot")
+	restoredDataDir := filepath.Join(baseDir, "data_restored_fail")
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+
+	// Populate with some minimal data to make the snapshot non-trivial
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+
+	// Create the snapshot
+	manager := NewManager(provider)
+	err := manager.CreateFull(context.Background(), snapshotDir)
+	require.NoError(t, err, "Initial snapshot creation should succeed")
+	require.FileExists(t, filepath.Join(snapshotDir, "CURRENT"))
+
+	// --- 2. Corrupt the snapshot ---
+	// Overwrite the CURRENT file to point to a non-existent manifest.
+	// This simulates a form of corruption or an incomplete snapshot.
+	err = os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte("MANIFEST_nonexistent.bin"), 0644)
+	require.NoError(t, err, "Should be able to overwrite CURRENT file to simulate corruption")
+
+	// --- 3. Attempt to restore from the corrupted snapshot ---
+	restoreOpts := RestoreOptions{DataDir: restoredDataDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	err = RestoreFromFull(restoreOpts, snapshotDir)
+
+	// --- 4. Verify the failure ---
+	require.Error(t, err, "RestoreFromFull should fail when the manifest file is missing")
+	assert.Contains(t, err.Error(), "snapshot manifest file MANIFEST_nonexistent.bin (from CURRENT) not found", "Error message should indicate the manifest is missing")
+
+	// Verify that the target directory was not created or was cleaned up.
+	_, statErr := os.Stat(restoredDataDir)
+	assert.True(t, os.IsNotExist(statErr), "Target data directory should not exist after a failed restore")
+}
