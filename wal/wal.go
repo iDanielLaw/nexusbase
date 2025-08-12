@@ -7,7 +7,6 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"log/slog"
 	"os"
@@ -353,34 +352,6 @@ func (w *WAL) rotateLocked() error {
 		w.hookManager.Trigger(context.Background(), hooks.NewPostWALRotateEvent(payload))
 	}
 	return nil
-}
-
-// readRecord reads a single record from the WAL.
-func readRecord(r io.Reader) ([]byte, error) {
-	var length uint32
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
-		return nil, err // Could be io.EOF for clean end
-	}
-
-	if length > 1024*1024*128 { // 128MB limit per record
-		return nil, fmt.Errorf("wal record length %d exceeds sanity limit", length)
-	}
-
-	data := make([]byte, length)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, fmt.Errorf("failed to read record data (expected %d bytes): %w", length, err)
-	}
-
-	var storedChecksum uint32
-	if err := binary.Read(r, binary.LittleEndian, &storedChecksum); err != nil {
-		return nil, fmt.Errorf("failed to read record checksum: %w", err)
-	}
-
-	if calculatedChecksum := crc32.ChecksumIEEE(data); calculatedChecksum != storedChecksum {
-		return nil, fmt.Errorf("checksum mismatch: stored=%x, calculated=%x", storedChecksum, calculatedChecksum)
-	}
-
-	return data, nil
 }
 
 // encodeEntryData serializes a single WALEntry's data part into a writer.

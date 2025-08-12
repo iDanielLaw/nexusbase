@@ -151,7 +151,33 @@ func (sw *SegmentWriter) WriteRecord(data []byte) error {
 
 // ReadRecord reads a single record from the segment.
 func (sr *SegmentReader) ReadRecord() ([]byte, error) {
-	return readRecord(sr.reader)
+	var length uint32
+	if err := binary.Read(sr.reader, binary.LittleEndian, &length); err != nil {
+		return nil, err // Could be io.EOF for clean end
+	}
+
+	// A sanity check to prevent allocating huge amounts of memory for a corrupt record.
+	// This limit can be adjusted based on expected maximum record size.
+	const maxRecordSize = 128 * 1024 * 1024 // 128MB
+	if length > maxRecordSize {
+		return nil, fmt.Errorf("wal record length %d exceeds sanity limit of %d bytes", length, maxRecordSize)
+	}
+
+	data := make([]byte, length)
+	if _, err := io.ReadFull(sr.reader, data); err != nil {
+		return nil, fmt.Errorf("failed to read record data (expected %d bytes): %w", length, err)
+	}
+
+	var storedChecksum uint32
+	if err := binary.Read(sr.reader, binary.LittleEndian, &storedChecksum); err != nil {
+		return nil, fmt.Errorf("failed to read record checksum: %w", err)
+	}
+
+	if calculatedChecksum := crc32.ChecksumIEEE(data); calculatedChecksum != storedChecksum {
+		return nil, fmt.Errorf("checksum mismatch: stored=%x, calculated=%x", storedChecksum, calculatedChecksum)
+	}
+
+	return data, nil
 }
 
 // Sync flushes the buffered writer and syncs the file to disk.
