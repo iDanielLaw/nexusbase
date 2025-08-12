@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 )
@@ -33,7 +34,7 @@ func readStringWithLength(r io.Reader) (string, error) {
 	}
 	sBytes := make([]byte, length)
 	if _, err := io.ReadFull(r, sBytes); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read string data (expected %d bytes): %w", length, err)
 	}
 	return string(sBytes), nil
 }
@@ -62,7 +63,7 @@ func readBytesWithLength(r io.Reader) ([]byte, error) {
 	}
 	bBytes := make([]byte, length)
 	if _, err := io.ReadFull(r, bBytes); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read bytes data (expected %d bytes): %w", length, err)
 	}
 	return bBytes, nil
 }
@@ -73,6 +74,21 @@ func writeManifestBinary(w io.Writer, manifest *core.SnapshotManifest) error {
 	header := core.NewFileHeader(core.ManifestMagic, core.CompressionNone)
 	if err := binary.Write(w, binary.LittleEndian, &header); err != nil {
 		return fmt.Errorf("failed to write manifest header: %w", err)
+	}
+
+	// Write Type, ParentID, CreatedAt (as UnixNano)
+	if err := writeStringWithLength(w, string(manifest.Type)); err != nil {
+		return fmt.Errorf("failed to write snapshot type: %w", err)
+	}
+	if err := writeStringWithLength(w, manifest.ParentID); err != nil {
+		return fmt.Errorf("failed to write parent ID: %w", err)
+	}
+	if err := binary.Write(w, binary.LittleEndian, manifest.CreatedAt.UnixNano()); err != nil {
+		return fmt.Errorf("failed to write CreatedAt timestamp: %w", err)
+	}
+
+	if err := binary.Write(w, binary.LittleEndian, manifest.LastWALSegmentIndex); err != nil {
+		return fmt.Errorf("failed to write last WAL segment index: %w", err)
 	}
 
 	// 2. Sequence Number
@@ -95,38 +111,38 @@ func writeManifestBinary(w io.Writer, manifest *core.SnapshotManifest) error {
 		}
 		for _, table := range level.Tables {
 			if err := binary.Write(w, binary.LittleEndian, table.ID); err != nil {
-				return err
+				return fmt.Errorf("failed to write table ID for level %d: %w", level.LevelNumber, err)
 			}
 			if err := writeBytesWithLength(w, []byte(table.FileName)); err != nil {
-				return err
+				return fmt.Errorf("failed to write FileName for level %d, table %d: %w", level.LevelNumber, table.ID, err)
 			}
 			if err := writeBytesWithLength(w, table.MinKey); err != nil {
-				return err
+				return fmt.Errorf("failed to write MinKey for level %d, table %d: %w", level.LevelNumber, table.ID, err)
 			}
 			if err := writeBytesWithLength(w, table.MaxKey); err != nil {
-				return err
+				return fmt.Errorf("failed to write MaxKey for level %d, table %d: %w", level.LevelNumber, table.ID, err)
 			}
 		}
 	}
 
 	// 5. Auxiliary Files
 	if err := writeStringWithLength(w, manifest.WALFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write WALFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.DeletedSeriesFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write DeletedSeriesFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.RangeTombstonesFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write RangeTombstonesFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.StringMappingFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write StringMappingFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.SeriesMappingFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write SeriesMappingFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.SSTableCompression); err != nil {
-		return err
+		return fmt.Errorf("failed to write SSTableCompression: %w", err)
 	}
 
 	return nil
@@ -134,7 +150,7 @@ func writeManifestBinary(w io.Writer, manifest *core.SnapshotManifest) error {
 
 // readManifestBinary deserializes the SnapshotManifest from a binary format.
 func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
-	manifest := &core.SnapshotManifest{}
+	manifest := &core.SnapshotManifest{} //nolint:govet
 
 	// 1. Header
 	var header core.FileHeader
@@ -145,9 +161,31 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 		return nil, fmt.Errorf("failed to read manifest header: %w", err)
 	}
 	if header.Magic != core.ManifestMagic {
-		// This could be a JSON manifest. We can add a check here for backward compatibility.
-		// For now, we'll just error out.
 		return nil, fmt.Errorf("invalid binary manifest magic number. Got: %x", header.Magic)
+	}
+
+	// Read Type, ParentID, CreatedAt
+	var err error
+	var typeStr string
+	typeStr, err = readStringWithLength(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read snapshot type: %w", err)
+	}
+	manifest.Type = core.SnapshotType(typeStr)
+
+	manifest.ParentID, err = readStringWithLength(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read parent ID: %w", err)
+	}
+
+	var createdAtNano int64
+	if err := binary.Read(r, binary.LittleEndian, &createdAtNano); err != nil {
+		return nil, fmt.Errorf("failed to read CreatedAt timestamp: %w", err)
+	}
+	manifest.CreatedAt = time.Unix(0, createdAtNano).UTC()
+
+	if err := binary.Read(r, binary.LittleEndian, &manifest.LastWALSegmentIndex); err != nil {
+		return nil, fmt.Errorf("failed to read last WAL segment index: %w", err)
 	}
 
 	// 2. Sequence Number
@@ -166,10 +204,10 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	for i := uint32(0); i < numLevels; i++ {
 		var levelNum, numTables uint32
 		if err := binary.Read(r, binary.LittleEndian, &levelNum); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read level number for level index %d: %w", i, err)
 		}
 		if err := binary.Read(r, binary.LittleEndian, &numTables); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read table count for level %d: %w", levelNum, err)
 		}
 
 		manifest.Levels[i].LevelNumber = int(levelNum)
@@ -178,23 +216,23 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 		for j := uint32(0); j < numTables; j++ {
 			var table core.SSTableMetadata
 			if err := binary.Read(r, binary.LittleEndian, &table.ID); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read table ID for level %d, table %d: %w", levelNum, j, err)
 			}
 
 			fileNameBytes, err := readBytesWithLength(r)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read FileName for level %d, table %d: %w", levelNum, j, err)
 			}
 			table.FileName = string(fileNameBytes)
 
 			table.MinKey, err = readBytesWithLength(r)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read MinKey for level %d, table %d: %w", levelNum, j, err)
 			}
 
 			table.MaxKey, err = readBytesWithLength(r)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read MaxKey for level %d, table %d: %w", levelNum, j, err)
 			}
 
 			manifest.Levels[i].Tables[j] = table
@@ -202,30 +240,29 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	}
 
 	// 5. Auxiliary Files
-	var err error
 	manifest.WALFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read WALFile: %w", err)
 	}
 	manifest.DeletedSeriesFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read DeletedSeriesFile: %w", err)
 	}
 	manifest.RangeTombstonesFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read RangeTombstonesFile: %w", err)
 	}
 	manifest.StringMappingFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read StringMappingFile: %w", err)
 	}
 	manifest.SeriesMappingFile, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read SeriesMappingFile: %w", err)
 	}
 	manifest.SSTableCompression, err = readStringWithLength(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read SSTableCompression: %w", err)
 	}
 
 	return manifest, nil

@@ -1,11 +1,25 @@
 package core
 
+import "time"
+
+type SnapshotType string
+
+const (
+	SnapshotTypeFull        SnapshotType = "FULL"
+	SnapshotTypeDelta       SnapshotType = "DELT"
+	SnapshotTypeIncremental SnapshotType = "INCR"
+)
+
 // SnapshotManifest defines the structure of the snapshot manifest file.
 type SnapshotManifest struct {
-	SequenceNumber      uint64                  `json:"sequence_number"`
+	Type           SnapshotType `json:"type"`
+	CreatedAt      time.Time    `json:"created_at"`
+	SequenceNumber uint64       `json:"sequence_number"`
 	// ParentManifest stores the relative path to the parent manifest file,
 	// forming a chain for incremental snapshots. It's empty for a full snapshot.
 	ParentManifest      string                  `json:"parent_manifest,omitempty"`
+	ParentID            string                  `json:"parent_id,omitempty"`
+	LastWALSegmentIndex uint64                  `json:"last_wal_segment_index"`
 	Levels              []SnapshotLevelManifest `json:"levels"`
 	WALFile             string                  `json:"wal_file,omitempty"`
 	DeletedSeriesFile   string                  `json:"deleted_series_file,omitempty"`
@@ -28,4 +42,3 @@ type SSTableMetadata struct {
 	MinKey   []byte `json:"min_key"`
 	MaxKey   []byte `json:"max_key"`
 }
-

@@ -914,6 +914,11 @@ func (e *storageEngine) GetWALPath() string {
 	return e.wal.Path()
 }
 
+// GetWAL return the wal object.
+func (e *storageEngine) GetWAL() wal.WALInterface {
+	return e.wal
+}
+
 // GetSnapshotsBaseDir returns the base directory path for storing snapshots.
 func (e *storageEngine) GetSnapshotsBaseDir() string {
 	return e.snapshotsBaseDir

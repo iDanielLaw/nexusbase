@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 )
@@ -73,6 +74,21 @@ func WriteManifestBinary(w io.Writer, manifest *core.SnapshotManifest) error {
 	header := core.NewFileHeader(core.ManifestMagic, core.CompressionNone)
 	if err := binary.Write(w, binary.LittleEndian, &header); err != nil {
 		return fmt.Errorf("failed to write manifest header: %w", err)
+	}
+
+	// Write Type, ParentID, CreatedAt (as UnixNano)
+	if err := writeStringWithLength(w, string(manifest.Type)); err != nil {
+		return fmt.Errorf("failed to write snapshot type: %w", err)
+	}
+	if err := writeStringWithLength(w, manifest.ParentID); err != nil {
+		return fmt.Errorf("failed to write parent ID: %w", err)
+	}
+	if err := binary.Write(w, binary.LittleEndian, manifest.CreatedAt.UnixNano()); err != nil {
+		return fmt.Errorf("failed to write CreatedAt timestamp: %w", err)
+	}
+
+	if err := binary.Write(w, binary.LittleEndian, manifest.LastWALSegmentIndex); err != nil {
+		return fmt.Errorf("failed to write last WAL segment index: %w", err)
 	}
 
 	// 2. Sequence Number
@@ -148,6 +164,26 @@ func ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 		return nil, fmt.Errorf("invalid binary manifest magic number. Got: %x", header.Magic)
 	}
 
+	// Read Type, ParentID, CreatedAt
+	var err error
+	var typeStr string
+	typeStr, err = readStringWithLength(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read snapshot type: %w", err)
+	}
+	manifest.Type = core.SnapshotType(typeStr)
+	manifest.ParentID, err = readStringWithLength(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read parent ID: %w", err)
+	}
+	var createdAtNano int64
+	if err := binary.Read(r, binary.LittleEndian, &createdAtNano); err != nil {
+		return nil, fmt.Errorf("failed to read CreatedAt timestamp: %w", err)
+	}
+	manifest.CreatedAt = time.Unix(0, createdAtNano).UTC()
+	if err := binary.Read(r, binary.LittleEndian, &manifest.LastWALSegmentIndex); err != nil {
+		return nil, fmt.Errorf("failed to read last WAL segment index: %w", err)
+	}
 	// 2. Sequence Number
 	if err := binary.Read(r, binary.LittleEndian, &manifest.SequenceNumber); err != nil {
 		return nil, fmt.Errorf("failed to read sequence number: %w", err)
@@ -200,7 +236,6 @@ func ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	}
 
 	// 5. Auxiliary Files
-	var err error
 	manifest.WALFile, err = readStringWithLength(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WALFile: %w", err)

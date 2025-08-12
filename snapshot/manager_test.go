@@ -21,6 +21,7 @@ import (
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexusbase/wal"
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -53,6 +54,7 @@ type mockEngineProvider struct {
 	stringStore        *mockPrivateManagerStore
 	seriesIDStore      *mockPrivateManagerStore
 	sstableCompression string
+	wal                *mockWAL
 	flushedMemtables   []*memtable.Memtable
 	isStarted          bool
 }
@@ -75,6 +77,7 @@ func newMockEngineProvider(t *testing.T, dataDir string) *mockEngineProvider {
 		stringStore:        newMockPrivateManagerStore(filepath.Join(dataDir, indexer.StringMappingLogName)),
 		seriesIDStore:      newMockPrivateManagerStore(filepath.Join(dataDir, indexer.SeriesMappingLogName)),
 		sstableCompression: "none",
+		wal:                new(mockWAL),
 		isStarted:          true,
 	}
 }
@@ -85,7 +88,7 @@ func (m *mockEngineProvider) CheckStarted() error {
 	}
 	return fmt.Errorf("engine not started")
 }
-func (m *mockEngineProvider) GetWALPath() string                { return m.walDir }
+func (m *mockEngineProvider) GetWAL() wal.WALInterface          { return m.wal }
 func (m *mockEngineProvider) GetClock() utils.Clock             { return m.clock }
 func (m *mockEngineProvider) GetLogger() *slog.Logger           { return m.logger }
 func (m *mockEngineProvider) GetTracer() trace.Tracer           { return m.tracer }
@@ -118,13 +121,19 @@ func (m *mockEngineProvider) FlushMemtableToL0(mem *memtable.Memtable, parentCtx
 }
 
 func (m *mockEngineProvider) GetDeletedSeries() map[string]uint64 {
-	m.Called()
-	return m.deletedSeries
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(map[string]uint64)
 }
 
 func (m *mockEngineProvider) GetRangeTombstones() map[string][]core.RangeTombstone {
-	m.Called()
-	return m.rangeTombstones
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(map[string][]core.RangeTombstone)
 }
 
 // mockTagIndexManager เป็น mock สำหรับ indexer.TagIndexManagerInterface
@@ -178,6 +187,23 @@ func (m *mockTagIndexManager) LoadFromFile(dataDir string) error {
 	return args.Error(0)
 }
 
+// mockWAL is a mock for wal.WALInterface
+type mockWAL struct {
+	mock.Mock
+}
+
+func (m *mockWAL) AppendBatch(entries []core.WALEntry) error { return m.Called(entries).Error(0) }
+func (m *mockWAL) Append(entry core.WALEntry) error          { return m.Called(entry).Error(0) }
+func (m *mockWAL) Sync() error                               { return m.Called().Error(0) }
+func (m *mockWAL) Purge(upToIndex uint64) error              { return m.Called(upToIndex).Error(0) }
+func (m *mockWAL) Close() error                              { return m.Called().Error(0) }
+func (m *mockWAL) Path() string                              { return m.Called().String(0) }
+func (m *mockWAL) SetTestingOnlyInjectCloseError(err error)  { m.Called(err) }
+func (m *mockWAL) ActiveSegmentIndex() uint64 {
+	return uint64(m.Called().Int(0))
+}
+func (m *mockWAL) Rotate() error { return m.Called().Error(0) }
+
 // mockPrivateManagerStore เป็น mock สำหรับ internal.PrivateManagerStore
 type mockPrivateManagerStore struct {
 	mock.Mock
@@ -206,6 +232,7 @@ type mockSnapshotHelper struct {
 	InterceptCopyDirectoryContents       func(src, dst string) error
 	InterceptLinkOrCopyDirectoryContents func(src, dst string) error
 	InterceptRemoveAll                   func(path string) error
+	InterceptCreate                      func(name string) (*os.File, error)
 	InterceptWriteFile                   func(filename string, data []byte, perm os.FileMode) error
 	InterceptReadFile                    func(filename string) ([]byte, error)
 	InterceptMkdirTemp                   func(dir, pattern string) (string, error)
@@ -213,6 +240,7 @@ type mockSnapshotHelper struct {
 	InterceptOpen                        func(name string) (*os.File, error)
 	InterceptCopyFile                    func(src, dst string) error
 	InterceptReadManifestBinary          func(r io.Reader) (*core.SnapshotManifest, error)
+	InterceptReadDir                     func(name string) ([]os.DirEntry, error)
 	InterceptRename                      func(oldPath, newPath string) error
 }
 
@@ -251,6 +279,13 @@ func (ms *mockSnapshotHelper) RemoveAll(path string) error {
 		return ms.InterceptRemoveAll(path)
 	}
 	return ms.helperSnapshot.RemoveAll(path)
+}
+
+func (ms *mockSnapshotHelper) Create(name string) (*os.File, error) {
+	if ms.InterceptCreate != nil {
+		return ms.InterceptCreate(name)
+	}
+	return ms.helperSnapshot.Create(name)
 }
 
 func (ms *mockSnapshotHelper) WriteFile(filename string, data []byte, perm os.FileMode) error {
@@ -293,6 +328,13 @@ func (ms *mockSnapshotHelper) ReadManifestBinary(r io.Reader) (*core.SnapshotMan
 		return ms.InterceptReadManifestBinary(r)
 	}
 	return ms.helperSnapshot.ReadManifestBinary(r)
+}
+
+func (ms *mockSnapshotHelper) ReadDir(name string) ([]os.DirEntry, error) {
+	if ms.InterceptReadDir != nil {
+		return ms.InterceptReadDir(name)
+	}
+	return ms.helperSnapshot.ReadDir(name)
 }
 
 func (ms *mockSnapshotHelper) CopyFile(src, dst string) error {
@@ -374,9 +416,11 @@ func TestManager_CreateFull(t *testing.T) {
 	// ตั้งค่า mock expectations
 	provider.On("GetMemtablesForFlush").Return()
 	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
-	provider.On("GetDeletedSeries").Return()
-	provider.On("GetRangeTombstones").Return()
+	provider.On("GetDeletedSeries").Return(provider.deletedSeries)
+	provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
 	provider.tagIndexManager.On("CreateSnapshot", filepath.Join(snapshotDir, "index")).Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Return(1)
+	provider.wal.On("Path").Return(provider.walDir)
 	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 
@@ -399,7 +443,7 @@ func TestManager_CreateFull(t *testing.T) {
 	// อ่านและตรวจสอบเนื้อหาของ manifest
 	f, err := os.Open(manifestPath)
 	require.NoError(t, err)
-	defer f.Close()
+	defer f.Close() //nolint:staticcheck
 	manifest, err := ReadManifestBinary(f)
 	require.NoError(t, err)
 
@@ -413,6 +457,10 @@ func TestManager_CreateFull(t *testing.T) {
 	assert.Equal(t, 1, manifest.Levels[1].LevelNumber)
 	require.Len(t, manifest.Levels[1].Tables, 1)
 	assert.Equal(t, sst2.ID(), manifest.Levels[1].Tables[0].ID)
+	assert.Equal(t, string(SnapshotTypeFull), string(manifest.Type))
+	assert.Empty(t, manifest.ParentID)
+	assert.False(t, manifest.CreatedAt.IsZero())
+	assert.Equal(t, uint64(1), manifest.LastWALSegmentIndex)
 
 	// ตรวจสอบไฟล์เสริม
 	assert.Equal(t, "deleted_series.json", manifest.DeletedSeriesFile)
@@ -461,6 +509,9 @@ func TestManager_CreateFull_FlushError(t *testing.T) {
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	// FlushMemtableToL0 will be called and should return our simulated error.
+	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
+	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 	provider.On("FlushMemtableToL0", mem1, mock.Anything).Return(expectedFlushError)
 
 	// 2. Execution
@@ -493,10 +544,13 @@ func TestManager_CreateFull_TagIndexSnapshotError(t *testing.T) {
 	// Set up mock expectations.
 	// The flow will get past flushing memtables.
 	provider.On("GetMemtablesForFlush").Return()
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil) // Assume flush succeeds
+	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 
+	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
+	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 	// The call to CreateSnapshot on the tag index manager should fail.
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(expectedIndexError)
 
@@ -534,6 +588,10 @@ func TestManager_CreateFull_SSTableCopyError(t *testing.T) {
 	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
+	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
+	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
 
 	// 2. Simulate the error condition
 	// Remove the source SSTable file *after* it's been registered with the
@@ -575,9 +633,12 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 
 		provider.On("GetMemtablesForFlush").Return()
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
-		provider.On("GetDeletedSeries").Return()
-		provider.On("GetRangeTombstones").Return(nil)                            // Add expectation for this call
+		provider.On("GetDeletedSeries").Return(provider.deletedSeries)
+		provider.On("GetRangeTombstones").Return(nil)
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil) // Add expectation for this call
+		provider.wal.On("ActiveSegmentIndex").Return(0)
+		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
+		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 
 		// 2. Simulate the error condition
 		expectedErr := fmt.Errorf("simulated saveJSON error for deleted_series")
@@ -609,9 +670,12 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 
 		provider.On("GetMemtablesForFlush").Return()
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
-		provider.On("GetDeletedSeries").Return()                                 // Assume this succeeds
-		provider.On("GetRangeTombstones").Return()                               // This will return the map above
+		provider.On("GetDeletedSeries").Return(nil)
+		provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil) // Add expectation for this call
+		provider.wal.On("ActiveSegmentIndex").Return(0)
+		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
+		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 
 		// 2. Simulate the error condition
 		expectedErr := fmt.Errorf("simulated saveJSON error for range_tombstones")
@@ -653,9 +717,11 @@ func TestManager_CreateFull_CopyAuxiliaryFileError(t *testing.T) {
 		// Set up mock expectations for calls that happen before the error
 		provider.On("GetMemtablesForFlush").Return()
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
-		provider.On("GetDeletedSeries").Return()
-		provider.On("GetRangeTombstones").Return()
+		provider.On("GetDeletedSeries").Return(nil)
+		provider.On("GetRangeTombstones").Return(nil)
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+		provider.wal.On("ActiveSegmentIndex").Return(0)
+		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 
 		// 2. Simulate the error condition
@@ -699,10 +765,12 @@ func TestManager_CreateFull_WALCopyError(t *testing.T) {
 		// Set up mock expectations for calls that happen before the error
 		provider.On("GetMemtablesForFlush").Return()
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
-		provider.On("GetDeletedSeries").Return()
-		provider.On("GetRangeTombstones").Return()
+		provider.On("GetDeletedSeries").Return(nil)
+		provider.On("GetRangeTombstones").Return(nil)
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-		provider.stringStore.On("GetLogFilePath").Return("")   // Return empty string to simulate no file
+		provider.wal.On("ActiveSegmentIndex").Return(1)
+		provider.stringStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
+		provider.wal.On("Path").Return(provider.walDir)
 		provider.seriesIDStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
 
 		// 2. Simulate the error condition
@@ -755,6 +823,9 @@ func TestManager_CreateFull_RemoveAllError(t *testing.T) {
 func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	// 1. Setup
 	tempDir := t.TempDir()
+	helper := &mockSnapshotHelper{
+		helperSnapshot: newHelperSnapshot(),
+	}
 	snapshotDir := filepath.Join(tempDir, "snapshot_manifest_error")
 	dataDir := filepath.Join(tempDir, "data_manifest_error")
 	require.NoError(t, os.MkdirAll(dataDir, 0755))
@@ -765,11 +836,12 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 
 	// Set up mock expectations for all calls that happen before writing the manifest.
 	provider.On("GetMemtablesForFlush").Return()
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
-	provider.On("GetDeletedSeries").Return()
-	provider.On("GetRangeTombstones").Return()
+	provider.On("GetDeletedSeries").Return(nil)
+	provider.On("GetRangeTombstones").Return(nil)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.stringStore.On("GetLogFilePath").Return("")   // Return empty string to simulate no file
+	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.stringStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
+	provider.wal.On("Path").Return(provider.walDir)
 	provider.seriesIDStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
 
 	// 2. Simulate the error condition
@@ -777,17 +849,17 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	// Cast to the concrete type to modify the function field for the test.
 	concreteManager, ok := mgr.(*manager)
 	require.True(t, ok)
-
+	concreteManager.wrapper = helper
 	expectedErr := fmt.Errorf("simulated write manifest error")
-	concreteManager.writeManifestFunc = func(w io.Writer, manifest *core.SnapshotManifest) error {
-		return expectedErr
+	concreteManager.writeManifestAndCurrentFunc = func(snapshotDir string, manifest *core.SnapshotManifest) (string, error) {
+		return "", expectedErr
 	}
 
 	// 3. Execution & Verification
 	err := concreteManager.CreateFull(context.Background(), snapshotDir)
 	require.Error(t, err, "CreateFull should fail when writeManifestBinary fails")
 	assert.ErrorIs(t, err, expectedErr, "The returned error should wrap the one from our mock")
-	assert.Contains(t, err.Error(), "failed to write binary snapshot manifest")
+	// The error message will be exactly the expected error, as we replaced the whole function.
 }
 
 func TestManager_CreateFull_EngineNotStarted(t *testing.T) {
@@ -826,9 +898,12 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	// Set up mock expectations for an empty run
 	provider.On("GetMemtablesForFlush").Return()
 	// FlushMemtableToL0 should not be called
-	provider.On("GetDeletedSeries").Return()
-	provider.On("GetRangeTombstones").Return()
+	provider.On("GetDeletedSeries").Return(nil)
+	provider.On("GetRangeTombstones").Return(nil)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("Path").Return(provider.walDir)
+	provider.wal.On("Path").Return(provider.walDir)
 	provider.stringStore.On("GetLogFilePath").Return("")
 	provider.seriesIDStore.On("GetLogFilePath").Return("")
 
@@ -844,7 +919,7 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	require.FileExists(t, manifestPath)
 
-	f, err := os.Open(manifestPath)
+	f, err := os.Open(manifestPath) //nolint:staticcheck
 	require.NoError(t, err)
 	defer f.Close()
 	manifest, err := ReadManifestBinary(f)
@@ -856,6 +931,122 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	assert.Empty(t, manifest.DeletedSeriesFile)
 	assert.Empty(t, manifest.RangeTombstonesFile)
 	// WAL might still be copied if the directory exists, which is fine.
+}
+
+func TestManager_CreateIncremental(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+	dataDir := filepath.Join(tempDir, "data")
+	require.NoError(t, os.MkdirAll(dataDir, 0755))
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newMockEngineProvider(t, dataDir)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok, "provider clock should be a mock clock")
+
+	require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
+	require.NoError(t, os.MkdirAll(provider.walDir, 0755))
+
+	// --- Create a Full Parent Snapshot First ---
+	// Use the mock clock to generate the name for consistency
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, os.MkdirAll(parentSnapshotDir, 0755))
+
+	parentSST := createDummySSTable(t, provider.sstDir, 1)
+	provider.levelsManager.AddTableToLevel(0, parentSST)
+	provider.sequenceNumber = 100
+
+	// Mock calls for the parent snapshot creation
+	provider.On("GetMemtablesForFlush").Once().Return()
+	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Once().Return(nil)
+	provider.On("GetDeletedSeries").Once().Return(nil)
+	provider.On("GetRangeTombstones").Once().Return(nil)
+	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Once().Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Once().Return(1)
+	// Add missing mocks for CreateFull part
+	provider.stringStore.On("GetLogFilePath").Once().Return(provider.stringStore.path)
+	provider.seriesIDStore.On("GetLogFilePath").Once().Return(provider.seriesIDStore.path)
+	provider.wal.On("Path").Return(provider.walDir)
+
+	manager := NewManager(provider)
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// Advance the clock to ensure the next snapshot has a new timestamp
+	mockClock.Advance(time.Second)
+
+	// --- Prepare for Incremental Snapshot ---
+	// Add a new SSTable
+	newSST := createDummySSTable(t, provider.sstDir, 2)
+	provider.levelsManager.AddTableToLevel(0, newSST)
+	provider.sequenceNumber = 150 // Advance sequence number
+
+	// Mock calls for the incremental snapshot
+	provider.On("GetMemtablesForFlush").Once().Return()
+	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Once().Return(nil)
+	provider.On("GetDeletedSeries").Once().Return(map[string]uint64{"new_deleted": 140})
+	provider.On("GetRangeTombstones").Once().Return(nil)
+	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Once().Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Once().Return(2) // New WAL segment
+	// Add missing mocks for CreateIncremental part
+	provider.stringStore.On("GetLogFilePath").Once().Return(provider.stringStore.path)
+	provider.seriesIDStore.On("GetLogFilePath").Once().Return(provider.seriesIDStore.path)
+	// This was the missing mock. The incremental creation also calls copyAuxiliaryAndWALFiles.
+	provider.wal.On("Path").Return(provider.walDir)
+
+	// 2. Execution
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+
+	// 3. Verification
+	// Find the new incremental snapshot directory
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+	require.NotEqual(t, filepath.Base(parentSnapshotDir), latestID, "A new snapshot directory should have been created")
+	assert.True(t, strings.HasSuffix(latestID, "_incr"), "New snapshot should be marked as incremental")
+
+	// Verify its contents
+	manifest, _, err := readManifestFromDir(latestPath, newHelperSnapshot())
+	require.NoError(t, err)
+
+	assert.Equal(t, string(SnapshotTypeIncremental), string(manifest.Type))
+	assert.Equal(t, filepath.Base(parentSnapshotDir), manifest.ParentID)
+	assert.Equal(t, uint64(150), manifest.SequenceNumber)
+	assert.Equal(t, uint64(2), manifest.LastWALSegmentIndex)
+
+	// Check that only the NEW sstable is in the manifest
+	require.Len(t, manifest.Levels, 1)
+	require.Len(t, manifest.Levels[0].Tables, 1)
+	assert.Equal(t, newSST.ID(), manifest.Levels[0].Tables[0].ID)
+
+	// Check that the new SSTable file was physically copied
+	assert.FileExists(t, filepath.Join(latestPath, "sst", "2.sst"))
+	// Check that the OLD SSTable file was NOT copied
+	_, err = os.Stat(filepath.Join(latestPath, "sst", "1.sst"))
+	assert.True(t, os.IsNotExist(err))
+
+	// Check that auxiliary files were copied
+	assert.FileExists(t, filepath.Join(latestPath, "deleted_series.json"))
+}
+
+func TestManager_CreateIncremental_NoParent(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	snapshotsBaseDir := filepath.Join(tempDir, "snapshots_no_parent")
+	dataDir := filepath.Join(tempDir, "data_no_parent")
+	require.NoError(t, os.MkdirAll(dataDir, 0755))
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newMockEngineProvider(t, dataDir)
+
+	// 2. Execution
+	manager := NewManager(provider)
+	err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+	// 3. Verification
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no parent snapshot found")
 }
 
 // mockListener is a mock implementation of HookListener for testing.
@@ -883,6 +1074,9 @@ func TestManager_CreateFull_HookCancellation(t *testing.T) {
 
 	provider := newMockEngineProvider(t, dataDir)
 	expectedHookError := fmt.Errorf("snapshot creation cancelled by hook")
+
+	// Add the required mock expectation for the initial check
+	provider.On("CheckStarted").Return(nil)
 
 	// Register a hook that returns an error
 	lis := &mockThrowErrorListener{err: expectedHookError}
@@ -929,7 +1123,7 @@ func TestRestoreFromFull_ManifestWithMissingFile(t *testing.T) {
 	manifestFileName := "MANIFEST_missing.bin"
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
 	f, err := os.Create(manifestPath)
-	require.NoError(t, err) //nolint:staticcheck
+	require.NoError(t, err)
 	require.NoError(t, WriteManifestBinary(f, manifest))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
@@ -970,10 +1164,12 @@ func TestManager_CreateFull_WriteCurrentFileError(t *testing.T) {
 
 	// Set up mock expectations for all calls that happen before writing the CURRENT file.
 	provider.On("GetMemtablesForFlush").Return()
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
-	provider.On("GetDeletedSeries").Return()
-	provider.On("GetRangeTombstones").Return()
+	provider.On("GetDeletedSeries").Return(nil)
+	provider.On("GetRangeTombstones").Return(nil)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("Path").Return(provider.walDir)
+	provider.wal.On("Path").Return(provider.walDir)
 	provider.stringStore.On("GetLogFilePath").Return("")
 	provider.seriesIDStore.On("GetLogFilePath").Return("")
 
@@ -1081,8 +1277,8 @@ func TestRestoreFromFull_TargetExists(t *testing.T) {
 	// สร้าง snapshot ที่ถูกต้องน้อยที่สุด
 	manifestFileName := "MANIFEST_1.bin"
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
-	f, err := os.Create(manifestPath)
-	require.NoError(t, err) //nolint:staticcheck
+	f, err := os.Create(manifestPath) //nolint:staticcheck
+	require.NoError(t, err)           //nolint:staticcheck
 	require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
@@ -1162,8 +1358,8 @@ func TestRestoreFromFull_ErrorHandling(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte("MANIFEST_missing.bin"), 0644))
 		err := RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "snapshot manifest file")
-		assert.Contains(t, err.Error(), "not found")
+		assert.Contains(t, err.Error(), "could not read snapshot manifest")
+		assert.ErrorIs(t, err, os.ErrNotExist)
 	})
 
 	t.Run("MkdirTempError", func(t *testing.T) {
@@ -1178,7 +1374,10 @@ func TestRestoreFromFull_ErrorHandling(t *testing.T) {
 
 		// Create the manifest file itself so the os.Stat check passes.
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
-		require.NoError(t, os.WriteFile(manifestPath, []byte("dummy content"), 0644))
+		f, err := os.Create(manifestPath)
+		require.NoError(t, err)
+		require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
+		f.Close()
 		defer os.Remove(manifestPath)
 
 		// Simulate the error condition
@@ -1188,10 +1387,10 @@ func TestRestoreFromFull_ErrorHandling(t *testing.T) {
 		}
 
 		// Execution & Verification
-		err := RestoreFromFull(restoreOpts, snapshotDir)
-		require.Error(t, err, "RestoreFromFull should fail when os.MkdirTemp fails")
-		assert.ErrorIs(t, err, expectedErr, "The returned error should wrap the one from our mock")
-		assert.Contains(t, err.Error(), "failed to create temporary restore directory")
+		err2 := RestoreFromFull(restoreOpts, snapshotDir)
+		require.Error(t, err2, "RestoreFromFull should fail when os.MkdirTemp fails")
+		assert.ErrorIs(t, err2, expectedErr, "The returned error should wrap the one from our mock")
+		assert.Contains(t, err2.Error(), "failed to create temporary restore directory")
 	})
 }
 
@@ -1231,7 +1430,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		err := RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to read snapshot manifest file")
+		assert.Contains(t, err.Error(), "failed to open manifest file")
 	})
 
 	t.Run("ReadManifestError", func(t *testing.T) {
@@ -1253,7 +1452,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		err := RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to read binary snapshot manifest")
+		assert.Contains(t, err.Error(), "failed to read manifest from")
 	})
 
 	t.Run("PreCreateSubdirError", func(t *testing.T) {
@@ -1315,7 +1514,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		manifestFileName := "MANIFEST_remove_err.bin"
 		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
-		f, err := os.Create(manifestPath)                                    //nolint:staticcheck
+		f, err := os.Create(manifestPath)
 		require.NoError(t, err)                                              //nolint:staticcheck
 		require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{})) // Create a valid, empty manifest
 		f.Close()
@@ -1396,8 +1595,8 @@ func TestRestoreFromFull_RenameError(t *testing.T) {
 	// Create manifest and CURRENT file
 	manifestFileName := "MANIFEST_rename_err.bin"
 	manifestPath := filepath.Join(snapshotDir, manifestFileName)
-	f, err := os.Create(manifestPath)
-	require.NoError(t, err) //nolint:staticcheck
+	f, err := os.Create(manifestPath) //nolint:staticcheck
+	require.NoError(t, err)           //nolint:staticcheck
 	require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 	f.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
@@ -1478,9 +1677,11 @@ func TestCreateFull_AuxiliaryFileNotExist(t *testing.T) {
 
 	// Set up other mock expectations for a successful run
 	provider.On("GetMemtablesForFlush").Return()
-	provider.On("GetDeletedSeries").Return()
-	provider.On("GetRangeTombstones").Return()
+	provider.On("GetDeletedSeries").Return(nil)
+	provider.On("GetRangeTombstones").Return(nil)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("Path").Return(provider.walDir)
 
 	// 2. Execution
 	manager := NewManager(provider)

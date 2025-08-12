@@ -140,7 +140,7 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 }
 
 func (m *testE2EProvider) CheckStarted() error               { return nil }
-func (m *testE2EProvider) GetWALPath() string                { return m.walDir }
+func (m *testE2EProvider) GetWAL() wal.WALInterface          { return m.wal }
 func (m *testE2EProvider) GetClock() utils.Clock             { return m.clock }
 func (m *testE2EProvider) GetLogger() *slog.Logger           { return m.logger }
 func (m *testE2EProvider) GetTracer() trace.Tracer           { return m.tracer }
@@ -358,7 +358,8 @@ func TestSnapshot_E2E_RestoreFailure_MissingManifest(t *testing.T) {
 
 	// --- 4. Verify the failure ---
 	require.Error(t, err, "RestoreFromFull should fail when the manifest file is missing")
-	assert.Contains(t, err.Error(), "snapshot manifest file MANIFEST_nonexistent.bin (from CURRENT) not found", "Error message should indicate the manifest is missing")
+	assert.Contains(t, err.Error(), "could not read snapshot manifest", "Error message should indicate the manifest is missing")
+	assert.ErrorIs(t, err, os.ErrNotExist, "Underlying error should be os.ErrNotExist")
 
 	// Verify that the target directory was not created or was cleaned up.
 	_, statErr := os.Stat(restoredDataDir)

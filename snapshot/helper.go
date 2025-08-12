@@ -44,6 +44,10 @@ func (h *helperSnapshot) Open(name string) (*os.File, error) {
 	return os.Open(name)
 }
 
+func (h *helperSnapshot) Create(name string) (*os.File, error) {
+	return os.Create(name)
+}
+
 func (h *helperSnapshot) MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }
@@ -133,6 +137,10 @@ func (h *helperSnapshot) CopyFile(src, dst string) error {
 
 func (h *helperSnapshot) ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	return ReadManifestBinary(r)
+}
+
+func (h *helperSnapshot) ReadDir(name string) ([]os.DirEntry, error) {
+	return os.ReadDir(name)
 }
 
 func (h *helperSnapshot) CopyAuxiliaryFile(srcPath, destFileName, snapshotDir string, manifestField *string, logger *slog.Logger) error {

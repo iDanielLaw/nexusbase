@@ -10,7 +10,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
-	"github.com/INLOpen/nexusbase/snapshot"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -32,9 +31,11 @@ func (e *storageEngine) persistManifest() (err error) {
 
 	// Construct the manifest based on current levels state and sequence number
 	manifest := core.SnapshotManifest{
-		SequenceNumber:     e.sequenceNumber.Load(),
-		Levels:             make([]core.SnapshotLevelManifest, 0, e.levelsManager.MaxLevels()),
-		SSTableCompression: e.opts.SSTableCompressor.Type().String(),
+		SequenceNumber:      e.sequenceNumber.Load(),
+		Levels:              make([]core.SnapshotLevelManifest, 0, e.levelsManager.MaxLevels()),
+		SSTableCompression:  e.opts.SSTableCompressor.Type().String(),
+		CreatedAt:           e.clock.Now(),
+		LastWALSegmentIndex: e.wal.ActiveSegmentIndex(),
 	}
 
 	levelStates, unlockFunc := e.levelsManager.GetSSTablesForRead()
@@ -75,7 +76,7 @@ func (e *storageEngine) persistManifest() (err error) {
 		}
 	}()
 
-	if err = snapshot.WriteManifestBinary(manifestFile, &manifest); err != nil {
+	if err = writeManifestBinary(manifestFile, &manifest); err != nil {
 		e.logger.Error("Failed to write binary manifest data.", "path", manifestFilePath, "error", err)
 		span.SetStatus(codes.Error, "write_manifest_failed")
 		return fmt.Errorf("failed to write binary manifest data: %w", err)
