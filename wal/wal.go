@@ -522,10 +522,7 @@ func (w *WAL) openForAppend() error {
 	}
 
 	// If the last segment is empty or only has a header, reuse it.
-	// We need to truncate it and rewrite the header to be safe.
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("failed to remove incomplete segment %s for reuse: %w", path, err)
-	}
+	// CreateSegment will truncate the file and write a new header, making it safe for reuse.
 
 	seg, err := CreateSegment(w.dir, lastIndex)
 	if err != nil {

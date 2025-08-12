@@ -58,7 +58,7 @@ func parseSegmentFileName(name string) (uint64, error) {
 // CreateSegment creates a new segment file in the given directory.
 func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 	path := filepath.Join(dir, formatSegmentFileName(index))
-	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create segment file %s: %w", path, err)
 	}
