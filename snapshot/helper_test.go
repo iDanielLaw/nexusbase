@@ -186,6 +186,7 @@ func TestHelperSnapshot_CopyAuxiliaryFile(t *testing.T) {
 	srcPath := filepath.Join(tempDir, "aux.log")
 	snapshotDir := filepath.Join(tempDir, "snapshot")
 	require.NoError(t, h.MkdirAll(snapshotDir, 0755))
+	t.Log("Creating auxiliary file folder: ", tempDir, ", srcPath: ", srcPath, ", snapshotDir:", snapshotDir)
 	require.NoError(t, h.WriteFile(srcPath, []byte("aux data"), 0644))
 
 	var manifestField string
