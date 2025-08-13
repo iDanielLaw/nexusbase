@@ -187,9 +187,56 @@ type incrementalCreator struct {
 }
 
 func (m *manager) ListSnapshots(snapshotsBaseDir string) ([]Info, error) {
-	// Implementation for ListSnapshots would be moved here from the snapshot-util.
-	// This is a placeholder for brevity.
-	return nil, fmt.Errorf("ListSnapshots not implemented yet")
+	entries, err := m.wrapper.ReadDir(snapshotsBaseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []Info{}, nil // No directory means no snapshots, not an error.
+		}
+		return nil, fmt.Errorf("failed to read snapshots base directory %s: %w", snapshotsBaseDir, err)
+	}
+
+	var infos []Info
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		snapshotID := entry.Name()
+		snapshotDir := filepath.Join(snapshotsBaseDir, snapshotID)
+
+		manifest, _, err := readManifestFromDir(snapshotDir, m.wrapper)
+		if err != nil {
+			// If a directory doesn't contain a valid manifest, skip it but log a warning.
+			m.provider.GetLogger().Warn("Skipping directory in snapshot listing: not a valid snapshot (could not read manifest)", "dir", snapshotDir, "error", err)
+			continue
+		}
+
+		// Calculate total size of the snapshot directory (best-effort).
+		var totalSize int64
+		_ = filepath.WalkDir(snapshotDir, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				if info, statErr := d.Info(); statErr == nil {
+					totalSize += info.Size()
+				}
+			}
+			return nil // Continue walking regardless of errors.
+		})
+
+		infos = append(infos, Info{
+			ID:        snapshotID,
+			Type:      manifest.Type,
+			CreatedAt: manifest.CreatedAt,
+			Size:      totalSize,
+			ParentID:  manifest.ParentID,
+		})
+	}
+
+	// Sort by CreatedAt time, which is also implicitly sorting by ID/name.
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].CreatedAt.Before(infos[j].CreatedAt)
+	})
+
+	return infos, nil
 }
 
 func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string) (err error) {

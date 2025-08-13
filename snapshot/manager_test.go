@@ -2420,3 +2420,116 @@ func TestRestoreFromLatest(t *testing.T) {
 		assert.ErrorIs(t, err, expectedErr, "Error from RestoreFromFull should be propagated")
 	})
 }
+
+func TestManager_ListSnapshots(t *testing.T) {
+	t.Run("SuccessWithFullAndIncremental", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, tempDir)
+		manager := NewManager(provider)
+
+		// Create a full snapshot
+		time1 := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+		fullSnapshotID := fmt.Sprintf("%d", time1.UnixNano())
+		fullSnapshotDir := filepath.Join(snapshotsBaseDir, fullSnapshotID)
+		require.NoError(t, os.MkdirAll(fullSnapshotDir, 0755))
+		fullManifest := &core.SnapshotManifest{Type: core.SnapshotTypeFull, CreatedAt: time1}
+		manifestFileName1, err := writeTestManifest(fullSnapshotDir, fullManifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(fullSnapshotDir, "CURRENT"), []byte(manifestFileName1), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(fullSnapshotDir, "dummy.dat"), make([]byte, 1024), 0644)) // Add size
+
+		// Create an incremental snapshot
+		time2 := time.Now().Add(-1 * time.Hour).Truncate(time.Second)
+		incrSnapshotID := fmt.Sprintf("%d_incr", time2.UnixNano())
+		incrSnapshotDir := filepath.Join(snapshotsBaseDir, incrSnapshotID)
+		require.NoError(t, os.MkdirAll(incrSnapshotDir, 0755))
+		incrManifest := &core.SnapshotManifest{Type: core.SnapshotTypeIncremental, ParentID: fullSnapshotID, CreatedAt: time2}
+		manifestFileName2, err := writeTestManifest(incrSnapshotDir, incrManifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(incrSnapshotDir, "CURRENT"), []byte(manifestFileName2), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(incrSnapshotDir, "dummy2.dat"), make([]byte, 512), 0644)) // Add size
+
+		// 2. Execution
+		infos, err := manager.ListSnapshots(snapshotsBaseDir)
+		require.NoError(t, err)
+
+		// 3. Verification
+		require.Len(t, infos, 2)
+
+		// Results should be sorted by time
+		assert.Equal(t, fullSnapshotID, infos[0].ID)
+		assert.Equal(t, core.SnapshotTypeFull, infos[0].Type)
+		assert.True(t, time1.Equal(infos[0].CreatedAt))
+		assert.Empty(t, infos[0].ParentID)
+		assert.Greater(t, infos[0].Size, int64(1024)) // Manifest + CURRENT + dummy file
+
+		assert.Equal(t, incrSnapshotID, infos[1].ID)
+		assert.Equal(t, core.SnapshotTypeIncremental, infos[1].Type)
+		assert.True(t, time2.Equal(infos[1].CreatedAt))
+		assert.Equal(t, fullSnapshotID, infos[1].ParentID)
+		assert.Greater(t, infos[1].Size, int64(512)) // Manifest + CURRENT + dummy file
+	})
+
+	t.Run("EmptyAndNonExistentDirectory", func(t *testing.T) {
+		tempDir := t.TempDir()
+		manager := NewManager(newMockEngineProvider(t, tempDir))
+
+		// Non-existent
+		infos, err := manager.ListSnapshots(filepath.Join(tempDir, "nonexistent"))
+		require.NoError(t, err)
+		assert.Empty(t, infos)
+
+		// Empty
+		emptyDir := filepath.Join(tempDir, "empty")
+		require.NoError(t, os.Mkdir(emptyDir, 0755))
+		infos, err = manager.ListSnapshots(emptyDir)
+		require.NoError(t, err)
+		assert.Empty(t, infos)
+	})
+
+	t.Run("DirectoryWithInvalidEntries", func(t *testing.T) {
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+		manager := NewManager(newMockEngineProvider(t, tempDir))
+
+		// A valid snapshot
+		validSnapshotDir := filepath.Join(snapshotsBaseDir, "valid_snapshot")
+		require.NoError(t, os.MkdirAll(validSnapshotDir, 0755))
+		manifestFileName, err := writeTestManifest(validSnapshotDir, &core.SnapshotManifest{Type: core.SnapshotTypeFull, CreatedAt: time.Now()})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(validSnapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+		// An invalid entry (a file)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotsBaseDir, "not_a_snapshot.txt"), []byte("ignore me"), 0644))
+		// An invalid entry (a directory without a manifest)
+		require.NoError(t, os.MkdirAll(filepath.Join(snapshotsBaseDir, "empty_dir"), 0755))
+
+		infos, err := manager.ListSnapshots(snapshotsBaseDir)
+		require.NoError(t, err)
+		require.Len(t, infos, 1, "Should only list the one valid snapshot")
+		assert.Equal(t, "valid_snapshot", infos[0].ID)
+	})
+
+	t.Run("ReadDirError", func(t *testing.T) {
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		provider := newMockEngineProvider(t, tempDir)
+		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+		manager := NewManagerWithTesting(provider, helper)
+
+		expectedErr := fmt.Errorf("simulated readdir error")
+		helper.InterceptReadDir = func(name string) ([]os.DirEntry, error) {
+			return nil, expectedErr
+		}
+
+		_, err := manager.ListSnapshots(snapshotsBaseDir)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to read snapshots base directory")
+	})
+}
