@@ -282,7 +282,7 @@ func (ms *mockSnapshotHelper) RemoveAll(path string) error {
 	return ms.helperSnapshot.RemoveAll(path)
 }
 
-func (ms *mockSnapshotHelper) Create(name string) (*os.File, error) {
+func (ms *mockSnapshotHelper) Create(name string) (sys.FileInterface, error) {
 	if ms.InterceptCreate != nil {
 		return ms.InterceptCreate(name)
 	}

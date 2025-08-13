@@ -64,10 +64,6 @@ func (h *helperSnapshot) Create(name string) (sys.FileInterface, error) {
 	return sys.Create(name)
 }
 
-func (h *helperSnapshot) Create(name string) (*os.File, error) {
-	return os.Create(name)
-}
-
 func (h *helperSnapshot) MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }

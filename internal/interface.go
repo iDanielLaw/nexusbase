@@ -33,6 +33,8 @@ type PrivateWAL interface {
 	SetTestingOnlyInjectAppendError(err error)
 }
 
+// PrivateSnapshotHelper defines an interface for file system operations,
+// allowing them to be mocked in tests.
 type PrivateSnapshotHelper interface {
 	RemoveAll(path string) error
 	ReadFile(name string) ([]byte, error)
@@ -40,16 +42,15 @@ type PrivateSnapshotHelper interface {
 	Rename(oldpath, newpath string) error
 	Stat(name string) (os.FileInfo, error)
 	Open(name string) (sys.FileInterface, error)
-	Create(name string) (sys.FileInterface, error)
+	Create(name string) (sys.FileInterface, error) // Added
 	MkdirAll(path string, perm os.FileMode) error
 	WriteFile(name string, data []byte, perm os.FileMode) error
-
 	CopyDirectoryContents(src, dst string) error
 	LinkOrCopyFile(src, dst string) error
 	LinkOrCopyDirectoryContents(src, dst string) error
-
-	ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error)
 	CopyFile(src, dst string) error
+	ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error)
+	ReadDir(name string) ([]os.DirEntry, error) // Added
 	CopyAuxiliaryFile(srcPath, destFileName, snapshotDir string, manifestField *string, logger *slog.Logger) error
 	SaveJSON(v interface{}, path string) error
 }
