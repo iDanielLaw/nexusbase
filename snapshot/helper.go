@@ -13,6 +13,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/internal"
+	"github.com/INLOpen/nexusbase/sys"
 )
 
 type helperSnapshot struct{}
@@ -49,18 +50,18 @@ func (h *helperSnapshot) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(name)
 }
 
-func (h *helperSnapshot) Open(name string) (*os.File, error) {
-	return os.Open(name)
+func (h *helperSnapshot) Open(name string) (sys.FileInterface, error) {
+	return sys.Open(name)
 }
 
-func (h *helperSnapshot) Create(name string) (*os.File, error) {
+func (h *helperSnapshot) Create(name string) (sys.FileInterface, error) {
 	// Ensure the parent directory exists before creating the file. This is crucial
 	// for robustness, as os.Create will fail on some OSes (like Windows) if the
 	// parent directory does not exist.
 	if err := h.MkdirAll(filepath.Dir(name), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create parent directory for %s: %w", name, err)
 	}
-	return os.Create(name)
+	return sys.Create(name)
 }
 
 func (h *helperSnapshot) MkdirAll(path string, perm os.FileMode) error {
@@ -72,7 +73,7 @@ func (h *helperSnapshot) WriteFile(name string, data []byte, perm os.FileMode) e
 	if err := h.MkdirAll(filepath.Dir(name), 0755); err != nil {
 		return fmt.Errorf("failed to create parent directory for %s: %w", name, err)
 	}
-	return os.WriteFile(name, data, perm)
+	return sys.WriteFile(name, data, perm)
 }
 
 func (h *helperSnapshot) CopyDirectoryContents(src, dst string) error {
@@ -156,7 +157,7 @@ func (h *helperSnapshot) CopyFile(src, dst string) error {
 		return fmt.Errorf("failed to create destination directory for %s: %w", dst, err)
 	}
 
-	out, err := os.Create(dst)
+	out, err := sys.Create(dst)
 	if err != nil {
 		return fmt.Errorf("failed to create destination file %s: %w", dst, err)
 	}

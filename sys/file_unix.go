@@ -73,6 +73,10 @@ func (ufo *unixFile) SafeRemoveWithOption(name string, opts SafeRemoveOptions) e
 	return err
 }
 
+func (ufo *unixFile) WriteFile(name string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(name, data, perm)
+}
+
 // Nothing
 func (ufo *unixFile) GC() error {
 	return nil

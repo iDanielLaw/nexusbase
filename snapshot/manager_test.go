@@ -20,6 +20,7 @@ import (
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexusbase/utils"
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/stretchr/testify/assert"
@@ -210,7 +211,7 @@ type mockSnapshotHelper struct {
 	InterceptReadFile                    func(filename string) ([]byte, error)
 	InterceptMkdirTemp                   func(dir, pattern string) (string, error)
 	InterceptMkdirAll                    func(path string, perm os.FileMode) error
-	InterceptOpen                        func(name string) (*os.File, error)
+	InterceptOpen                        func(name string) (sys.FileInterface, error)
 	InterceptCopyFile                    func(src, dst string) error
 	InterceptReadManifestBinary          func(r io.Reader) (*core.SnapshotManifest, error)
 	InterceptRename                      func(oldPath, newPath string) error
@@ -281,7 +282,7 @@ func (ms *mockSnapshotHelper) MkdirTemp(dir, pattern string) (string, error) {
 	return ms.helperSnapshot.MkdirTemp(dir, pattern)
 }
 
-func (ms *mockSnapshotHelper) Open(name string) (*os.File, error) {
+func (ms *mockSnapshotHelper) Open(name string) (sys.FileInterface, error) {
 	if ms.InterceptOpen != nil {
 		return ms.InterceptOpen(name)
 	}
@@ -1221,7 +1222,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		defer os.Remove(manifestPath)
 
 		expectedErr := fmt.Errorf("simulated open error")
-		helper.InterceptOpen = func(name string) (*os.File, error) {
+		helper.InterceptOpen = func(name string) (sys.FileInterface, error) {
 			if name == manifestPath {
 				return nil, expectedErr
 			}

@@ -150,6 +150,20 @@ func (wfo *windowsFile) SafeRemoveWithOption(name string, opts SafeRemoveOptions
 	return err
 }
 
+func (wfo *windowsFile) WriteFile(name string, data []byte, perm os.FileMode) error {
+	f, err := wfo.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+
+	_,err =f.Write(data)
+	if err1 := f.Close(); err1 != nil && err == nil {
+		err = err1
+	}
+	return err
+}
+
+
 func (wfo *windowsFile) OpenWithRetry(path string, flag int, perm os.FileMode, maxRetries int, retryInterval time.Duration) (*os.File, error) {
 	var file *os.File
 	var err error

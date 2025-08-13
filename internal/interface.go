@@ -8,6 +8,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/levels"
+	"github.com/INLOpen/nexusbase/sys"
 )
 
 type PrivateManagerStore interface {
@@ -38,8 +39,8 @@ type PrivateSnapshotHelper interface {
 	MkdirTemp(dir, pattern string) (string, error)
 	Rename(oldpath, newpath string) error
 	Stat(name string) (os.FileInfo, error)
-	Open(name string) (*os.File, error)
-	Create(name string) (*os.File, error)
+	Open(name string) (sys.FileInterface, error)
+	Create(name string) (sys.FileInterface, error)
 	MkdirAll(path string, perm os.FileMode) error
 	WriteFile(name string, data []byte, perm os.FileMode) error
 
