@@ -2,12 +2,14 @@ package snapshot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/internal"
@@ -179,9 +181,13 @@ func (h *helperSnapshot) CopyAuxiliaryFile(srcPath, destFileName, snapshotDir st
 		logger.Debug("Source path for auxiliary file is empty, skipping copy.", "file", destFileName)
 		return nil
 	}
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		logger.Warn("Source file does not exist, skipping copy for snapshot.", "path", srcPath)
-		return nil
+	_, err := os.Stat(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOENT) { // เพิ่ม errors.Is(err, syscall.ENOENT)
+			logger.Warn("Source file does not exist, skipping copy for snapshot.", "path", srcPath)
+			return nil
+		}
+		return fmt.Errorf("failed to stat source file %s for auxiliary copy: %w", srcPath, err)
 	}
 	destPath := filepath.Join(snapshotDir, destFileName)
 	if err := h.LinkOrCopyFile(srcPath, destPath); err != nil {
