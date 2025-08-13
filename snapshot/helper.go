@@ -82,10 +82,17 @@ func (h *helperSnapshot) CopyDirectoryContents(src, dst string) error {
 }
 
 func (h *helperSnapshot) LinkOrCopyFile(src, dst string) error {
+	// Ensure the destination directory exists before attempting to link.
+	// This is crucial for robustness, especially on Windows where os.Create
+	// (used by the CopyFile fallback) will fail if the parent dir is missing.
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory for link %s: %w", dst, err)
+	}
 	err := os.Link(src, dst)
 	if err == nil {
 		return nil
 	}
+	// If linking fails (e.g., across different filesystems), fall back to a standard file copy.
 	return h.CopyFile(src, dst)
 }
 
@@ -118,21 +125,30 @@ func (h *helperSnapshot) LinkOrCopyDirectoryContents(src, dst string) error {
 func (h *helperSnapshot) CopyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open source file %s: %w", src, err)
 	}
 	defer in.Close()
 
+	// This is slightly redundant if called from LinkOrCopyFile, but makes
+	// CopyFile safe to call directly. The performance impact is negligible.
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory for %s: %w", dst, err)
+	}
+
 	out, err := os.Create(dst)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create destination file %s: %w", dst, err)
 	}
 	defer out.Close()
 
 	_, err = io.Copy(out, in)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to copy data from %s to %s: %w", src, dst, err)
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("failed to close destination file %s: %w", dst, err)
+	}
+	return nil
 }
 
 func (h *helperSnapshot) ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
