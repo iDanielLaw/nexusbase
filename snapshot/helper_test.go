@@ -184,6 +184,11 @@ func TestHelperSnapshot_CopyAuxiliaryFile(t *testing.T) {
 	h, tempDir := setupHelperTest(t)
 	srcPath := filepath.Join(tempDir, "aux.log")
 	snapshotDir := filepath.Join(tempDir, "snapshot")
+	// Explicitly create the parent directory for the source file.
+	// This is a defensive measure to ensure the test is robust, especially on
+	// Windows, and directly addresses the "file not found" error if the
+	// srcPath were to be in a subdirectory that doesn't exist.
+	require.NoError(t, h.MkdirAll(filepath.Dir(srcPath), 0755))
 	require.NoError(t, h.MkdirAll(snapshotDir, 0755))
 	require.NoError(t, h.WriteFile(srcPath, []byte("aux data"), 0644))
 
