@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/INLOpen/nexusbase/config"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/snapshot"
 )
 
 func main() {
@@ -85,27 +85,19 @@ func run(snapshotDir, targetDataDir string, logger *slog.Logger) error {
 	// The function primarily needs the target DataDir. Other options are not used
 	// during the file copy process but are required by the function signature.
 	// We can load a default config to get reasonable values.
-	defaultCfg, err := config.LoadConfig("") // Load defaults
+	_, err := config.LoadConfig("") // Load defaults
 	if err != nil {
 		return fmt.Errorf("failed to load default configuration: %w", err)
 	}
 
-	// Create engine options with the target data directory.
-	restoreOpts := engine.StorageEngineOptions{
+	// Create snapshot restore options with the target data directory and logger.
+	restoreOpts := snapshot.RestoreOptions{
 		DataDir: targetDataDir,
-		// Populate with defaults, though most are not used by RestoreFromSnapshot itself.
-		MemtableThreshold:            defaultCfg.Engine.MemtableThresholdMB * 1024 * 1024,
-		BlockCacheCapacity:           defaultCfg.Engine.BlockCacheCapacity,
-		MaxL0Files:                   defaultCfg.Engine.MaxL0Files,
-		TargetSSTableSize:            defaultCfg.Engine.TargetSSTableSizeMB * 1024 * 1024,
-		LevelsTargetSizeMultiplier:   defaultCfg.Engine.LevelsTargetSizeMultiplier,
-		MaxLevels:                    defaultCfg.Engine.MaxLevels,
-		BloomFilterFalsePositiveRate: defaultCfg.Engine.BloomFilterFalsePositiveRate,
-		Logger:                       logger,
+		Logger:  logger,
 	}
 
-	// Call the restore function from the engine package
-	if err := engine.RestoreFromSnapshot(restoreOpts, snapshotDir); err != nil {
+	// Call the restore function from the snapshot package
+	if err := snapshot.RestoreFromFull(restoreOpts, snapshotDir); err != nil {
 		return fmt.Errorf("failed to restore from snapshot: %w", err)
 	}
 

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/api/tsdb"
-	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/hooks"
 
 	"github.com/INLOpen/nexusbase/core" // Import core package
@@ -198,7 +197,7 @@ func (e *storageEngine) get(ctx context.Context, key []byte) ([]byte, error) {
 	_, span := e.tracer.Start(ctx, "StorageEngine.Get")
 	startTime := e.clock.Now() // Use the clock interface for time measurement
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		observeLatency(e.metrics.GetLatencyHist, duration) // Assumes observeLatency is accessible
 		span.SetAttributes(attribute.Float64("duration_seconds", duration))
 		span.End()
@@ -315,7 +314,7 @@ func (e *storageEngine) delete(ctx context.Context, key []byte) error {
 	_, span := e.tracer.Start(ctx, "StorageEngine.Delete")
 	startTime := e.clock.Now() // Use the clock interface for time measurement
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		observeLatency(e.metrics.DeleteLatencyHist, duration) // Assumes observeLatency is accessible
 		span.SetAttributes(attribute.Float64("duration_seconds", duration))
 		span.End()
@@ -373,7 +372,7 @@ func (e *storageEngine) rangeScan(ctx context.Context, params rangeScanParams) (
 	_, span := e.tracer.Start(ctx, "StorageEngine.RangeScan")
 	startTime := e.clock.Now()
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		if e.metrics != nil && e.metrics.RangeScanLatencyHist != nil {
 			observeLatency(e.metrics.RangeScanLatencyHist, duration)
 		}
@@ -578,7 +577,7 @@ func (e *storageEngine) prepareDataPoint(ctx context.Context, p core.DataPoint) 
 // Put is a TSDB-specific API to put a single data point.
 // It's a convenience wrapper around PutBatch.
 func (e *storageEngine) Put(ctx context.Context, point core.DataPoint) error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 	return e.PutBatch(ctx, []core.DataPoint{point})
@@ -588,6 +587,9 @@ func (e *storageEngine) Put(ctx context.Context, point core.DataPoint) error {
 // It iterates through the points and calls the single Put method for each.
 // This is the primary write path; single Put calls are wrapped by this method.
 func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (err error) {
+	if e.putBatchInterceptor != nil {
+		return e.putBatchInterceptor(ctx, points)
+	}
 	// Defer a function to capture any error and increment the error metric.
 	defer func() {
 		if err != nil && e.metrics.PutErrorsTotal != nil {
@@ -595,12 +597,12 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 		}
 	}()
 
-	if errCheck := e.checkStarted(); errCheck != nil {
+	if errCheck := e.CheckStarted(); errCheck != nil {
 		return errCheck
 	}
 	startTime := e.clock.Now()
 	defer func() {
-		duration := time.Since(startTime).Seconds()
+		duration := e.clock.Now().Sub(startTime).Seconds()
 		if e.metrics != nil && e.metrics.PutLatencyHist != nil {
 			observeLatency(e.metrics.PutLatencyHist, duration)
 		}
@@ -732,7 +734,7 @@ func (e *storageEngine) publishAndHook(ctx context.Context, pubsubUpdates []*tsd
 
 // Get is a TSDB-specific API to get a single data point.
 func (e *storageEngine) Get(ctx context.Context, metric string, tags map[string]string, timestamp int64) (result core.FieldValues, err error) {
-	if errCheck := e.checkStarted(); errCheck != nil {
+	if errCheck := e.CheckStarted(); errCheck != nil {
 		err = errCheck
 		return
 	}
@@ -839,7 +841,7 @@ func (e *storageEngine) Get(ctx context.Context, metric string, tags map[string]
 
 // Delete is a TSDB-specific API to delete a single data point (creates a point tombstone).
 func (e *storageEngine) Delete(ctx context.Context, metric string, tags map[string]string, timestamp int64) (err error) {
-	if errCheck := e.checkStarted(); errCheck != nil {
+	if errCheck := e.CheckStarted(); errCheck != nil {
 		err = errCheck
 		return
 	}
@@ -977,8 +979,8 @@ func (it *QueryResultIterator) UnderlyingAt() ([]byte, []byte, core.EntryType, u
 
 // Close closes the underlying iterator.
 func (it *QueryResultIterator) Close() error {
-	if it.engine != nil {
-		duration := time.Since(it.startTime).Seconds()
+	if it.engine != nil && it.engine.clock != nil {
+		duration := it.engine.clock.Now().Sub(it.startTime).Seconds()
 		// Observe general query latency for all query types.
 		if it.engine.metrics.QueryLatencyHist != nil {
 			observeLatency(it.engine.metrics.QueryLatencyHist, duration)
@@ -1206,7 +1208,7 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 		}
 	}()
 
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	if err := core.ValidateMetricAndTags(e.validator, params.Metric, params.Tags); err != nil {
@@ -1248,9 +1250,9 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 	// 'err' is a named return value, so the deferred function can access its final state.
 	overallQueryStartTime := e.clock.Now()
 	defer func() {
-		postQueryPayload := hooks.PostQueryPayload{
+		postQueryPayload := hooks.PostQueryPayload{ //nolint:govet
 			Params:   params, // Use the potentially modified params
-			Duration: time.Since(overallQueryStartTime),
+			Duration: e.clock.Now().Sub(overallQueryStartTime),
 			Error:    err,
 		}
 		e.hookManager.Trigger(ctx, hooks.NewPostQueryEvent(postQueryPayload))
@@ -1501,7 +1503,7 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 // If only tags are provided, it will return all series matching those tags across all metrics.
 // If neither is provided, it returns all active series (potentially very large).
 func (e *storageEngine) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	// Custom validation for optional metric
@@ -1551,7 +1553,7 @@ func (e *storageEngine) GetSeriesByTags(metric string, tags map[string]string) (
 
 // GetMetrics returns a sorted list of all unique metric names in the engine.
 func (e *storageEngine) GetMetrics() ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	e.activeSeriesMu.RLock()
@@ -1583,7 +1585,7 @@ func (e *storageEngine) GetMetrics() ([]string, error) {
 
 // GetTagsForMetric returns a sorted list of all unique tag keys for a given metric.
 func (e *storageEngine) GetTagsForMetric(metric string) ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	binarySeriesKeys, err := e.getMatchingBinarySeriesKeys(metric, nil)
@@ -1616,7 +1618,7 @@ func (e *storageEngine) GetTagsForMetric(metric string) ([]string, error) {
 
 // GetTagValues returns a sorted list of all unique tag values for a given metric and tag key.
 func (e *storageEngine) GetTagValues(metric, tagKey string) ([]string, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	// This implementation is a placeholder and can be optimized significantly
@@ -1637,7 +1639,7 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 	_, span := e.tracer.Start(ctx, "StorageEngine.ForceFlush", trace.WithAttributes(attribute.Bool("wait", wait)))
 	defer span.End()
 
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return err
 	}
 
@@ -1696,17 +1698,23 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 		return ErrEngineClosed
 	}
 
-	// After a successful synchronous flush, always create a new checkpoint and purge old WALs.
-	// This ensures that even if no data was written, the state is durably checkpointed.
-	lastFlushedSegment := e.wal.ActiveSegmentIndex()
-	if lastFlushedSegment > 0 {
-		cp := checkpoint.Checkpoint{LastSafeSegmentIndex: lastFlushedSegment}
-		if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
-			e.logger.Error("Failed to write checkpoint after synchronous flush.", "error", writeErr)
-			return writeErr // Return this critical error
-		}
-		e.purgeWALSegments(lastFlushedSegment)
-	}
-
 	return nil
+}
+
+// CreateSnapshot creates a full, self-contained snapshot of the database state.
+// This method now delegates the call to the dedicated snapshot manager.
+func (e *storageEngine) CreateSnapshot(snapshotDir string) error {
+	if err := e.CheckStarted(); err != nil {
+		return err
+	}
+	return e.snapshotManager.CreateFull(context.Background(), snapshotDir)
+}
+
+// CreateIncrementalSnapshot creates a snapshot containing only changes since the last one.
+// This method now delegates the call to the dedicated snapshot manager.
+func (e *storageEngine) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
+	if err := e.CheckStarted(); err != nil {
+		return err
+	}
+	return e.snapshotManager.CreateIncremental(context.Background(), snapshotsBaseDir)
 }

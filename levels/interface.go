@@ -1,11 +1,14 @@
 package levels
 
-import "github.com/INLOpen/nexusbase/sstable"
+import (
+	"github.com/INLOpen/nexusbase/sstable"
+)
 
 // Manager defines the public interface for a levels manager.
 type Manager interface {
 	GetSSTablesForRead() ([]*LevelState, func())
 	AddL0Table(table *sstable.SSTable) error
+	AddTablesToLevel(level int, tables []*sstable.SSTable) error
 	AddTableToLevel(level int, table *sstable.SSTable) error
 	Close() error
 	VerifyConsistency() []error

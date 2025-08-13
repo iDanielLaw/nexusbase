@@ -184,7 +184,7 @@ func TestServiceManager_FlushLoop(t *testing.T) {
 	triggerPeriodicCalled := make(chan bool, 1)
 
 	// Override the real methods with our detectors
-	eng.processImmutableMemtablesFunc = func() {
+	eng.processImmutableMemtablesFunc = func(writeCheckpoint bool) {
 		processImmCalled <- true
 	}
 	eng.triggerPeriodicFlushFunc = func() {

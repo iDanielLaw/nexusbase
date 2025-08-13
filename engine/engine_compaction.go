@@ -472,13 +472,8 @@ func (cm *CompactionManager) performCompactionCycle() {
 				l0Ctx, l0Span := cm.tracer.Start(parentCtx, "CompactionManager.L0CompactionWorker")
 				defer l0Span.End() // Ensure span is always ended
 				l0Span.SetAttributes(attribute.String("compaction.type", "L0->L1"))
-				clock, err := cm.Engine.GetClock()
-				if err != nil {
-					cm.logger.Error("Could not get engine clock for L0 compaction", "error", err)
-					l0Span.SetStatus(codes.Error, "could_not_get_clock")
-					// l0Span.End() is handled by defer
-					return
-				}
+				clock := cm.Engine.GetClock()
+
 				startTime := clock.Now()
 				if err := cm.compactL0ToL1(l0Ctx); err == nil {
 					duration := clock.Now().Sub(startTime).Seconds()
@@ -528,13 +523,7 @@ func (cm *CompactionManager) performCompactionCycle() {
 					defer lnSpan.End()
 
 					lnSpan.SetAttributes(attribute.String("compaction.type", fmt.Sprintf("L%d->L%d", lvl, lvl+1)))
-					clock, err := cm.Engine.GetClock()
-					if err != nil {
-						cm.logger.Error("Could not get engine clock for LN compaction", "level", lvl, "error", err)
-						lnSpan.SetStatus(codes.Error, "could_not_get_clock")
-						// lnSpan.End() is handled by defer
-						return
-					}
+					clock := cm.Engine.GetClock()
 					startTime := clock.Now()
 					if err := cm.compactLevelNToLevelNPlus1(lnCtx, lvl); err == nil {
 						duration := clock.Now().Sub(startTime).Seconds()
@@ -808,11 +797,7 @@ func (cm *CompactionManager) calculateRetentionCutoffTime(span trace.Span) int64
 	if cm.opts.RetentionPeriod == "" || cm.Engine == nil {
 		return 0
 	}
-	clock, err := cm.Engine.GetClock()
-	if err != nil {
-		cm.logger.Error("Could not get engine clock for retention calculation", "error", err)
-		return 0
-	}
+	clock := cm.Engine.GetClock()
 	duration, err := time.ParseDuration(cm.opts.RetentionPeriod)
 	if err != nil {
 		cm.logger.Error("Invalid retention_period format, disabling retention for this cycle.", "retention_period", cm.opts.RetentionPeriod, "error", err)

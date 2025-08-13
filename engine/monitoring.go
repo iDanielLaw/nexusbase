@@ -46,7 +46,7 @@ func (eng *storageEngine) collectAndStoreMetrics(ctx context.Context) {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
-	ts := time.Now().UnixNano()
+	ts := eng.clock.Now().UnixNano()
 	prefix := eng.opts.SelfMonitoringPrefix
 	if prefix == "" {
 		prefix = "__" // Default prefix

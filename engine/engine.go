@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"expvar"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -21,6 +19,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/utils"
 
 	"github.com/INLOpen/nexusbase/levels"
@@ -31,8 +30,6 @@ import (
 
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -112,8 +109,8 @@ type storageEngine struct {
 	stateLoader     *StateLoader    // New: Handles loading state from disk
 	serviceManager  *ServiceManager // New: Manages background services
 	mutableMemtable *memtable.Memtable
-	// For testing override
-	processImmutableMemtablesFunc func()
+	// For testing override, bool indicates if checkpoint should be written
+	processImmutableMemtablesFunc func(writeCheckpoint bool)
 	triggerPeriodicFlushFunc      func()
 	syncMetadataFunc              func()
 	immutableMemtables            []*memtable.Memtable
@@ -143,9 +140,10 @@ type storageEngine struct {
 
 	deletedSeries     map[string]uint64
 	deletedSeriesMu   sync.RWMutex
-	rangeTombstones   map[string][]RangeTombstone
+	rangeTombstones   map[string][]core.RangeTombstone
 	rangeTombstonesMu sync.RWMutex
 
+	snapshotManager   snapshot.ManagerInterface
 	tagIndexManager   indexer.TagIndexManagerInterface
 	tagIndexManagerMu sync.RWMutex
 
@@ -162,6 +160,7 @@ type storageEngine struct {
 
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
+	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
 }
 
 const (
@@ -218,7 +217,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		activeSeries:       make(map[string]struct{}),
 		deletedSeries:      make(map[string]uint64),
 		pubsub:             NewPubSub(), // Initialize PubSub
-		rangeTombstones:    make(map[string][]RangeTombstone),
+		rangeTombstones:    make(map[string][]core.RangeTombstone),
 		logger:             logger,
 		metrics:            opts.Metrics,
 		hookManager:        hooks.NewHookManager(logger.With("component", "HookManager")),
@@ -264,6 +263,9 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		engine = concreteEngine // Assign to return var for cleanup
 		return
 	}
+
+	// Initialize the snapshot manager, passing the engine itself as the provider.
+	concreteEngine.snapshotManager = snapshot.NewManager(concreteEngine)
 
 	return concreteEngine, nil // Return the concrete type which satisfies the interface
 }
@@ -328,7 +330,7 @@ func (e *storageEngine) Start() error {
 }
 
 func (e *storageEngine) GetNextSSTableID() uint64 {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		// This indicates a severe logic error in the engine's lifecycle management.
 		// A component is trying to get a new file ID when the engine is not running.
 		// This should not happen in a correctly functioning system. Panicking makes
@@ -475,126 +477,10 @@ func (e *storageEngine) Close() error {
 	return nil
 }
 
-func (e *storageEngine) checkStarted() error {
+func (e *storageEngine) CheckStarted() error {
 	if !e.isStarted.Load() {
 		return ErrEngineClosed
 	}
-	return nil
-}
-
-// persistManifest triggers the creation of a new manifest file.
-// This function is called periodically or on significant state changes.
-// It should NOT delete the data directory.
-// persistManifest expects e.mu to be locked by the caller.
-func (e *storageEngine) persistManifest() error {
-	_, span := e.tracer.Start(context.Background(), "StorageEngine.persistManifest")
-	defer span.End()
-
-	// Read the name of the current (old) manifest file before acquiring the lock
-	// to avoid holding the lock while doing I/O for reading the CURRENT file.
-	oldManifestFileName := ""
-	currentFilePath := filepath.Join(e.opts.DataDir, CURRENT_FILE_NAME)
-	if oldCurrentFileContent, err := os.ReadFile(currentFilePath); err == nil {
-		oldManifestFileName = strings.TrimSpace(string(oldCurrentFileContent))
-	} else if !os.IsNotExist(err) {
-		e.logger.Warn("Error reading existing CURRENT file for old manifest cleanup.", "error", err)
-	}
-
-	// Construct the manifest based on current levels state and sequence number
-	manifest := core.SnapshotManifest{
-		SequenceNumber:     e.sequenceNumber.Load(),
-		Levels:             make([]core.SnapshotLevelManifest, 0, e.levelsManager.MaxLevels()),
-		SSTableCompression: e.opts.SSTableCompressor.Type().String(),
-	}
-
-	levelStates, unlockFunc := e.levelsManager.GetSSTablesForRead() // Get a consistent view of SSTables
-	defer unlockFunc()
-	for levelNum, levelState := range levelStates {
-		tablesInLevel := levelState.GetTables()
-		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0, len(tablesInLevel))}
-		for _, table := range tablesInLevel {
-			baseFileName := filepath.Base(table.FilePath())
-			manifestFileName := filepath.Join("sst", baseFileName) // Store relative path
-			levelManifest.Tables = append(levelManifest.Tables, core.SSTableMetadata{
-				ID:       table.ID(),
-				FileName: manifestFileName,
-				MinKey:   table.MinKey(),
-				MaxKey:   table.MaxKey(),
-			})
-		}
-		if len(levelManifest.Tables) > 0 {
-			manifest.Levels = append(manifest.Levels, levelManifest)
-		}
-	}
-
-	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, e.clock.Now().UnixNano())
-	manifestFilePath := filepath.Join(e.opts.DataDir, uniqueManifestFileName)
-
-	// --- DEBUG LOGGING ---
-	e.logger.Debug("Persisting manifest with current state.", "manifest_file", uniqueManifestFileName)
-	for levelNum, levelManifest := range manifest.Levels {
-		tableIDs := make([]uint64, len(levelManifest.Tables))
-		for i, t := range levelManifest.Tables {
-			tableIDs[i] = t.ID
-		}
-		e.logger.Debug("Manifest content", "level", levelNum, "tables", tableIDs)
-	}
-	// --- END DEBUG LOGGING ---
-	file, err := os.Create(manifestFilePath)
-	if err != nil {
-		e.logger.Error("Failed to create manifest file for writing.", "path", manifestFilePath, "error", err)
-		span.SetStatus(codes.Error, "write_manifest_failed")
-		return fmt.Errorf("failed to write manifest file: %w", err)
-	}
-	defer file.Close()
-
-	if err := writeManifestBinary(file, &manifest); err != nil {
-		e.logger.Error("Failed to write binary manifest data.", "path", manifestFilePath, "error", err)
-		span.SetStatus(codes.Error, "write_manifest_failed")
-		return fmt.Errorf("failed to write binary manifest data: %w", err)
-	}
-
-	// Update nextSSTableID to file
-	nextSSTableIDFilePath := filepath.Join(e.opts.DataDir, NEXTID_FILE_NAME)
-	numByte := make([]byte, 8)
-	binary.BigEndian.PutUint64(numByte, e.nextSSTableID.Load())
-
-	if err := os.WriteFile(nextSSTableIDFilePath, numByte, 0644); err != nil {
-		e.logger.Error("Failed to update NEXTID file.", "path", nextSSTableIDFilePath, "error", err)
-		span.SetStatus(codes.Error, "update_next_id_file_failed")
-		return fmt.Errorf("failed to update NEXTID file: %w", err)
-	}
-
-	// Update the CURRENT file to point to the new manifest
-	if err := os.WriteFile(currentFilePath, []byte(uniqueManifestFileName), 0644); err != nil {
-		e.logger.Error("Failed to update CURRENT file.", "path", currentFilePath, "error", err)
-		span.SetStatus(codes.Error, "update_current_file_failed")
-		return fmt.Errorf("failed to update CURRENT file: %w", err)
-	}
-
-	// Attempt to delete the old manifest file AFTER successfully writing the new one and updating CURRENT
-	if oldManifestFileName != "" && oldManifestFileName != uniqueManifestFileName { // This check is correct
-		oldManifestFilePath := filepath.Join(e.opts.DataDir, oldManifestFileName)
-		if _, err := os.Stat(oldManifestFilePath); err == nil { // Check if old manifest file actually exists
-			if err := os.Remove(oldManifestFilePath); err != nil {
-				e.logger.Warn("Failed to delete old manifest file.", "path", oldManifestFilePath, "error", err)
-				// Log the error but don't fail the persistence operation.
-			} else {
-				e.logger.Info("Old manifest file deleted.", "path", oldManifestFilePath)
-			}
-		}
-	}
-
-	e.logger.Info("Manifest persisted successfully.", "manifest_file", uniqueManifestFileName)
-	span.SetAttributes(attribute.String("manifest.file", uniqueManifestFileName))
-
-	// --- Post-Manifest-Write Hook ---
-	postManifestPayload := hooks.ManifestWritePayload{
-		Path: manifestFilePath,
-	}
-	// This is a post-hook, so it's typically async and we don't handle the error.
-	e.hookManager.Trigger(context.Background(), hooks.NewPostManifestWriteEvent(postManifestPayload))
-
 	return nil
 }
 
@@ -804,7 +690,7 @@ func (e *storageEngine) initializeMetrics() {
 		if e.metrics.PutTotal == nil || e.engineStartTime.IsZero() {
 			return 0.0
 		}
-		durationSeconds := time.Since(e.engineStartTime).Seconds()
+		durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
 		if durationSeconds == 0 {
 			return 0.0
 		}
@@ -814,7 +700,7 @@ func (e *storageEngine) initializeMetrics() {
 		if e.metrics.QueryTotal == nil || e.engineStartTime.IsZero() {
 			return 0.0
 		}
-		durationSeconds := time.Since(e.engineStartTime).Seconds()
+		durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
 		if durationSeconds == 0 {
 			return 0.0
 		}
@@ -1019,7 +905,7 @@ func (e *storageEngine) initializeTagIndexManager() error {
 // GetWALPath returns the file path of the WAL.
 // This is primarily for testing purposes.
 func (e *storageEngine) GetWALPath() string {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return ""
 	}
 	if e.wal == nil {
@@ -1101,7 +987,7 @@ func (e *storageEngine) shutdownTracer() error {
 }
 
 func (e *storageEngine) VerifyDataConsistency() []error {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return []error{err}
 	}
 	var allErrors []error
@@ -1121,28 +1007,16 @@ func (e *storageEngine) GetDataDir() string {
 	return e.opts.DataDir
 }
 
-func (e *storageEngine) GetStringStore() indexer.StringStoreInterface {
-	return e.stringStore
-}
-
 func (e *storageEngine) GetHookManager() hooks.HookManager {
 	return e.hookManager
 }
 
 // GetPubSub returns the PubSub instance for the engine.
 func (e *storageEngine) GetPubSub() (PubSubInterface, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	return e.pubsub, nil
-}
-
-// GetClock returns the clock used by the engine.
-func (e *storageEngine) GetClock() (utils.Clock, error) {
-	if err := e.checkStarted(); err != nil {
-		return nil, err
-	}
-	return e.clock, nil
 }
 
 // TriggerCompaction manually signals the compaction manager to check for and
@@ -1155,7 +1029,7 @@ func (e *storageEngine) TriggerCompaction() {
 
 // Metrics returns the Metrics instance for the engine.
 func (e *storageEngine) Metrics() (*EngineMetrics, error) {
-	if err := e.checkStarted(); err != nil {
+	if err := e.CheckStarted(); err != nil {
 		return nil, err
 	}
 	return e.metrics, nil

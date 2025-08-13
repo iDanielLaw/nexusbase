@@ -95,6 +95,11 @@ func (m *MockStorageEngine) CreateSnapshot(snapshotDir string) error {
 	return args.Error(0)
 }
 
+func (m *MockStorageEngine) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
+	args := m.Called(snapshotsBaseDir)
+	return args.Error(0)
+}
+
 func (m *MockStorageEngine) GetPubSub() (engine.PubSubInterface, error) {
 	args := m.Called()
 	if args.Get(0) == nil {
@@ -173,8 +178,12 @@ func (m *MockStorageEngine) GetTagValues(metric, tagKey string) ([]string, error
 	}
 	return args.Get(0).([]string), args.Error(1)
 }
-func (m *MockStorageEngine) GetClock() (utils.Clock, error) {
-	return &utils.SystemClock{}, nil
+func (m *MockStorageEngine) GetClock() utils.Clock {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return &utils.SystemClock{} // Return a default clock if not mocked
+	}
+	return args.Get(0).(utils.Clock)
 }
 
 // MockQueryResultIterator is a manual mock implementation of core.QueryResultIteratorInterface.

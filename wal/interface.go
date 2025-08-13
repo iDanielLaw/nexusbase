@@ -17,4 +17,6 @@ type WALInterface interface {
 	SetTestingOnlyInjectCloseError(err error)
 	// ActiveSegmentIndex returns the index of the current active segment file.
 	ActiveSegmentIndex() uint64
+	// Rotate manually triggers a segment rotation.
+	Rotate() error
 }

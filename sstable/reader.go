@@ -82,23 +82,32 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 		return nil, fmt.Errorf("failed to open sstable file %s: %w", opts.FilePath, err) // FR7.1
 	}
 
-	// Read and verify the header at the beginning of the file.
-	var header core.FileHeader
-	if err := binary.Read(file, binary.LittleEndian, &header); err != nil {
-		file.Close()
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed_to_read_sstable_header")
-		}
-		return nil, fmt.Errorf("failed to read sstable header from %s: %w", opts.FilePath, err)
+	// Read header bytes first to isolate file I/O from binary parsing.
+	// This helps debug issues where binary.Read might behave unexpectedly on a file handle.
+	headerSize := binary.Size(core.FileHeader{})
+	if headerSize <= 0 {
+		// This would be a programming error in core.FileHeader definition.
+		return nil, fmt.Errorf("invalid FileHeader size: %d", headerSize)
 	}
+	headerBytes := make([]byte, headerSize)
+	if _, err := io.ReadFull(file, headerBytes); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to read sstable header bytes from %s: %w", opts.FilePath, err)
+	}
+
+	// Now parse the header from the in-memory byte slice.
+	var header core.FileHeader
+	if err := binary.Read(bytes.NewReader(headerBytes), binary.LittleEndian, &header); err != nil {
+		return nil, fmt.Errorf("failed to parse sstable header from bytes: %w", err)
+	}
+
 	if header.Magic != core.SSTableMagic {
 		file.Close()
 		return nil, fmt.Errorf("invalid sstable magic number in %s. Got: %x, Want: %x", opts.FilePath, header.Magic, core.SSTableMagic)
 	}
-	if header.Version > core.CurrentVersion {
+	if header.Version != core.CurrentVersion {
 		file.Close()
-		return nil, fmt.Errorf("unsupported sstable version in %s. Got: %d, Want <= %d", opts.FilePath, header.Version, core.CurrentVersion)
+		return nil, fmt.Errorf("unsupported sstable version in %s. Got: %d, Want: %d", opts.FilePath, header.Version, core.CurrentVersion)
 	}
 
 	stat, err := file.Stat()
@@ -522,7 +531,7 @@ func (s *SSTable) VerifyIntegrity(deepCheck bool) []error {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.file == nil {
+	if deepCheck && s.file == nil {
 		return []error{ErrClosed}
 	}
 	var errs []error
@@ -557,30 +566,32 @@ func (s *SSTable) VerifyIntegrity(deepCheck bool) []error {
 		}
 
 		// 4. Verify index entries' FirstKey against actual block data (Deep Check)
-		// This can be resource-intensive as it involves reading blocks.
-		for i, indexEntry := range s.index.entries { // Pass nil semaphore for integrity checks
-			blockData, err := s.readBlock(indexEntry.BlockOffset, indexEntry.BlockLength, nil) // Uses cache if available
-			if err != nil {
-				errs = append(errs, fmt.Errorf("SSTable ID %d: Failed to read block for index entry %d (offset %d): %w",
-					s.id, i, indexEntry.BlockOffset, err))
-				continue
-			}
-			blockIter := NewBlockIterator(blockData.Bytes())
-			if blockIter.Next() {
-				actualFirstKeyInBlock := blockIter.Key()
-				if !bytes.Equal(indexEntry.FirstKey, actualFirstKeyInBlock) {
-					errs = append(errs, fmt.Errorf("SSTable ID %d: Index entry %d FirstKey %s mismatch with actual block first key %s",
-						s.id, i, string(indexEntry.FirstKey), string(actualFirstKeyInBlock)))
+		if deepCheck {
+			// This can be resource-intensive as it involves reading blocks.
+			for i, indexEntry := range s.index.entries { // Pass nil semaphore for integrity checks
+				blockData, err := s.readBlock(indexEntry.BlockOffset, indexEntry.BlockLength, nil) // Uses cache if available
+				if err != nil {
+					errs = append(errs, fmt.Errorf("SSTable ID %d: Failed to read block for index entry %d (offset %d): %w",
+						s.id, i, indexEntry.BlockOffset, err))
+					continue
 				}
-			} else if blockIter.Error() != nil {
-				errs = append(errs, fmt.Errorf("SSTable ID %d: Error iterating first entry of block for index entry %d: %w",
-					s.id, i, blockIter.Error()))
-			} else {
-				// Block is empty, but index entry exists. This might be an issue depending on writer logic.
-				// If writer ensures blocks are non-empty if indexed, this is an error.
-				errs = append(errs, fmt.Errorf("SSTable ID %d: Index entry %d points to an empty or unreadable block", s.id, i))
+				blockIter := NewBlockIterator(blockData.Bytes())
+				if blockIter.Next() {
+					actualFirstKeyInBlock := blockIter.Key()
+					if !bytes.Equal(indexEntry.FirstKey, actualFirstKeyInBlock) {
+						errs = append(errs, fmt.Errorf("SSTable ID %d: Index entry %d FirstKey %s mismatch with actual block first key %s",
+							s.id, i, string(indexEntry.FirstKey), string(actualFirstKeyInBlock)))
+					}
+				} else if blockIter.Error() != nil {
+					errs = append(errs, fmt.Errorf("SSTable ID %d: Error iterating first entry of block for index entry %d: %w",
+						s.id, i, blockIter.Error()))
+				} else {
+					// Block is empty, but index entry exists. This might be an issue depending on writer logic.
+					// If writer ensures blocks are non-empty if indexed, this is an error.
+					errs = append(errs, fmt.Errorf("SSTable ID %d: Index entry %d points to an empty or unreadable block", s.id, i))
+				}
+				core.PutBuffer(blockData) // Return buffer to pool at the end of the loop
 			}
-			core.PutBuffer(blockData) // Return buffer to pool at the end of the loop
 		}
 
 		// 5. Verify Bloom Filter integrity (Deep Check - no false negatives)

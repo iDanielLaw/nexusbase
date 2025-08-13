@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/core"
@@ -168,7 +167,7 @@ func (sl *StateLoader) loadStateFromDisk() (bool, error) {
 			sl.logger.Error("Failed to read range_tombstones file from manifest.", "file", rangeTombstonesFile, "error", readErr)
 			return false, fmt.Errorf("failed to read range_tombstones file %s: %w", rangeTombstonesFile, readErr)
 		}
-		var rt map[string][]RangeTombstone
+		var rt map[string][]core.RangeTombstone
 		if unmarshalErr := json.Unmarshal(data, &rt); unmarshalErr != nil {
 			sl.logger.Error("Failed to unmarshal range_tombstones file from manifest.", "file", rangeTombstonesFile, "error", unmarshalErr)
 			return false, fmt.Errorf("failed to unmarshal range_tombstones file %s: %w", rangeTombstonesFile, unmarshalErr)
@@ -390,8 +389,8 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 	}
 
 	recoveryStartTime := sl.engine.clock.Now()
-	w, recoveredEntries, walRecoveryErr := wal.Open(walOpts)
-	sl.engine.metrics.WALRecoveryDurationSeconds.Set(time.Since(recoveryStartTime).Seconds())
+	w, recoveredEntries, walRecoveryErr := wal.Open(walOpts) //nolint:govet
+	sl.engine.metrics.WALRecoveryDurationSeconds.Set(sl.engine.clock.Now().Sub(recoveryStartTime).Seconds())
 
 	if walRecoveryErr != nil {
 		sl.logger.Error("Critical error during WAL open/recovery.", "error", walRecoveryErr)
@@ -469,7 +468,7 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 					continue
 				}
 				sl.engine.rangeTombstonesMu.Lock()
-				sl.engine.rangeTombstones[string(entry.Key)] = append(sl.engine.rangeTombstones[string(entry.Key)], RangeTombstone{
+				sl.engine.rangeTombstones[string(entry.Key)] = append(sl.engine.rangeTombstones[string(entry.Key)], core.RangeTombstone{
 					MinTimestamp: minTs,
 					MaxTimestamp: maxTs,
 					SeqNum:       entry.SeqNum,

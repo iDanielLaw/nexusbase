@@ -14,7 +14,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/internal"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexusbase/wal"
@@ -31,72 +30,6 @@ type testDataPoint struct {
 	tags      map[string]string
 	timestamp int64
 	value     float64
-}
-
-// crashEngine simulates a server crash by closing the WAL file handle without
-// performing a graceful engine shutdown.
-// It creates an engine, runs the provided function `fn` to manipulate its state,
-// and then simulates a crash without a clean shutdown.
-func crashEngine(t *testing.T, opts StorageEngineOptions, fn func(e StorageEngineInterface)) {
-	t.Helper()
-
-	engine, err := NewStorageEngine(opts)
-	require.NoError(t, err)
-	err = engine.Start()
-	require.NoError(t, err)
-
-	// Run the user-provided function to populate/manipulate the engine
-	if fn != nil {
-		fn(engine)
-	}
-
-	concreteEngine, ok := engine.(*storageEngine)
-	if !ok {
-		t.Fatalf("Failed to cast to *storageEngine for crash simulation")
-	}
-	// 1. Signal all background loops to stop.
-	if concreteEngine.tagIndexManager != nil {
-		concreteTagMgr, ok := concreteEngine.tagIndexManager.(internal.PrivateTagIndexManager)
-		if !ok {
-			t.Fatal("Failed to assert TagIndexManager to PrivateTagIndexManager")
-		} else {
-			shutdownChan := concreteTagMgr.GetShutdownChain()
-			select {
-			case <-shutdownChan:
-			default:
-				close(shutdownChan)
-			}
-			concreteTagMgr.GetWaitGroup().Wait()
-			if concreteTagMgr.GetLevelsManager() != nil {
-				_ = concreteTagMgr.GetLevelsManager().Close()
-			}
-		}
-	}
-	select {
-	case <-concreteEngine.shutdownChan:
-	default:
-		close(concreteEngine.shutdownChan)
-	}
-
-	// 2. Wait for all background loops to finish.
-	concreteEngine.wg.Wait()
-
-	// 3. Manually close the underlying file stores to release file locks.
-	if err := concreteEngine.wal.Sync(); err != nil {
-		t.Logf("Warning: WAL sync during crash simulation failed: %v", err)
-	}
-	if concreteEngine.wal != nil {
-		_ = concreteEngine.wal.Close()
-	}
-	if concreteEngine.stringStore != nil {
-		_ = concreteEngine.stringStore.Close()
-	}
-	if concreteEngine.seriesIDStore != nil {
-		_ = concreteEngine.seriesIDStore.Close()
-	}
-	if concreteEngine.levelsManager != nil {
-		_ = concreteEngine.closeSSTables() // This closes the main levels manager
-	}
 }
 
 func TestStorageEngine_WALRecovery_CrashSimulation(t *testing.T) {

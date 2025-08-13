@@ -32,6 +32,7 @@ type Segment struct {
 type SegmentWriter struct {
 	*Segment
 	writer *bufio.Writer
+	size   int64 // Tracks the current size including buffered writes
 }
 
 // SegmentReader handles reading records from a segment.
@@ -57,7 +58,7 @@ func parseSegmentFileName(name string) (uint64, error) {
 // CreateSegment creates a new segment file in the given directory.
 func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 	path := filepath.Join(dir, formatSegmentFileName(index))
-	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create segment file %s: %w", path, err)
 	}
@@ -77,6 +78,7 @@ func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 	return &SegmentWriter{
 		Segment: seg,
 		writer:  bufio.NewWriter(file),
+		size:    int64(header.Size()), // Initialize with header size
 	}, nil
 }
 
@@ -141,12 +143,41 @@ func (sw *SegmentWriter) WriteRecord(data []byte) error {
 		return fmt.Errorf("failed to write record checksum: %w", err)
 	}
 
+	// Update internal size tracker
+	sw.size += int64(4 + len(data) + 4) // length + data + checksum
+
 	return nil
 }
 
 // ReadRecord reads a single record from the segment.
 func (sr *SegmentReader) ReadRecord() ([]byte, error) {
-	return readRecord(sr.reader)
+	var length uint32
+	if err := binary.Read(sr.reader, binary.LittleEndian, &length); err != nil {
+		return nil, err // Could be io.EOF for clean end
+	}
+
+	// A sanity check to prevent allocating huge amounts of memory for a corrupt record.
+	// This limit can be adjusted based on expected maximum record size.
+	const maxRecordSize = 128 * 1024 * 1024 // 128MB
+	if length > maxRecordSize {
+		return nil, fmt.Errorf("wal record length %d exceeds sanity limit of %d bytes", length, maxRecordSize)
+	}
+
+	data := make([]byte, length)
+	if _, err := io.ReadFull(sr.reader, data); err != nil {
+		return nil, fmt.Errorf("failed to read record data (expected %d bytes): %w", length, err)
+	}
+
+	var storedChecksum uint32
+	if err := binary.Read(sr.reader, binary.LittleEndian, &storedChecksum); err != nil {
+		return nil, fmt.Errorf("failed to read record checksum: %w", err)
+	}
+
+	if calculatedChecksum := crc32.ChecksumIEEE(data); calculatedChecksum != storedChecksum {
+		return nil, fmt.Errorf("checksum mismatch: stored=%x, calculated=%x", storedChecksum, calculatedChecksum)
+	}
+
+	return data, nil
 }
 
 // Sync flushes the buffered writer and syncs the file to disk.
@@ -179,6 +210,15 @@ func (sr *SegmentReader) Close() error {
 	err := sr.file.Close()
 	sr.file = nil
 	return err
+}
+
+// Size returns the current size of the segment file, including buffered data.
+// This overrides the embedded Segment.Size method.
+func (sw *SegmentWriter) Size() (int64, error) {
+	if sw.file == nil {
+		return 0, os.ErrClosed
+	}
+	return sw.size, nil
 }
 
 // Size returns the current size of the segment file.

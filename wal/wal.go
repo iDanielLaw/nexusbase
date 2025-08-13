@@ -7,7 +7,6 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"log/slog"
 	"os"
@@ -194,12 +193,15 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 	}
 
 	// Check if we need to rotate the segment BEFORE writing the new record.
-	// Rotate if the current file is not empty and adding the new record would exceed the max size.
+	// Rotate if the current file already contains data and adding the new record would exceed the max size.
 	currentSize, err := w.activeSegment.Size()
 	if err != nil {
 		return fmt.Errorf("could not get active segment size: %w", err)
 	}
-	if currentSize > 0 && (currentSize+newRecordSize) > w.opts.MaxSegmentSize {
+	// The check `currentSize > int64(binary.Size(core.FileHeader{}))` ensures we only rotate
+	// if the segment already contains at least one record. This allows a single large
+	// record to be written to an empty segment, even if it exceeds the max size.
+	if currentSize > int64(binary.Size(core.FileHeader{})) && (currentSize+newRecordSize) > w.opts.MaxSegmentSize {
 		w.logger.Debug("Rotating WAL segment due to size", "current_size", currentSize, "new_record_size", newRecordSize, "max_size", w.opts.MaxSegmentSize)
 		if err := w.rotateLocked(); err != nil {
 			return fmt.Errorf("failed to rotate WAL segment: %w", err)
@@ -232,6 +234,14 @@ func (w *WAL) Sync() error {
 		return fmt.Errorf("failed to sync WAL file: %w", err)
 	}
 	return nil
+}
+
+// Rotate manually triggers a segment rotation.
+// It closes the current segment and opens a new one for writing.
+func (w *WAL) Rotate() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.rotateLocked()
 }
 
 // Close closes the WAL file.
@@ -342,34 +352,6 @@ func (w *WAL) rotateLocked() error {
 		w.hookManager.Trigger(context.Background(), hooks.NewPostWALRotateEvent(payload))
 	}
 	return nil
-}
-
-// readRecord reads a single record from the WAL.
-func readRecord(r io.Reader) ([]byte, error) {
-	var length uint32
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
-		return nil, err // Could be io.EOF for clean end
-	}
-
-	if length > 1024*1024*128 { // 128MB limit per record
-		return nil, fmt.Errorf("wal record length %d exceeds sanity limit", length)
-	}
-
-	data := make([]byte, length)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, fmt.Errorf("failed to read record data (expected %d bytes): %w", length, err)
-	}
-
-	var storedChecksum uint32
-	if err := binary.Read(r, binary.LittleEndian, &storedChecksum); err != nil {
-		return nil, fmt.Errorf("failed to read record checksum: %w", err)
-	}
-
-	if calculatedChecksum := crc32.ChecksumIEEE(data); calculatedChecksum != storedChecksum {
-		return nil, fmt.Errorf("checksum mismatch: stored=%x, calculated=%x", storedChecksum, calculatedChecksum)
-	}
-
-	return data, nil
 }
 
 // encodeEntryData serializes a single WALEntry's data part into a writer.
@@ -540,10 +522,7 @@ func (w *WAL) openForAppend() error {
 	}
 
 	// If the last segment is empty or only has a header, reuse it.
-	// We need to truncate it and rewrite the header to be safe.
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("failed to remove incomplete segment %s for reuse: %w", path, err)
-	}
+	// CreateSegment will truncate the file and write a new header, making it safe for reuse.
 
 	seg, err := CreateSegment(w.dir, lastIndex)
 	if err != nil {

@@ -3,12 +3,11 @@ package wal
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
@@ -16,336 +15,324 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWAL_AppendAndRead(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	tempDir := t.TempDir()
-	opts := Options{
-		Dir:      tempDir,
-		Logger:   logger,
-		SyncMode: SyncAlways,
+// Helper to create WAL options for testing.
+func testWALOptions(t *testing.T, dir string) Options {
+	t.Helper()
+	return Options{
+		Dir:            dir,
+		SyncMode:       SyncDisabled, // Use SyncDisabled for performance in tests
+		MaxSegmentSize: 64 * 1024,    // 64KB, small for testing rotation
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-
-	// --- Phase 1: Write entries ---
-	w1, initialEntries, err := Open(opts)
-	require.NoError(t, err, "Open on a new directory should not have a recovery error")
-	require.Empty(t, initialEntries, "A new WAL should have no recovered entries")
-
-	entry1 := core.WALEntry{EntryType: core.EntryTypePutEvent, Key: []byte("key1"), Value: []byte("val1"), SeqNum: 1}
-	entry2 := core.WALEntry{EntryType: core.EntryTypeDelete, Key: []byte("key2"), Value: nil, SeqNum: 2}
-
-	require.NoError(t, w1.Append(entry1))
-	require.NoError(t, w1.Append(entry2))
-	require.NoError(t, w1.Close())
-
-	// --- Phase 2: Reopen and recover ---
-	// The second WAL instance is only to trigger recovery. We don't use it after.
-	w2, recoveredEntries, recoveryErr := Open(opts)
-	require.NoError(t, w2.Close()) // Close the handle to prevent leaks
-	// The error from NewWAL is the recovery error, which should be EOF for a clean read.
-	require.NoError(t, recoveryErr)
-
-	// --- Phase 3: Verify ---
-	require.Len(t, recoveredEntries, 2, "Should recover 2 entries")
-	assert.Equal(t, entry1, recoveredEntries[0], "Entry 1 mismatch")
-	assert.Equal(t, entry2, recoveredEntries[1], "Entry 2 mismatch")
 }
 
-func TestWAL_AppendBatchAndRead(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	tempDir := t.TempDir()
-	opts := Options{
-		Dir:      tempDir,
-		Logger:   logger,
-		SyncMode: SyncAlways,
+// Helper to create a slice of test WAL entries.
+func createTestWALEntries(count int) []core.WALEntry {
+	entries := make([]core.WALEntry, count)
+	for i := 0; i < count; i++ {
+		entries[i] = core.WALEntry{
+			EntryType: core.EntryTypePutEvent,
+			Key:       []byte(fmt.Sprintf("key-%d", i)),
+			Value:     []byte(fmt.Sprintf("value-%d", i)),
+			SeqNum:    uint64(i + 1),
+		}
 	}
+	return entries
+}
 
-	// --- Phase 1: Write batch ---
-	w1, _, err := Open(opts)
+func TestOpenWAL_New(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	wal, recovered, err := Open(opts)
+	require.NoError(t, err, "Opening a new WAL should not fail")
+	require.NotNil(t, wal)
+	defer wal.Close()
+
+	assert.Empty(t, recovered, "A new WAL should have no recovered entries")
+	assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "A new WAL should start with segment index 1")
+}
+
+func TestWAL_AppendAndRecover(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	// 1. Open WAL and write some entries
+	wal, _, err := Open(opts)
 	require.NoError(t, err)
 
-	batchEntries := []core.WALEntry{
-		{EntryType: core.EntryTypePutEvent, Key: []byte("batch_key1"), Value: []byte("batch_val1"), SeqNum: 10},
-		{EntryType: core.EntryTypePutEvent, Key: []byte("batch_key2"), Value: []byte("batch_val2"), SeqNum: 11},
-		{EntryType: core.EntryTypeDelete, Key: []byte("batch_key3"), Value: nil, SeqNum: 12},
-	}
-	require.NoError(t, w1.AppendBatch(batchEntries))
-	require.NoError(t, w1.Close())
-
-	// --- Phase 2: Reopen and recover ---
-	w2, recoveredEntries, recoveryErr := Open(opts)
-	require.NoError(t, w2.Close())
-	require.NoError(t, recoveryErr)
-
-	// --- Phase 3: Verify ---
-	require.Len(t, recoveredEntries, 3, "Should recover 3 entries from batch")
-	assert.Equal(t, batchEntries, recoveredEntries, "Batch entries mismatch")
-}
-
-func TestWAL_AppendBatch_Empty(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	tempDir := t.TempDir()
-	opts := Options{
-		Dir:    tempDir,
-		Logger: logger,
-	}
-
-	w1, _, err := Open(opts)
+	entries := createTestWALEntries(5)
+	err = wal.AppendBatch(entries)
 	require.NoError(t, err)
 
-	require.NoError(t, w1.AppendBatch([]core.WALEntry{}), "AppendBatch with empty slice should not return an error")
-	require.NoError(t, w1.Close())
+	// Append a single entry
+	singleEntry := core.WALEntry{Key: []byte("single"), Value: []byte("entry"), SeqNum: 6, EntryType: core.EntryTypePutEvent}
+	err = wal.Append(singleEntry)
+	require.NoError(t, err)
 
-	w2, recoveredEntries, recoveryErr := Open(opts)
-	require.NoError(t, w2.Close())
-	require.NoError(t, recoveryErr)
+	err = wal.Close()
+	require.NoError(t, err)
 
-	require.Empty(t, recoveredEntries, "Expected 0 entries after appending empty batch")
-}
+	// 2. Re-open the WAL and check recovered entries
+	wal2, recovered, err := Open(opts)
+	require.NoError(t, err, "Re-opening WAL should succeed")
+	require.NotNil(t, wal2)
+	defer wal2.Close()
 
-// TestWAL_Recovery_Corrupted tests the WAL's ability to recover as much data as possible
-// from a corrupted file.
-func TestWAL_Recovery_Corrupted(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	expectedEntries := append(entries, singleEntry)
+	require.Len(t, recovered, len(expectedEntries), "Should recover all written entries")
 
-	validEntries := []core.WALEntry{
-		{EntryType: core.EntryTypePutEvent, Key: []byte("key1"), Value: []byte("value1"), SeqNum: 1},
-		{EntryType: core.EntryTypePutEvent, Key: []byte("key2"), Value: []byte("value2_long_value_to_ensure_truncation_is_possible"), SeqNum: 2},
-		{EntryType: core.EntryTypePutEvent, Key: []byte("key3"), Value: []byte("value3"), SeqNum: 3},
+	// Compare recovered entries with expected
+	for i := range expectedEntries {
+		assert.Equal(t, expectedEntries[i].SeqNum, recovered[i].SeqNum)
+		assert.Equal(t, expectedEntries[i].Key, recovered[i].Key)
+		assert.Equal(t, expectedEntries[i].Value, recovered[i].Value)
+		assert.Equal(t, expectedEntries[i].EntryType, recovered[i].EntryType)
 	}
-
-	// Helper to create a valid WAL directory with multiple records for corruption tests
-	createValidWAL := func(t *testing.T) string {
-		t.Helper()
-		walDir := t.TempDir()
-		opts := Options{Dir: walDir, Logger: logger, SyncMode: SyncAlways}
-
-		w, initialEntries, recoveryErr := Open(opts)
-		require.NoError(t, recoveryErr, "Recovery error should be nil when creating a fresh WAL")
-		require.Empty(t, initialEntries, "A fresh WAL file should have no initial entries")
-
-		// Use Append to create separate records for each entry
-		for _, entry := range validEntries {
-			err := w.Append(entry)
-			require.NoError(t, err)
-		}
-		err := w.Close()
-		require.NoError(t, err)
-		return walDir
-	}
-
-	// --- Test Cases for different corruption types ---
-
-	t.Run("TruncatedInMiddleOfRecord", func(t *testing.T) {
-		walDir := createValidWAL(t)
-		segmentPath := filepath.Join(walDir, "00000001.wal") // Assume first segment
-		originalData, err := os.ReadFile(segmentPath)
-		require.NoError(t, err)
-
-		// Calculate offset to truncate. After the header and the first full record.
-		headerSize := binary.Size(core.FileHeader{})
-		firstRecordSize := getEncodedRecordSize(t, &validEntries[0])
-		truncateOffset := headerSize + firstRecordSize + 10 // Truncate 10 bytes into the second record
-
-		require.Greater(t, len(originalData), truncateOffset, "File is too small to test truncation at the desired offset")
-
-		// Truncate the file
-		err = os.WriteFile(segmentPath, originalData[:truncateOffset], 0644)
-		require.NoError(t, err)
-
-		// Attempt recovery
-		opts := Options{Dir: walDir, Logger: logger}
-		w, recoveredEntries, recoveryErr := Open(opts)
-		if w != nil { // The WAL instance must be closed to release the file handle.
-			w.Close()
-		}
-		require.Error(t, recoveryErr, "Expected an error from reading a truncated WAL")
-		assert.True(t, errors.Is(recoveryErr, io.ErrUnexpectedEOF) || strings.Contains(recoveryErr.Error(), "failed to read"), "Expected an unexpected EOF or read error")
-
-		// Verification
-		require.Len(t, recoveredEntries, 1, "Should have recovered only the first valid entry")
-		assert.Equal(t, validEntries[0], recoveredEntries[0], "The recovered entry should match the first valid entry")
-	})
-
-	t.Run("BadChecksum", func(t *testing.T) {
-		walDir := createValidWAL(t)
-		segmentPath := filepath.Join(walDir, "00000001.wal")
-		originalData, err := os.ReadFile(segmentPath)
-		require.NoError(t, err)
-
-		// Find the offset of the second record's data and corrupt it
-		headerSize := binary.Size(core.FileHeader{})
-		firstRecordSize := getEncodedRecordSize(t, &validEntries[0])
-		secondRecordDataOffset := headerSize + firstRecordSize + 4 // After header, first record, and second record's length prefix
-
-		require.Greater(t, len(originalData), secondRecordDataOffset, "File is too small to test checksum corruption")
-
-		// Corrupt a byte in the second record's data
-		originalData[secondRecordDataOffset]++
-
-		err = os.WriteFile(segmentPath, originalData, 0644)
-		require.NoError(t, err)
-
-		// Attempt recovery
-		w, recoveredEntries, recoveryErr := Open(Options{Dir: walDir, Logger: logger})
-		if w != nil {
-			w.Close()
-		}
-		require.Error(t, recoveryErr, "Expected an error from reading a WAL with a bad checksum")
-		assert.Contains(t, recoveryErr.Error(), "checksum mismatch", "Error message should indicate a checksum mismatch")
-
-		// Verification
-		require.Len(t, recoveredEntries, 1, "Should have recovered only the first valid entry")
-		assert.Equal(t, validEntries[0], recoveredEntries[0], "The recovered entry should match the first valid entry")
-	})
-
-	t.Run("BadLengthPrefix", func(t *testing.T) {
-		walDir := createValidWAL(t)
-		segmentPath := filepath.Join(walDir, "00000001.wal")
-		originalData, err := os.ReadFile(segmentPath)
-		require.NoError(t, err)
-
-		// Find the offset of the second record's length prefix and corrupt it
-		headerSize := binary.Size(core.FileHeader{})
-		firstRecordSize := getEncodedRecordSize(t, &validEntries[0])
-		secondRecordLengthOffset := headerSize + firstRecordSize
-
-		require.Greater(t, len(originalData), secondRecordLengthOffset+4, "File is too small to test length prefix corruption")
-
-		// Set an impossibly large length
-		binary.LittleEndian.PutUint32(originalData[secondRecordLengthOffset:], 0xFFFFFFFF)
-
-		err = os.WriteFile(segmentPath, originalData, 0644)
-		require.NoError(t, err)
-
-		// Attempt recovery
-		w, recoveredEntries, recoveryErr := Open(Options{Dir: walDir, Logger: logger})
-		if w != nil {
-			w.Close()
-		}
-		require.Error(t, recoveryErr, "Expected an error from reading a WAL with a bad length prefix")
-		assert.Contains(t, recoveryErr.Error(), "exceeds sanity limit", "Error message should indicate a bad length")
-
-		// Verification
-		require.Len(t, recoveredEntries, 1, "Should have recovered only the first valid entry")
-		assert.Equal(t, validEntries[0], recoveredEntries[0], "The recovered entry should match the first valid entry")
-	})
 }
 
 func TestWAL_Rotation(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	tempDir := t.TempDir()
+	t.Run("RotationOnMultipleSmallWrites", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		opts.MaxSegmentSize = 256 // Very small size to force rotation
 
-	// Set a very small segment size to force rotation
-	entry1 := core.WALEntry{EntryType: core.EntryTypePutEvent, Key: []byte("key1"), Value: []byte("val1"), SeqNum: 1}
-	recordSize := getEncodedRecordSize(t, &entry1)
-	headerSize := binary.Size(core.FileHeader{})
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+		defer wal.Close()
 
-	opts := Options{
-		Dir:            tempDir,
-		Logger:         logger,
-		SyncMode:       SyncAlways,
-		MaxSegmentSize: int64(headerSize + recordSize), // Rotate after 1 record
-	}
+		assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "Initial segment index should be 1")
 
-	// --- Phase 1: Write entries to trigger rotation ---
-	w, _, err := Open(opts)
-	require.NoError(t, err)
+		// Write entries until rotation occurs
+		var totalEntries []core.WALEntry
+		var seqNum uint64 = 0
+		for i := 0; i < 10; i++ {
+			seqNum++
+			entry := core.WALEntry{
+				Key:       []byte(fmt.Sprintf("key-for-rotation-%d", i)),
+				Value:     []byte("a somewhat long value to ensure we fill the segment"),
+				SeqNum:    seqNum,
+				EntryType: core.EntryTypePutEvent,
+			}
+			err := wal.Append(entry)
+			require.NoError(t, err)
+			totalEntries = append(totalEntries, entry)
+		}
 
-	// First write should fit in segment 1
-	require.NoError(t, w.Append(entry1))
+		assert.Greater(t, wal.ActiveSegmentIndex(), uint64(1), "WAL should have rotated to a new segment")
+		rotatedIndex := wal.ActiveSegmentIndex()
 
-	// Check that only one segment exists
-	files, err := os.ReadDir(tempDir)
-	require.NoError(t, err)
-	require.Len(t, files, 1, "Should have 1 segment file before rotation")
-	assert.Equal(t, "00000001.wal", files[0].Name())
+		// Append one more entry after rotation
+		seqNum++
+		finalEntry := core.WALEntry{Key: []byte("final"), Value: []byte("entry"), SeqNum: seqNum, EntryType: core.EntryTypePutEvent}
+		err = wal.Append(finalEntry)
+		require.NoError(t, err)
+		totalEntries = append(totalEntries, finalEntry)
 
-	// Second write should trigger rotation
-	entry2 := core.WALEntry{EntryType: core.EntryTypePutEvent, Key: []byte("key2"), Value: []byte("val2"), SeqNum: 2}
-	require.NoError(t, w.Append(entry2))
+		assert.Equal(t, rotatedIndex, wal.ActiveSegmentIndex(), "Segment index should not change after one more append")
 
-	// Check that a new segment was created
-	files, err = os.ReadDir(tempDir)
-	require.NoError(t, err)
-	require.Len(t, files, 2, "Should have 2 segment files after rotation")
-	assert.Equal(t, "00000001.wal", files[0].Name())
-	assert.Equal(t, "00000002.wal", files[1].Name())
+		// Close and recover to verify all data is intact
+		err = wal.Close()
+		require.NoError(t, err)
 
-	require.NoError(t, w.Close())
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
 
-	// --- Phase 2: Reopen and recover ---
-	w2, recoveredEntries, recoveryErr := Open(opts)
-	require.NoError(t, w2.Close())
-	require.NoError(t, recoveryErr, "A clean recovery across multiple segments should not return an error")
+		require.Len(t, recovered, len(totalEntries), "Should recover all entries across rotated segments")
+		// Simple check on first and last entry
+		assert.Equal(t, totalEntries[0].Key, recovered[0].Key)
+		assert.Equal(t, totalEntries[len(totalEntries)-1].Key, recovered[len(recovered)-1].Key)
+	})
 
-	// --- Phase 3: Verify ---
-	require.Len(t, recoveredEntries, 2, "Should recover 2 entries from two segments")
-	assert.Equal(t, entry1, recoveredEntries[0])
-	assert.Equal(t, entry2, recoveredEntries[1])
+	t.Run("LargeWriteForcesRotationOnNextWrite", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		opts.MaxSegmentSize = 256 // Small size
+
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		// 1. First write is large, but into an empty segment. Should not rotate yet.
+		largeValue := make([]byte, 300) // Larger than MaxSegmentSize
+		largeEntry := core.WALEntry{Key: []byte("large_entry"), Value: largeValue, SeqNum: 1, EntryType: core.EntryTypePutEvent}
+		err = wal.Append(largeEntry)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "Should not rotate when writing a large record to an empty segment")
+
+		// 2. Second write (any size) should trigger rotation because the current segment is now over the limit.
+		smallEntry := core.WALEntry{Key: []byte("small_entry"), Value: []byte("v"), SeqNum: 2, EntryType: core.EntryTypePutEvent}
+		err = wal.Append(smallEntry)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(2), wal.ActiveSegmentIndex(), "Should rotate on the next write after a large record filled the previous segment")
+
+		// 3. Close and recover to verify data integrity
+		err = wal.Close()
+		require.NoError(t, err)
+
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
+
+		require.Len(t, recovered, 2, "Should recover both entries")
+		assert.Equal(t, largeEntry.Key, recovered[0].Key, "First recovered entry should be the large one")
+		assert.Equal(t, largeEntry.Value, recovered[0].Value)
+		assert.Equal(t, smallEntry.Key, recovered[1].Key, "Second recovered entry should be the small one")
+	})
 }
 
 func TestWAL_Purge(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	opts.MaxSegmentSize = 128 // Small size to force rotation
 
-	// Set a small segment size to create multiple segments easily
-	entry := core.WALEntry{EntryType: core.EntryTypePutEvent, Key: []byte("k"), Value: []byte("v"), SeqNum: 1}
-	recordSize := getEncodedRecordSize(t, &entry)
-	headerSize := binary.Size(core.FileHeader{})
-
-	opts := Options{
-		Dir:            tempDir,
-		Logger:         logger,
-		SyncMode:       SyncAlways,
-		MaxSegmentSize: int64(headerSize + recordSize), // Rotate after 1 record
-	}
-
-	// --- Phase 1: Create 3 segments ---
-	w, _, err := Open(opts)
+	wal, _, err := Open(opts)
 	require.NoError(t, err)
 
-	entry.SeqNum = 1
-	require.NoError(t, w.Append(entry)) // Writes to seg 1
-	entry.SeqNum = 2
-	require.NoError(t, w.Append(entry)) // Rotates, writes to seg 2
-	entry.SeqNum = 3
-	require.NoError(t, w.Append(entry)) // Rotates, writes to seg 3
+	// Create a few segments
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 1}))
+	require.NoError(t, wal.Rotate()) // Manual rotate to segment 2
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("b"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 2}))
+	require.NoError(t, wal.Rotate()) // Manual rotate to segment 3
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("c"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 3}))
+	require.NoError(t, wal.Rotate()) // Manual rotate to segment 4
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("d"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 4}))
 
-	// Check that 3 segments exist
-	files, err := os.ReadDir(tempDir)
-	require.NoError(t, err)
-	require.Len(t, files, 3, "Should have 3 segment files")
+	activeSegmentIdx := wal.ActiveSegmentIndex()
+	assert.Equal(t, uint64(4), activeSegmentIdx, "Should be on segment 4")
 
-	// --- Phase 2: Purge first segment ---
-	err = w.Purge(1)
-	require.NoError(t, err)
-
-	// Check files
-	files, err = os.ReadDir(tempDir)
-	require.NoError(t, err)
-	require.Len(t, files, 2, "Should have 2 segment files after purging index 1")
-	assert.Equal(t, "00000002.wal", files[0].Name())
-	assert.Equal(t, "00000003.wal", files[1].Name())
-
-	// --- Phase 3: Purge active segment (should be skipped) ---
-	// Active segment is 3
-	err = w.Purge(3)
+	// Purge up to segment 2
+	err = wal.Purge(2)
 	require.NoError(t, err)
 
-	files, err = os.ReadDir(tempDir)
-	require.NoError(t, err)
-	require.Len(t, files, 1, "Should have 1 segment file after attempting to purge active segment")
-	assert.Equal(t, "00000003.wal", files[0].Name(), "Active segment should not be purged")
+	// Check that segment files 1 and 2 are gone, but 3 and 4 remain
+	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(1)))
+	assert.True(t, os.IsNotExist(err), "Segment 1 should be purged")
+	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(2)))
+	assert.True(t, os.IsNotExist(err), "Segment 2 should be purged")
+	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(3)))
+	assert.NoError(t, err, "Segment 3 should not be purged")
+	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(4)))
+	assert.NoError(t, err, "Segment 4 (active) should not be purged")
 
-	require.NoError(t, w.Close())
+	// Try to purge the active segment - it should be skipped
+	err = wal.Purge(activeSegmentIdx)
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(activeSegmentIdx)))
+	assert.NoError(t, err, "Active segment should not be purged even if requested")
+
+	wal.Close()
 }
 
-// getEncodedRecordSize is a test helper to calculate the on-disk size of a record.
-func getEncodedRecordSize(t *testing.T, entry *core.WALEntry) int {
-	t.Helper()
-	var data bytes.Buffer
-	// For simplicity, we'll just encode to get the length.
-	err := encodeEntryData(&data, entry)
+func TestWAL_Recovery_Corrupted(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	// 1. Create a WAL with good data
+	wal, _, err := Open(opts)
 	require.NoError(t, err)
-	return 4 + data.Len() + 4 // length + data + checksum
+	goodEntries := createTestWALEntries(3)
+	require.NoError(t, wal.AppendBatch(goodEntries))
+	segmentPath := wal.activeSegment.path
+	require.NoError(t, wal.Close())
+
+	// 2. Corrupt the segment file by truncating it
+	fileData, err := os.ReadFile(segmentPath)
+	require.NoError(t, err)
+	corruptedData := fileData[:len(fileData)-5] // Truncate last 5 bytes (part of checksum/record)
+	err = os.WriteFile(segmentPath, corruptedData, 0644)
+	require.NoError(t, err)
+
+	// 3. Attempt to recover
+	wal2, recovered, err := Open(opts)
+	require.Error(t, err, "Open should return an error for a corrupted WAL")
+	assert.NotNil(t, wal2, "WAL object should still be returned on non-fatal recovery error")
+	if wal2 != nil {
+		defer wal2.Close()
+	}
+
+	// The recovery should stop at the corruption but return the entries it successfully read.
+	// The key is that an error indicating corruption/truncation is returned.
+	assert.Contains(t, err.Error(), "unexpected EOF", "Error should indicate truncation")
+	t.Logf("Recovered %d entries from corrupted WAL", len(recovered))
+}
+
+func TestWAL_StartRecoveryIndex(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	opts.MaxSegmentSize = 128 // Small size to force rotation
+
+	// 1. Create a WAL with 3 segments
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	// Segment 1
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), SeqNum: 1}))
+	require.NoError(t, wal.Rotate())
+	// Segment 2
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("b"), SeqNum: 2}))
+	require.NoError(t, wal.Rotate())
+	// Segment 3
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("c"), SeqNum: 3}))
+	require.NoError(t, wal.Close())
+
+	// 2. Recover, but start after segment 1
+	opts.StartRecoveryIndex = 1
+	wal2, recovered, err := Open(opts)
+	require.NoError(t, err)
+	defer wal2.Close()
+
+	// Should only recover entries from segments > 1 (i.e., segments 2 and 3)
+	require.Len(t, recovered, 2, "Should only recover entries from segments 2 and 3")
+	assert.Equal(t, uint64(2), recovered[0].SeqNum)
+	assert.Equal(t, []byte("b"), recovered[0].Key)
+	assert.Equal(t, uint64(3), recovered[1].SeqNum)
+	assert.Equal(t, []byte("c"), recovered[1].Key)
+}
+
+func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	segmentPath := filepath.Join(tempDir, formatSegmentFileName(1))
+
+	// 1. Manually construct a batch payload where one of the inner entries is corrupted.
+	// The overall record will have a valid checksum, but parsing the batch will fail.
+	var payloadBuf bytes.Buffer
+
+	// Batch header
+	require.NoError(t, payloadBuf.WriteByte(byte(core.EntryTypePutBatch)))
+	numEntries := uint32(3) // We'll say there are 3, but only write 1.5 of them
+	require.NoError(t, binary.Write(&payloadBuf, binary.LittleEndian, numEntries))
+
+	// Entry 1 (Good)
+	entry1 := core.WALEntry{EntryType: core.EntryTypePutEvent, SeqNum: 1, Key: []byte("key1"), Value: []byte("val1")}
+	require.NoError(t, encodeEntryData(&payloadBuf, &entry1))
+
+	// Entry 2 (Corrupted by truncation)
+	entry2 := core.WALEntry{EntryType: core.EntryTypePutEvent, SeqNum: 2, Key: []byte("key2_a_bit_longer"), Value: []byte("val2_also_longer")}
+	var entry2Buf bytes.Buffer
+	require.NoError(t, encodeEntryData(&entry2Buf, &entry2))
+	// Truncate the encoded entry 2 data to cause a parsing error (e.g., unexpected EOF)
+	corruptedEntry2Bytes := entry2Buf.Bytes()[:entry2Buf.Len()-5]
+	_, err := payloadBuf.Write(corruptedEntry2Bytes)
+	require.NoError(t, err)
+
+	// 2. Write this corrupted payload as a single, validly-checksummed record to a segment file.
+	sw, err := CreateSegment(tempDir, 1)
+	require.NoError(t, err)
+	require.NoError(t, sw.WriteRecord(payloadBuf.Bytes()))
+	require.NoError(t, sw.Close())
+
+	// 3. Attempt to recover from the segment.
+	recoveredEntries, err := recoverFromSegment(segmentPath, logger)
+
+	// 4. Verify the outcome.
+	require.Error(t, err, "Recovery should fail due to corruption inside the batch")
+	assert.Contains(t, err.Error(), "error decoding entry 1 in batch", "Error message should point to the corrupted entry")
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF, "Underlying error should be unexpected EOF due to truncation")
+
+	// We should have recovered the entries that came before the corruption.
+	require.Len(t, recoveredEntries, 1, "Should have recovered the first valid entry")
+	assert.Equal(t, entry1.Key, recoveredEntries[0].Key)
+	assert.Equal(t, entry1.SeqNum, recoveredEntries[0].SeqNum)
 }

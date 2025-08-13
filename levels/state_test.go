@@ -10,11 +10,7 @@ import (
 
 // Helper to create a new LevelState for testing.
 func newLevelStateForTest(levelNumber int) *LevelState {
-	return &LevelState{
-		levelNumber: levelNumber,
-		tables:      make([]*sstable.SSTable, 0),
-		tableMap:    make(map[uint64]*sstable.SSTable),
-	}
+	return newLevelState(levelNumber)
 }
 
 // Helper to assert the order of tables in a LevelState.
@@ -152,4 +148,35 @@ func TestLevelState_GetTables_IsCopy(t *testing.T) {
 	assert.NotNil(t, internalTables[0], "internal state should not be modified by changes to the returned copy")
 	assert.Equal(t, uint64(1), internalTables[0].ID(), "internal state should be unchanged")
 	assertTableOrder(t, ls, []uint64{1, 2})
+}
+
+func TestLevelState_TotalSize(t *testing.T) {
+	ls := newLevelStateForTest(1)
+
+	assert.Zero(t, ls.TotalSize(), "Initial total size should be 0")
+
+	// Add a table
+	tbl1 := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("a"), makeValue(100)}})
+	defer tbl1.Close()
+	err := ls.Add(tbl1)
+	require.NoError(t, err)
+	assert.Equal(t, tbl1.Size(), ls.TotalSize(), "Total size should be equal to the first table's size")
+
+	// Add another table
+	tbl2 := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("b"), makeValue(200)}})
+	defer tbl2.Close()
+	err = ls.Add(tbl2)
+	require.NoError(t, err)
+	assert.Equal(t, tbl1.Size()+tbl2.Size(), ls.TotalSize(), "Total size should be the sum of both tables")
+
+	// Remove a table
+	err = ls.Remove(tbl1.ID())
+	require.NoError(t, err)
+	assert.Equal(t, tbl2.Size(), ls.TotalSize(), "Total size should be updated after removal")
+
+	// Set tables
+	tbl3 := newTestSSTable(t, 3, []struct{ key, value []byte }{{[]byte("c"), makeValue(300)}})
+	defer tbl3.Close()
+	ls.SetTables([]*sstable.SSTable{tbl3})
+	assert.Equal(t, tbl3.Size(), ls.TotalSize(), "Total size should be updated after SetTables")
 }

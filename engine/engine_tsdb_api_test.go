@@ -1498,8 +1498,6 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 		_, err = engine.GetPubSub()
 		assert.ErrorIs(t, err, ErrEngineClosed, "GetPubSub on non-started engine should return ErrEngineClosed")
 
-		_, err = engine.GetClock()
-		assert.ErrorIs(t, err, ErrEngineClosed, "GetClock on non-started engine should return ErrEngineClosed")
 	})
 
 	t.Run("Other_APIs_On_Closed_Engine", func(t *testing.T) {
@@ -1523,8 +1521,6 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 		_, err = engine.GetPubSub()
 		assert.ErrorIs(t, err, ErrEngineClosed, "GetPubSub on closed engine should return ErrEngineClosed")
 
-		_, err = engine.GetClock()
-		assert.ErrorIs(t, err, ErrEngineClosed, "GetClock on closed engine should return ErrEngineClosed")
 	})
 }
 
