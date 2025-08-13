@@ -209,7 +209,7 @@ func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string
 	defer func() {
 		if err != nil {
 			p.GetLogger().Warn("Incremental snapshot creation failed, cleaning up.", "snapshot_dir", snapshotDir, "error", err)
-			os.RemoveAll(snapshotDir)
+			m.wrapper.RemoveAll(snapshotDir)
 		}
 	}()
 
@@ -258,7 +258,7 @@ func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string
 			relativeFileName := filepath.Join("sst", filepath.Base(table.FilePath()))
 			if _, exists := parentSSTables[relativeFileName]; !exists {
 				destPath := filepath.Join(snapshotDir, relativeFileName)
-				if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+				if err := m.wrapper.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 					return fmt.Errorf("failed to create sst subdirectory in incremental snapshot: %w", err)
 				}
 				if copyErr := m.wrapper.LinkOrCopyFile(table.FilePath(), destPath); copyErr != nil {

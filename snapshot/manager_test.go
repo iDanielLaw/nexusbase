@@ -110,9 +110,17 @@ func (m *mockEngineProvider) Lock()                             { m.lockMu.Lock(
 func (m *mockEngineProvider) Unlock()                           { m.lockMu.Unlock() }
 
 func (m *mockEngineProvider) GetMemtablesForFlush() ([]*memtable.Memtable, *memtable.Memtable) {
-	m.Called()
-	newMem := memtable.NewMemtable(1024, m.clock)
-	return m.memtablesToFlush, newMem
+	args := m.Called()
+	var memsToFlush []*memtable.Memtable
+	if len(args) > 0 && args.Get(0) != nil {
+		memsToFlush = args.Get(0).([]*memtable.Memtable)
+	}
+
+	var newMem *memtable.Memtable
+	if len(args) > 1 && args.Get(1) != nil {
+		newMem, _ = args.Get(1).(*memtable.Memtable)
+	}
+	return memsToFlush, newMem
 }
 
 func (m *mockEngineProvider) FlushMemtableToL0(mem *memtable.Memtable, parentCtx context.Context) error {
@@ -232,6 +240,7 @@ type mockSnapshotHelper struct {
 	InterceptCopyAuxiliaryFile           func(srcPath, destFileName, snapshotDir string, manifestField *string, logger *slog.Logger) error
 	InterceptCopyDirectoryContents       func(src, dst string) error
 	InterceptLinkOrCopyDirectoryContents func(src, dst string) error
+	InterceptLinkOrCopyFile              func(src, dst string) error
 	InterceptRemoveAll                   func(path string) error
 	InterceptCreate                      func(name string) (*os.File, error)
 	InterceptWriteFile                   func(filename string, data []byte, perm os.FileMode) error
@@ -352,6 +361,13 @@ func (ms *mockSnapshotHelper) Rename(oldPath, newPath string) error {
 	return ms.helperSnapshot.Rename(oldPath, newPath)
 }
 
+func (ms *mockSnapshotHelper) LinkOrCopyFile(src, dst string) error {
+	if ms.InterceptLinkOrCopyFile != nil {
+		return ms.InterceptLinkOrCopyFile(src, dst)
+	}
+	return ms.helperSnapshot.LinkOrCopyFile(src, dst)
+}
+
 //
 
 // --- Helper Functions ---
@@ -415,7 +431,7 @@ func TestManager_CreateFull(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(provider.walDir, "000001.wal"), []byte("wal data 1"), 0644))
 
 	// ตั้งค่า mock expectations
-	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetMemtablesForFlush").Return(provider.memtablesToFlush, nil)
 	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(provider.deletedSeries)
 	provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
@@ -506,7 +522,7 @@ func TestManager_CreateFull_FlushError(t *testing.T) {
 
 	// Set up mock expectations
 	// GetMemtablesForFlush will be called to get the memtable.
-	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetMemtablesForFlush").Return(provider.memtablesToFlush, nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	// FlushMemtableToL0 will be called and should return our simulated error.
@@ -544,7 +560,7 @@ func TestManager_CreateFull_TagIndexSnapshotError(t *testing.T) {
 
 	// Set up mock expectations.
 	// The flow will get past flushing memtables.
-	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetMemtablesForFlush").Return(nil, nil)
 	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
@@ -585,7 +601,7 @@ func TestManager_CreateFull_SSTableCopyError(t *testing.T) {
 	provider.levelsManager.AddTableToLevel(0, sst1)
 
 	// Set up mock expectations for the parts that will be called before the error
-	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetMemtablesForFlush").Return(nil, nil)
 	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
@@ -632,7 +648,7 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider := newMockEngineProvider(t, dataDir)
 		provider.deletedSeries = map[string]uint64{"deleted_series_1": 100} // Ensure saveJSON is called
 
-		provider.On("GetMemtablesForFlush").Return()
+		provider.On("GetMemtablesForFlush").Return(nil, nil)
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(provider.deletedSeries)
 		provider.On("GetRangeTombstones").Return(nil)
@@ -669,7 +685,7 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider := newMockEngineProvider(t, dataDir)
 		provider.rangeTombstones = map[string][]core.RangeTombstone{"rt1": {{MinTimestamp: 1, MaxTimestamp: 2}}} // Ensure saveJSON is called
 
-		provider.On("GetMemtablesForFlush").Return()
+		provider.On("GetMemtablesForFlush").Return(nil, nil)
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
@@ -716,7 +732,7 @@ func TestManager_CreateFull_CopyAuxiliaryFileError(t *testing.T) {
 		provider := newMockEngineProvider(t, dataDir)
 
 		// Set up mock expectations for calls that happen before the error
-		provider.On("GetMemtablesForFlush").Return()
+		provider.On("GetMemtablesForFlush").Return(nil, nil)
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
@@ -764,7 +780,7 @@ func TestManager_CreateFull_WALCopyError(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(provider.walDir, "000001.wal"), []byte("wal data"), 0644))
 
 		// Set up mock expectations for calls that happen before the error
-		provider.On("GetMemtablesForFlush").Return()
+		provider.On("GetMemtablesForFlush").Return(nil, nil)
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
@@ -836,7 +852,7 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	require.NoError(t, os.MkdirAll(provider.walDir, 0755))
 
 	// Set up mock expectations for all calls that happen before writing the manifest.
-	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetMemtablesForFlush").Return(nil, nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
@@ -897,7 +913,7 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	// Levels manager is already empty by default
 
 	// Set up mock expectations for an empty run
-	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetMemtablesForFlush").Return(provider.memtablesToFlush, nil)
 	// FlushMemtableToL0 should not be called
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
@@ -1163,6 +1179,228 @@ func TestManager_CreateIncremental(t *testing.T) {
 		// 3. Verification
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to read parent snapshot manifest")
+	})
+}
+
+func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
+	// createTestParentSnapshot creates a valid parent snapshot directory structure for testing.
+	createTestParentSnapshot := func(t *testing.T, snapshotsBaseDir string, seqNum uint64, sstMetas []core.SSTableMetadata) string {
+		t.Helper()
+		parentID := fmt.Sprintf("%d", time.Now().UnixNano())
+		parentSnapshotDir := filepath.Join(snapshotsBaseDir, parentID)
+		require.NoError(t, os.MkdirAll(parentSnapshotDir, 0755))
+		require.NoError(t, os.MkdirAll(filepath.Join(parentSnapshotDir, "sst"), 0755))
+
+		manifest := &core.SnapshotManifest{
+			Type:           core.SnapshotTypeFull,
+			SequenceNumber: seqNum,
+			Levels: []core.SnapshotLevelManifest{
+				{LevelNumber: 0, Tables: sstMetas},
+			},
+		}
+
+		manifestFileName, err := writeTestManifest(parentSnapshotDir, manifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(parentSnapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+		return parentID
+	}
+
+	t.Run("FlushError", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		dataDir := filepath.Join(tempDir, "data")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
+
+		// Prepare for incremental
+		provider.sequenceNumber = 150 // Advance sequence number
+		memToFlush := memtable.NewMemtable(1024, provider.clock)
+		expectedErr := fmt.Errorf("simulated flush error")
+
+		// Mock calls for the incremental snapshot
+		provider.On("GetMemtablesForFlush").Return([]*memtable.Memtable{memToFlush}, nil).Once()
+		provider.On("FlushMemtableToL0", memToFlush, mock.Anything).Return(expectedErr).Once()
+
+		// 2. Execution
+		manager := NewManager(provider)
+		err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to flush memtable during incremental snapshot")
+
+		// Check that no new incremental snapshot directory was left behind
+		entries, readErr := os.ReadDir(snapshotsBaseDir)
+		require.NoError(t, readErr)
+		assert.Len(t, entries, 1, "No new snapshot directory should be created on failure")
+	})
+
+	t.Run("NewSSTableCopyError", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		dataDir := filepath.Join(tempDir, "data")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+		require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
+		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
+		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+
+		// Prepare for incremental
+		provider.sequenceNumber = 150 // Advance sequence number
+		newSST := createDummySSTable(t, provider.sstDir, 2)
+		provider.levelsManager.AddTableToLevel(0, newSST) // Add a new table
+		expectedErr := fmt.Errorf("simulated copy error")
+
+		// Mock calls for the incremental snapshot
+		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		helper.InterceptLinkOrCopyFile = func(src, dst string) error {
+			if strings.Contains(src, "2.sst") {
+				return expectedErr
+			}
+			return helper.helperSnapshot.LinkOrCopyFile(src, dst)
+		}
+
+		// 2. Execution
+		manager := NewManagerWithTesting(provider, helper)
+		err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to copy new SSTable")
+
+		entries, readErr := os.ReadDir(snapshotsBaseDir)
+		require.NoError(t, readErr)
+		assert.Len(t, entries, 1)
+	})
+
+	t.Run("TagIndexSnapshotError", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		dataDir := filepath.Join(tempDir, "data")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
+
+		// Prepare for incremental
+		provider.sequenceNumber = 150 // Advance sequence number
+		expectedErr := fmt.Errorf("simulated tag index error")
+
+		// Mock calls for the incremental snapshot
+		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+		provider.On("GetDeletedSeries").Return(nil).Once()
+		provider.On("GetRangeTombstones").Return(nil).Once()
+		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(expectedErr).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.stringStore.On("GetLogFilePath").Return("").Once()
+		provider.seriesIDStore.On("GetLogFilePath").Return("").Once()
+		provider.wal.On("Path").Return(provider.walDir).Once()
+
+		// 2. Execution
+		manager := NewManager(provider)
+		err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to create tag index snapshot")
+
+		entries, readErr := os.ReadDir(snapshotsBaseDir)
+		require.NoError(t, readErr)
+		assert.Len(t, entries, 1)
+	})
+
+	t.Run("WriteManifestError", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		dataDir := filepath.Join(tempDir, "data")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
+
+		// Prepare for incremental
+		provider.sequenceNumber = 150 // Advance sequence number
+		expectedErr := fmt.Errorf("simulated write manifest error")
+
+		// Mock calls for the incremental snapshot
+		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+		provider.On("GetDeletedSeries").Return(nil).Once()
+		provider.On("GetRangeTombstones").Return(nil).Once()
+		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.stringStore.On("GetLogFilePath").Return("").Once()
+		provider.seriesIDStore.On("GetLogFilePath").Return("").Once()
+		provider.wal.On("Path").Return(provider.walDir).Once()
+
+		// 2. Execution
+		mgr := NewManager(provider)
+		// Replace the write function to inject the error
+		concreteManager, ok := mgr.(*manager)
+		require.True(t, ok)
+		concreteManager.writeManifestAndCurrentFunc = func(snapshotDir string, manifest *core.SnapshotManifest) (string, error) {
+			return "", expectedErr
+		}
+
+		err := mgr.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+
+		entries, readErr := os.ReadDir(snapshotsBaseDir)
+		require.NoError(t, readErr)
+		assert.Len(t, entries, 1)
+	})
+
+	t.Run("CreateDirError", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		dataDir := filepath.Join(tempDir, "data")
+		require.NoError(t, os.MkdirAll(dataDir, 0755))
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, dataDir)
+		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
+		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+
+		// Prepare for incremental
+		provider.sequenceNumber = 150 // Advance sequence number
+		expectedErr := fmt.Errorf("simulated mkdir error")
+
+		// Mock the directory creation to fail
+		helper.InterceptMkdirAll = func(path string, perm os.FileMode) error {
+			// Fail only when creating the new snapshot directory
+			if strings.Contains(path, "_incr") {
+				return expectedErr
+			}
+			return os.MkdirAll(path, perm)
+		}
+
+		// 2. Execution
+		manager := NewManagerWithTesting(provider, helper)
+		err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to create incremental snapshot directory")
 	})
 }
 
