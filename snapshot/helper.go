@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -57,28 +58,29 @@ func (h *helperSnapshot) WriteFile(name string, data []byte, perm os.FileMode) e
 }
 
 func (h *helperSnapshot) CopyDirectoryContents(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return fmt.Errorf("failed to read source directory %s: %w", src, err)
-	}
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-
-		if entry.IsDir() {
-			if err := os.MkdirAll(dstPath, 0755); err != nil {
-				return fmt.Errorf("failed to create destination subdirectory %s: %w", dstPath, err)
-			}
-			if err := h.CopyDirectoryContents(srcPath, dstPath); err != nil {
-				return err
-			}
-		} else {
-			if err := h.CopyFile(srcPath, dstPath); err != nil {
-				return fmt.Errorf("failed to copy file from %s to %s: %w", srcPath, dstPath, err)
-			}
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
+		}
+
+		// Skip the root directory itself.
+		if relPath == "." {
+			return nil
+		}
+
+		dstPath := filepath.Join(dst, relPath)
+
+		if d.IsDir() {
+			return h.MkdirAll(dstPath, 0755)
+		}
+		// CopyFile will create the parent directory if it doesn't exist.
+		return h.CopyFile(path, dstPath)
+	})
 }
 
 func (h *helperSnapshot) LinkOrCopyFile(src, dst string) error {
@@ -97,28 +99,29 @@ func (h *helperSnapshot) LinkOrCopyFile(src, dst string) error {
 }
 
 func (h *helperSnapshot) LinkOrCopyDirectoryContents(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return fmt.Errorf("failed to read source directory %s: %w", src, err)
-	}
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-
-		if entry.IsDir() {
-			if err := os.MkdirAll(dstPath, 0755); err != nil {
-				return fmt.Errorf("failed to create destination subdirectory %s: %w", dstPath, err)
-			}
-			if err := h.LinkOrCopyDirectoryContents(srcPath, dstPath); err != nil {
-				return err
-			}
-		} else {
-			if err := h.LinkOrCopyFile(srcPath, dstPath); err != nil {
-				return fmt.Errorf("failed to link or copy file from %s to %s: %w", srcPath, dstPath, err)
-			}
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
+		}
+
+		// Skip the root directory itself.
+		if relPath == "." {
+			return nil
+		}
+
+		dstPath := filepath.Join(dst, relPath)
+
+		if d.IsDir() {
+			return h.MkdirAll(dstPath, 0755)
+		}
+		// LinkOrCopyFile will create the parent directory if it doesn't exist.
+		return h.LinkOrCopyFile(path, dstPath)
+	})
 }
 
 // CopyFile copies a file from src to dst.
@@ -174,6 +177,12 @@ func (h *helperSnapshot) CopyAuxiliaryFile(srcPath, destFileName, snapshotDir st
 }
 
 func (h *helperSnapshot) SaveJSON(v interface{}, path string) error {
+	// Ensure the destination directory exists before writing the file.
+	// This is crucial for robustness, especially on Windows where os.WriteFile
+	// will fail if the parent directory does not exist.
+	if err := h.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory for json file %s: %w", path, err)
+	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
