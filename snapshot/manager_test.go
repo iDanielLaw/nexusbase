@@ -248,6 +248,7 @@ type mockSnapshotHelper struct {
 	InterceptMkdirTemp                   func(dir, pattern string) (string, error)
 	InterceptMkdirAll                    func(path string, perm os.FileMode) error
 	InterceptOpen                        func(name string) (sys.FileInterface, error)
+	InterceptStat                        func(name string) (os.FileInfo, error)
 	InterceptCopyFile                    func(src, dst string) error
 	InterceptReadManifestBinary          func(r io.Reader) (*core.SnapshotManifest, error)
 	InterceptReadDir                     func(name string) ([]os.DirEntry, error)
@@ -333,6 +334,13 @@ func (ms *mockSnapshotHelper) Open(name string) (sys.FileInterface, error) {
 	return ms.helperSnapshot.Open(name)
 }
 
+func (ms *mockSnapshotHelper) Stat(name string) (os.FileInfo, error) {
+	if ms.InterceptStat != nil {
+		return ms.InterceptStat(name)
+	}
+	return ms.helperSnapshot.Stat(name)
+}
+
 func (ms *mockSnapshotHelper) ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	if ms.InterceptReadManifestBinary != nil {
 		return ms.InterceptReadManifestBinary(r)
@@ -351,7 +359,31 @@ func (ms *mockSnapshotHelper) CopyFile(src, dst string) error {
 	if ms.InterceptCopyFile != nil {
 		return ms.InterceptCopyFile(src, dst)
 	}
-	return ms.helperSnapshot.CopyFile(src, dst)
+	// Re-implement the logic from helperSnapshot.CopyFile but using `ms` as the receiver for other calls
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file %s: %w", src, err)
+	}
+	defer in.Close()
+
+	if err := ms.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory for %s: %w", dst, err)
+	}
+
+	out, err := ms.Create(dst)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file %s: %w", dst, err)
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	if err != nil {
+		return fmt.Errorf("failed to copy data from %s to %s: %w", src, dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("failed to close destination file %s: %w", dst, err)
+	}
+	return nil
 }
 
 func (ms *mockSnapshotHelper) Rename(oldPath, newPath string) error {
@@ -365,12 +397,71 @@ func (ms *mockSnapshotHelper) LinkOrCopyFile(src, dst string) error {
 	if ms.InterceptLinkOrCopyFile != nil {
 		return ms.InterceptLinkOrCopyFile(src, dst)
 	}
-	return ms.helperSnapshot.LinkOrCopyFile(src, dst)
+	// Re-implement to ensure calls go through the mock receiver
+	if err := ms.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory for link %s: %w", dst, err)
+	}
+	err := os.Link(src, dst)
+	if err == nil {
+		return nil
+	}
+	return ms.CopyFile(src, dst) // Call the (now fixed) mock CopyFile
 }
 
 //
 
 // --- Helper Functions ---
+
+// setupRestorerTest creates a minimal valid snapshot directory and a restorer instance for testing.
+func setupRestorerTest(t *testing.T) (r *restorer, snapshotDir, targetDataDir string, helper *mockSnapshotHelper) {
+	t.Helper()
+	tempDir := t.TempDir()
+	snapshotDir = filepath.Join(tempDir, "snapshot")
+	targetDataDir = filepath.Join(tempDir, "target")
+	require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+
+	// Create a minimal manifest
+	manifest := &core.SnapshotManifest{
+		SequenceNumber: 1,
+		// Add files that will be copied to trigger different code paths
+		DeletedSeriesFile: "deleted.json",
+		WALFile:           "wal",
+		Levels: []core.SnapshotLevelManifest{
+			{LevelNumber: 0, Tables: []core.SSTableMetadata{{ID: 1, FileName: "sst/1.sst"}}},
+		},
+	}
+	// Create the files mentioned in the manifest inside the snapshot dir
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "deleted.json"), []byte("{}"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "sst"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("data"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "wal"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "wal", "000001.wal"), []byte("wal"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, indexer.IndexDirName), 0755)) // index dir
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, indexer.IndexDirName, "index.sst"), []byte("index"), 0644))
+
+	manifestFileName, err := writeTestManifest(snapshotDir, manifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+	helper = &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+	opts := RestoreOptions{
+		DataDir: targetDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		wrapper: helper,
+	}
+
+	// Create the restorer instance. We call validateAndPrepare here so sub-tests can focus on later stages.
+	r = &restorer{
+		opts:        opts,
+		snapshotDir: snapshotDir,
+		logger:      opts.Logger.With("component", "RestoreFromSnapshot"),
+		wrapper:     opts.wrapper,
+	}
+	err = r.validateAndPrepare()
+	require.NoError(t, err, "validateAndPrepare should succeed in test setup")
+
+	return r, snapshotDir, targetDataDir, helper
+}
 
 // createDummySSTable สร้างไฟล์ SSTable จำลองสำหรับการทดสอบ
 func createDummySSTable(t *testing.T, dir string, id uint64) *sstable.SSTable {
@@ -1867,13 +1958,24 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
 		f, err := os.Create(manifestPath)
 		require.NoError(t, err)
-		require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
+		// Add a file in a subdirectory to the manifest to trigger MkdirAll inside CopyFile
+		manifestWithFile := &core.SnapshotManifest{
+			Levels: []core.SnapshotLevelManifest{
+				{LevelNumber: 0, Tables: []core.SSTableMetadata{{ID: 1, FileName: "sst/1.sst"}}},
+			},
+		}
+		require.NoError(t, WriteManifestBinary(f, manifestWithFile))
 		f.Close()
 		defer os.Remove(manifestPath)
 
+		// Create the source file that the manifest points to
+		require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "sst"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("data"), 0644))
+
 		expectedErr := fmt.Errorf("simulated mkdirall error")
 		helper.InterceptMkdirAll = func(path string, perm os.FileMode) error {
-			if strings.Contains(path, ".restore-tmp-") {
+			// Fail when creating the 'sst' directory inside the temp restore dir
+			if strings.Contains(path, ".restore-tmp-") && strings.HasSuffix(path, "sst") {
 				return expectedErr
 			}
 			return helper.helperSnapshot.MkdirAll(path, perm)
@@ -1882,7 +1984,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		err = RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to create directory for restoring file")
+		assert.Contains(t, err.Error(), "failed to create destination directory")
 	})
 
 	t.Run("CopyFileError", func(t *testing.T) {
@@ -2021,9 +2123,131 @@ func TestRestoreFromFull_RenameError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to rename temporary restore directory")
 
 	// Verify the temporary directory was created and then cleaned up by the defer block.
-	require.NotEmpty(t, tempRestoreDir, "Temporary restore directory path should have been captured")
+	require.NotEmpty(t, tempRestoreDir, "Temporary restore directory path should have been captured") //nolint:staticcheck
 	_, statErr := os.Stat(tempRestoreDir)
 	assert.True(t, os.IsNotExist(statErr), "Temporary restore directory should be cleaned up on failure")
+}
+
+func TestRestorer_ProcessErrors(t *testing.T) {
+	// This test focuses on error paths within the restorer's methods,
+	// assuming initial validation and temp dir creation succeed.
+
+	t.Run("CopyIndex_CopyContentsError", func(t *testing.T) {
+		// 1. Setup
+		r, _, _, helper := setupRestorerTest(t)
+		expectedErr := fmt.Errorf("simulated copy index error")
+
+		// 2. Inject error
+		helper.InterceptCopyDirectoryContents = func(src, dst string) error {
+			if strings.HasSuffix(src, indexer.IndexDirName) {
+				return expectedErr
+			}
+			return helper.helperSnapshot.CopyDirectoryContents(src, dst)
+		}
+
+		// 3. Execute and Verify
+		err := r.run()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to copy tag index files from snapshot")
+		assert.NoFileExists(t, r.opts.DataDir, "Target data directory should be cleaned up on failure")
+	})
+
+	t.Run("CopyFile_CopyError", func(t *testing.T) {
+		// 1. Setup
+		r, _, _, helper := setupRestorerTest(t)
+		expectedErr := fmt.Errorf("simulated copy file error")
+
+		// 2. Inject error
+		helper.InterceptCopyFile = func(src, dst string) error {
+			// Fail on the first file copy attempt (which will be one of the manifest files)
+			return expectedErr
+		}
+
+		// 3. Execute and Verify
+		err := r.run()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to copy file")
+		assert.NoFileExists(t, r.opts.DataDir, "Target data directory should be cleaned up on failure")
+	})
+
+	t.Run("CopyWAL_CopyDirError", func(t *testing.T) {
+		// 1. Setup
+		r, _, _, helper := setupRestorerTest(t)
+		expectedErr := fmt.Errorf("simulated copy wal error")
+
+		// 2. Inject error
+		helper.InterceptCopyDirectoryContents = func(src, dst string) error {
+			// The index is copied first, so let that succeed.
+			if strings.HasSuffix(src, indexer.IndexDirName) {
+				return helper.helperSnapshot.CopyDirectoryContents(src, dst)
+			}
+			// Fail on the WAL copy
+			if strings.HasSuffix(src, "wal") {
+				return expectedErr
+			}
+			return helper.helperSnapshot.CopyDirectoryContents(src, dst)
+		}
+
+		// 3. Execute and Verify
+		err := r.run()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to copy WAL directory from snapshot")
+		assert.NoFileExists(t, r.opts.DataDir, "Target data directory should be cleaned up on failure")
+	})
+
+	t.Run("Swap_RemoveOriginalError", func(t *testing.T) {
+		// 1. Setup
+		r, _, targetDataDir, helper := setupRestorerTest(t)
+		expectedErr := fmt.Errorf("simulated remove original error")
+
+		// Create an "original" data directory that the process will try to remove.
+		require.NoError(t, os.MkdirAll(targetDataDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(targetDataDir, "existing.file"), []byte("data"), 0644))
+
+		// 2. Inject error
+		helper.InterceptRemoveAll = func(path string) error {
+			if path == targetDataDir {
+				return expectedErr
+			}
+			return helper.helperSnapshot.RemoveAll(path)
+		}
+
+		// 3. Execute and Verify
+		err := r.run()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to remove original data directory")
+
+		// In this specific failure case, the temp directory IS cleaned up by the defer in run(),
+		// but the original directory is left untouched. This is the expected behavior.
+		// The cleanup of the temp dir happens because the error occurs before the successful rename.
+		assert.NoFileExists(t, r.tempRestoreDir, "Temp directory should be cleaned up on swap failure")
+		assert.DirExists(t, targetDataDir, "Original directory should still exist on swap failure")
+	})
+
+	t.Run("Swap_StatOriginalError", func(t *testing.T) {
+		// 1. Setup
+		r, _, targetDataDir, helper := setupRestorerTest(t)
+		expectedErr := fmt.Errorf("simulated stat error")
+
+		// 2. Inject error
+		helper.InterceptStat = func(name string) (os.FileInfo, error) {
+			if name == targetDataDir {
+				return nil, expectedErr
+			}
+			return helper.helperSnapshot.Stat(name)
+		}
+
+		// 3. Execute and Verify
+		err := r.run()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to stat original data directory")
+		assert.NoFileExists(t, r.opts.DataDir, "Target data directory should be cleaned up on failure")
+	})
 }
 
 func TestRestoreFromFull_TargetIsAFile(t *testing.T) {

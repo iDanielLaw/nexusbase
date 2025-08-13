@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
@@ -372,118 +374,234 @@ func (m *manager) writeManifestAndCurrent(snapshotDir string, manifest *core.Sna
 	return manifestPath, nil
 }
 
+// restorer holds the state for a single restore operation.
+type restorer struct {
+	opts           RestoreOptions
+	snapshotDir    string
+	tempRestoreDir string
+	manifest       *core.SnapshotManifest
+	manifestFile   string
+	logger         *slog.Logger
+	wrapper        internal.PrivateSnapshotHelper
+}
+
 // RestoreFromFull restores the database state from a given snapshot directory.
 func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 	restoreLogger := opts.Logger
 	if restoreLogger == nil {
 		restoreLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-
 	if opts.wrapper == nil {
 		opts.wrapper = newHelperSnapshot()
 	}
 
-	restoreLogger = restoreLogger.With("component", "RestoreFromSnapshot")
-	restoreLogger.Info("Starting restore from snapshot.", "snapshot_dir", snapshotDir, "target_data_dir", opts.DataDir)
-
-	// 1. Safety checks
-	if _, err := opts.wrapper.Stat(snapshotDir); os.IsNotExist(err) {
-		return fmt.Errorf("snapshot directory %s does not exist", snapshotDir)
+	r := &restorer{
+		opts:        opts,
+		snapshotDir: snapshotDir,
+		logger:      restoreLogger.With("component", "RestoreFromSnapshot"),
+		wrapper:     opts.wrapper,
 	}
-	manifest, manifestFileName, err := readManifestFromDir(snapshotDir, opts.wrapper)
+	return r.run()
+}
+
+// run orchestrates the entire restore process.
+func (r *restorer) run() (err error) {
+	if err := r.validateAndPrepare(); err != nil {
+		return err
+	}
+
+	if err := r.setupTempDir(); err != nil {
+		return err
+	}
+	// Ensure the temporary directory is cleaned up if anything goes wrong after its creation.
+	defer r.cleanupTempDir()
+
+	if err := r.copyAllData(); err != nil {
+		return err
+	}
+
+	if err := r.swapDataDirectories(); err != nil {
+		return err
+	}
+
+	r.logger.Info("Snapshot restoration complete. Data directory replaced.", "data_dir", r.opts.DataDir)
+	return nil
+}
+
+// validateAndPrepare performs initial safety checks and reads the snapshot manifest.
+func (r *restorer) validateAndPrepare() error {
+	r.logger.Info("Starting restore from snapshot.", "snapshot_dir", r.snapshotDir, "target_data_dir", r.opts.DataDir)
+
+	if _, err := r.wrapper.Stat(r.snapshotDir); os.IsNotExist(err) {
+		return fmt.Errorf("snapshot directory %s does not exist", r.snapshotDir)
+	}
+
+	manifest, manifestFileName, err := readManifestFromDir(r.snapshotDir, r.wrapper)
 	if err != nil {
 		return fmt.Errorf("could not read snapshot manifest: %w", err)
 	}
-	// 2. Create a temporary directory for restore.
-	tempRestoreDir, err := opts.wrapper.MkdirTemp(filepath.Dir(opts.DataDir), filepath.Base(opts.DataDir)+".restore-tmp-*")
+	r.manifest = manifest
+	r.manifestFile = manifestFileName
+	r.logger.Info("Snapshot manifest loaded.", "sequence_number", r.manifest.SequenceNumber)
+	return nil
+}
+
+// setupTempDir creates a temporary directory for the restore process.
+func (r *restorer) setupTempDir() error {
+	tempDir, err := r.wrapper.MkdirTemp(filepath.Dir(r.opts.DataDir), filepath.Base(r.opts.DataDir)+".restore-tmp-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary restore directory: %w", err)
 	}
-	restoreLogger.Info("Created temporary directory for restore.", "temp_dir", tempRestoreDir)
-	defer func() {
-		if _, statErr := opts.wrapper.Stat(tempRestoreDir); !os.IsNotExist(statErr) {
-			restoreLogger.Info("Cleaning up temporary restore directory.", "temp_dir", tempRestoreDir)
-			opts.wrapper.RemoveAll(tempRestoreDir)
-		}
-	}()
+	r.tempRestoreDir = tempDir
+	r.logger.Info("Created temporary directory for restore.", "temp_dir", r.tempRestoreDir)
+	return nil
+}
 
-	restoreLogger.Info("Snapshot manifest loaded.", "sequence_number", manifest.SequenceNumber)
+// cleanupTempDir removes the temporary directory. It's safe to call even if the directory doesn't exist.
+func (r *restorer) cleanupTempDir() {
+	if r.tempRestoreDir == "" {
+		return
+	}
+	if _, statErr := r.wrapper.Stat(r.tempRestoreDir); !os.IsNotExist(statErr) {
+		r.logger.Info("Cleaning up temporary restore directory.", "temp_dir", r.tempRestoreDir)
+		r.wrapper.RemoveAll(r.tempRestoreDir)
+	}
+}
 
-	// Restore the tag index
-	srcIndexDir := filepath.Join(snapshotDir, indexer.IndexDirName)
-	// Use the constant from the indexer package to avoid hardcoding the directory name.
-	destIndexDir := filepath.Join(tempRestoreDir, indexer.IndexSSTDirName)
-	if _, err := opts.wrapper.Stat(srcIndexDir); !os.IsNotExist(err) {
-		if err := opts.wrapper.MkdirAll(destIndexDir, 0755); err != nil {
-			return fmt.Errorf("failed to create destination index directory %s: %w", destIndexDir, err)
-		}
-		if err := opts.wrapper.CopyDirectoryContents(srcIndexDir, destIndexDir); err != nil {
-			return fmt.Errorf("failed to copy tag index files from snapshot: %w", err)
-		}
+// copyAllData copies all required files and directories from the snapshot to the temporary directory.
+func (r *restorer) copyAllData() error {
+	if err := r.copyIndex(); err != nil {
+		return err
+	}
+	if err := r.copyManifestFiles(); err != nil {
+		return err
+	}
+	if err := r.copyWAL(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// copyIndex copies the tag index directory from the snapshot.
+func (r *restorer) copyIndex() error {
+	srcIndexDir := filepath.Join(r.snapshotDir, indexer.IndexDirName)
+	destIndexDir := filepath.Join(r.tempRestoreDir, indexer.IndexSSTDirName)
+
+	if _, err := r.wrapper.Stat(srcIndexDir); os.IsNotExist(err) {
+		r.logger.Debug("Index directory not found in snapshot, skipping.", "path", srcIndexDir)
+		return nil // Not an error if it doesn't exist.
+	} else if err != nil {
+		return fmt.Errorf("failed to stat source index directory %s: %w", srcIndexDir, err)
 	}
 
-	// List of files to copy from the manifest
-	filesToCopy := []string{manifestFileName, manifest.DeletedSeriesFile, manifest.RangeTombstonesFile, manifest.StringMappingFile, manifest.SeriesMappingFile, CURRENT_FILE_NAME}
-	for _, level := range manifest.Levels {
+	if err := r.wrapper.MkdirAll(destIndexDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination index directory %s: %w", destIndexDir, err)
+	}
+	if err := r.wrapper.CopyDirectoryContents(srcIndexDir, destIndexDir); err != nil {
+		return fmt.Errorf("failed to copy tag index files from snapshot: %w", err)
+	}
+	r.logger.Debug("Restored tag index to temporary directory.")
+	return nil
+}
+
+// copyManifestFiles gathers all file paths from the manifest and copies them.
+func (r *restorer) copyManifestFiles() error {
+	filesToCopy := []string{r.manifestFile, r.manifest.DeletedSeriesFile, r.manifest.RangeTombstonesFile, r.manifest.StringMappingFile, r.manifest.SeriesMappingFile, CURRENT_FILE_NAME}
+	for _, level := range r.manifest.Levels {
 		for _, table := range level.Tables {
 			filesToCopy = append(filesToCopy, table.FileName)
 		}
 	}
 
-	// Copy files from the manifest.
 	for _, fileName := range filesToCopy {
 		if fileName == "" {
 			continue
 		}
-		srcPath := filepath.Join(snapshotDir, fileName)
-		destPath := filepath.Join(tempRestoreDir, fileName)
-		if err := opts.wrapper.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return fmt.Errorf("failed to create directory for restoring file %s: %w", destPath, err)
+		if err := r.copyFile(fileName); err != nil {
+			return err
 		}
-		if _, err := opts.wrapper.Stat(srcPath); os.IsNotExist(err) {
-			restoreLogger.Warn("File listed in manifest not found in snapshot directory, skipping.", "file", fileName)
-			continue
-		}
-		if err := opts.wrapper.CopyFile(srcPath, destPath); err != nil {
-			return fmt.Errorf("failed to copy file %s to temporary restore directory: %w", srcPath, err)
-		}
-		restoreLogger.Debug("Restored file to temporary directory.", "file", fileName)
+	}
+	return nil
+}
+
+// copyFile copies a single file from the snapshot source to the temp directory.
+// It handles missing source files by logging a warning and continuing.
+func (r *restorer) copyFile(fileName string) error {
+	srcPath := filepath.Join(r.snapshotDir, fileName)
+	destPath := filepath.Join(r.tempRestoreDir, fileName)
+
+	if _, err := r.wrapper.Stat(srcPath); os.IsNotExist(err) {
+		r.logger.Warn("File listed in manifest not found in snapshot directory, skipping.", "file", fileName)
+		return nil // Not an error, just skip.
+	} else if err != nil {
+		return fmt.Errorf("failed to stat source file %s: %w", srcPath, err)
 	}
 
-	// Handle WAL directory
-	if manifest.WALFile != "" {
-		srcWALPath := filepath.Join(snapshotDir, manifest.WALFile)
-		destWALPath := filepath.Join(tempRestoreDir, manifest.WALFile)
-		if stat, err := opts.wrapper.Stat(srcWALPath); err == nil {
-			if stat.IsDir() {
-				if err := opts.wrapper.MkdirAll(destWALPath, 0755); err != nil {
-					return fmt.Errorf("failed to create WAL directory %s: %w", destWALPath, err)
-				}
-				if err := opts.wrapper.CopyDirectoryContents(srcWALPath, destWALPath); err != nil {
-					return fmt.Errorf("failed to copy WAL directory from snapshot: %w", err)
-				}
-			} else {
-				if err := opts.wrapper.CopyFile(srcWALPath, destWALPath); err != nil {
-					return fmt.Errorf("failed to copy legacy WAL file from snapshot: %w", err)
-				}
-			}
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("failed to stat source WAL path %s in snapshot: %w", srcWALPath, err)
-		}
+	// The helper's CopyFile implementation already ensures the parent directory exists.
+	if err := r.wrapper.CopyFile(srcPath, destPath); err != nil {
+		return fmt.Errorf("failed to copy file %s to temporary restore directory: %w", srcPath, err)
+	}
+	r.logger.Debug("Restored file to temporary directory.", "file", fileName)
+	return nil
+}
+
+// copyWAL copies the WAL directory or legacy WAL file from the snapshot.
+func (r *restorer) copyWAL() error {
+	if r.manifest.WALFile == "" {
+		return nil
 	}
 
-	// 4. Final swap
-	if _, err := opts.wrapper.Stat(opts.DataDir); !os.IsNotExist(err) {
-		restoreLogger.Info("Removing original data directory before replacing.", "original_data_dir", opts.DataDir)
-		if err := opts.wrapper.RemoveAll(opts.DataDir); err != nil {
-			return fmt.Errorf("failed to remove original data directory %s: %w", opts.DataDir, err)
-		}
+	srcWALPath := filepath.Join(r.snapshotDir, r.manifest.WALFile)
+	destWALPath := filepath.Join(r.tempRestoreDir, r.manifest.WALFile)
+
+	stat, err := r.wrapper.Stat(srcWALPath)
+	if os.IsNotExist(err) {
+		r.logger.Warn("WAL directory/file listed in manifest not found in snapshot, skipping.", "path", srcWALPath)
+		return nil
 	}
-	if err := opts.wrapper.Rename(tempRestoreDir, opts.DataDir); err != nil {
-		return fmt.Errorf("failed to rename temporary restore directory %s to %s: %w", tempRestoreDir, opts.DataDir, err)
+	if err != nil {
+		return fmt.Errorf("failed to stat source WAL path %s in snapshot: %w", srcWALPath, err)
 	}
 
-	restoreLogger.Info("Snapshot restoration complete. Data directory replaced.", "data_dir", opts.DataDir)
+	if stat.IsDir() {
+		if err := r.wrapper.MkdirAll(destWALPath, 0755); err != nil {
+			return fmt.Errorf("failed to create WAL directory %s: %w", destWALPath, err)
+		}
+		if err := r.wrapper.CopyDirectoryContents(srcWALPath, destWALPath); err != nil {
+			return fmt.Errorf("failed to copy WAL directory from snapshot: %w", err)
+		}
+		r.logger.Debug("Restored WAL directory to temporary directory.")
+	} else {
+		if err := r.wrapper.CopyFile(srcWALPath, destWALPath); err != nil {
+			return fmt.Errorf("failed to copy legacy WAL file from snapshot: %w", err)
+		}
+		r.logger.Debug("Restored legacy WAL file to temporary directory.")
+	}
+	return nil
+}
+
+// swapDataDirectories removes the original data directory and renames the temporary directory to the final destination.
+func (r *restorer) swapDataDirectories() error {
+	_, err := r.wrapper.Stat(r.opts.DataDir)
+	if err == nil {
+		// If the directory exists, remove it.
+		r.logger.Info("Removing original data directory before replacing.", "original_data_dir", r.opts.DataDir)
+		if err := r.wrapper.RemoveAll(r.opts.DataDir); err != nil {
+			return fmt.Errorf("failed to remove original data directory %s: %w", r.opts.DataDir, err)
+		}
+	} else if !os.IsNotExist(err) && !errors.Is(err, syscall.ENOENT) {
+		// If there was an error and it's NOT a "not found" error (or its Windows equivalent),
+		// then it's a real problem we should report.
+		return fmt.Errorf("failed to stat original data directory %s: %w", r.opts.DataDir, err)
+	}
+	// If the error was os.IsNotExist or syscall.ENOENT, we do nothing and proceed to rename.
+
+	if err := r.wrapper.Rename(r.tempRestoreDir, r.opts.DataDir); err != nil {
+		return fmt.Errorf("failed to rename temporary restore directory %s to %s: %w", r.tempRestoreDir, r.opts.DataDir, err)
+	}
+
+	// After a successful rename, we prevent the deferred cleanup from removing the final data dir.
+	r.tempRestoreDir = ""
 	return nil
 }
 

@@ -106,7 +106,7 @@ func (h *helperSnapshot) LinkOrCopyFile(src, dst string) error {
 	// Ensure the destination directory exists before attempting to link.
 	// This is crucial for robustness, especially on Windows where os.Create
 	// (used by the CopyFile fallback) will fail if the parent dir is missing.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := h.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory for link %s: %w", dst, err)
 	}
 	err := os.Link(src, dst)
@@ -153,7 +153,7 @@ func (h *helperSnapshot) CopyFile(src, dst string) error {
 
 	// This is slightly redundant if called from LinkOrCopyFile, but makes
 	// CopyFile safe to call directly. The performance impact is negligible.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := h.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory for %s: %w", dst, err)
 	}
 
