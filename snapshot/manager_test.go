@@ -2533,3 +2533,97 @@ func TestManager_ListSnapshots(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to read snapshots base directory")
 	})
 }
+
+func TestFindLatestSnapshot(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		// Create snapshot directories. The names should be sortable.
+		require.NoError(t, os.Mkdir(filepath.Join(snapshotsBaseDir, "1000"), 0755))
+		require.NoError(t, os.Mkdir(filepath.Join(snapshotsBaseDir, "3000"), 0755)) // This is the latest
+		require.NoError(t, os.Mkdir(filepath.Join(snapshotsBaseDir, "2000"), 0755))
+
+		// 2. Execution
+		helper := newHelperSnapshot()
+		latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, helper)
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.Equal(t, "3000", latestID)
+		assert.Equal(t, filepath.Join(snapshotsBaseDir, "3000"), latestPath)
+	})
+
+	t.Run("NoSnapshotsInDirectory", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		// 2. Execution
+		helper := newHelperSnapshot()
+		latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, helper)
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.Empty(t, latestID)
+		assert.Empty(t, latestPath)
+	})
+
+	t.Run("DirectoryDoesNotExist", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "nonexistent")
+
+		// 2. Execution
+		helper := newHelperSnapshot()
+		latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, helper)
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.Empty(t, latestID)
+		assert.Empty(t, latestPath)
+	})
+
+	t.Run("ReadDirError", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+		expectedErr := fmt.Errorf("simulated readdir error")
+		helper.InterceptReadDir = func(name string) ([]os.DirEntry, error) {
+			return nil, expectedErr
+		}
+
+		// 2. Execution
+		_, _, err := findLatestSnapshot(snapshotsBaseDir, helper)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to read snapshots directory")
+	})
+
+	t.Run("IgnoresFiles", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		// Create snapshot directories and a file
+		require.NoError(t, os.Mkdir(filepath.Join(snapshotsBaseDir, "1000"), 0755))
+		require.NoError(t, os.Mkdir(filepath.Join(snapshotsBaseDir, "2000"), 0755)) // This is the latest directory
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotsBaseDir, "3000.txt"), []byte("i am a file"), 0644))
+
+		// 2. Execution
+		helper := newHelperSnapshot()
+		latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, helper)
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.Equal(t, "2000", latestID)
+		assert.Equal(t, filepath.Join(snapshotsBaseDir, "2000"), latestPath)
+	})
+}

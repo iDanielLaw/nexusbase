@@ -419,61 +419,112 @@ func (c *incrementalCreator) finalizeSnapshot() error {
 	return nil
 }
 
+// auxiliaryCopier holds the state for copying auxiliary files and WAL for a snapshot.
+type auxiliaryCopier struct {
+	m           *manager
+	snapshotDir string
+	manifest    *core.SnapshotManifest
+}
+
 // copyAuxiliaryAndWALFiles is a helper for CreateFull and CreateIncremental.
 func (m *manager) copyAuxiliaryAndWALFiles(snapshotDir string, manifest *core.SnapshotManifest) error {
-	p := m.provider
-	concreteStringStore := p.GetPrivateStringStore()
+	copier := &auxiliaryCopier{
+		m:           m,
+		snapshotDir: snapshotDir,
+		manifest:    manifest,
+	}
+	return copier.run()
+}
 
+func (c *auxiliaryCopier) run() error {
+	if err := c.saveJSONState(); err != nil {
+		return err
+	}
+	if err := c.copyMappingLogs(); err != nil {
+		return err
+	}
+	if err := c.createIndexSnapshot(); err != nil {
+		return err
+	}
+	if err := c.copyWAL(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// saveJSONState saves state like deleted series and range tombstones to JSON files.
+func (c *auxiliaryCopier) saveJSONState() error {
+	p := c.m.provider
 	p.Lock()
 	deletedSeriesToSave := p.GetDeletedSeries()
 	rangeTombstonesToSave := p.GetRangeTombstones()
 	p.Unlock()
-	concreteSeriesIDStore := p.GetPrivateSeriesIDStore()
 
-	// Serialize and save auxiliary state files.
 	if len(deletedSeriesToSave) > 0 {
-		manifest.DeletedSeriesFile = "deleted_series.json"
-		if err := m.wrapper.SaveJSON(deletedSeriesToSave, filepath.Join(snapshotDir, manifest.DeletedSeriesFile)); err != nil {
+		c.manifest.DeletedSeriesFile = "deleted_series.json"
+		destPath := filepath.Join(c.snapshotDir, c.manifest.DeletedSeriesFile)
+		if err := c.m.wrapper.SaveJSON(deletedSeriesToSave, destPath); err != nil {
 			return fmt.Errorf("failed to save deleted_series for snapshot: %w", err)
 		}
 	}
+
 	if len(rangeTombstonesToSave) > 0 {
-		manifest.RangeTombstonesFile = "range_tombstones.json"
-		if err := m.wrapper.SaveJSON(rangeTombstonesToSave, filepath.Join(snapshotDir, manifest.RangeTombstonesFile)); err != nil {
+		c.manifest.RangeTombstonesFile = "range_tombstones.json"
+		destPath := filepath.Join(c.snapshotDir, c.manifest.RangeTombstonesFile)
+		if err := c.m.wrapper.SaveJSON(rangeTombstonesToSave, destPath); err != nil {
 			return fmt.Errorf("failed to save range_tombstones for snapshot: %w", err)
 		}
 	}
+	return nil
+}
 
-	// Copy mapping files.
-	if err := m.wrapper.CopyAuxiliaryFile(concreteStringStore.GetLogFilePath(), "string_mapping.log", snapshotDir, &manifest.StringMappingFile, p.GetLogger()); err != nil {
+// copyMappingLogs copies the string and series ID mapping log files.
+func (c *auxiliaryCopier) copyMappingLogs() error {
+	p := c.m.provider
+	stringStore := p.GetPrivateStringStore()
+	seriesIDStore := p.GetPrivateSeriesIDStore()
+
+	if err := c.m.wrapper.CopyAuxiliaryFile(stringStore.GetLogFilePath(), "string_mapping.log", c.snapshotDir, &c.manifest.StringMappingFile, p.GetLogger()); err != nil {
 		return err
 	}
-	if err := m.wrapper.CopyAuxiliaryFile(concreteSeriesIDStore.GetLogFilePath(), "series_mapping.log", snapshotDir, &manifest.SeriesMappingFile, p.GetLogger()); err != nil {
+	if err := c.m.wrapper.CopyAuxiliaryFile(seriesIDStore.GetLogFilePath(), "series_mapping.log", c.snapshotDir, &c.manifest.SeriesMappingFile, p.GetLogger()); err != nil {
 		return err
 	}
+	return nil
+}
 
-	// Create a snapshot of the Tag Index Manager state.
-	indexSnapshotDir := filepath.Join(snapshotDir, "index")
-	if err := os.MkdirAll(indexSnapshotDir, 0755); err != nil {
+// createIndexSnapshot creates a snapshot of the tag index manager's state.
+func (c *auxiliaryCopier) createIndexSnapshot() error {
+	indexSnapshotDir := filepath.Join(c.snapshotDir, "index")
+	if err := c.m.wrapper.MkdirAll(indexSnapshotDir, 0755); err != nil {
 		return fmt.Errorf("failed to create subdirectory for index snapshot: %w", err)
 	}
-	if err := p.GetTagIndexManager().CreateSnapshot(indexSnapshotDir); err != nil {
+	if err := c.m.provider.GetTagIndexManager().CreateSnapshot(indexSnapshotDir); err != nil {
 		return fmt.Errorf("failed to create tag index snapshot: %w", err)
 	}
+	return nil
+}
 
-	// Copy WAL directory.
+// copyWAL copies the entire WAL directory to the snapshot.
+func (c *auxiliaryCopier) copyWAL() error {
+	p := c.m.provider
 	srcWALDir := p.GetWAL().Path()
-	if _, statErr := os.Stat(srcWALDir); !os.IsNotExist(statErr) {
-		destWALDirName := "wal"
-		destWALDir := filepath.Join(snapshotDir, destWALDirName)
-		if err := m.wrapper.MkdirAll(destWALDir, 0755); err != nil {
-			return fmt.Errorf("failed to create wal directory in snapshot: %w", err)
-		}
-		if err := m.wrapper.LinkOrCopyDirectoryContents(srcWALDir, destWALDir); err != nil {
-			return fmt.Errorf("failed to copy WAL directory to snapshot: %w", err)
-		}
-		manifest.WALFile = destWALDirName
+
+	if _, statErr := c.m.wrapper.Stat(srcWALDir); os.IsNotExist(statErr) {
+		return nil // No WAL directory to copy, not an error.
+	} else if statErr != nil {
+		return fmt.Errorf("failed to stat source WAL directory %s: %w", srcWALDir, statErr)
 	}
+
+	destWALDirName := "wal"
+	destWALDir := filepath.Join(c.snapshotDir, destWALDirName)
+	if err := c.m.wrapper.MkdirAll(destWALDir, 0755); err != nil {
+		return fmt.Errorf("failed to create wal directory in snapshot: %w", err)
+	}
+	if err := c.m.wrapper.LinkOrCopyDirectoryContents(srcWALDir, destWALDir); err != nil {
+		return fmt.Errorf("failed to copy WAL directory to snapshot: %w", err)
+	}
+	c.manifest.WALFile = destWALDirName
 	return nil
 }
 
