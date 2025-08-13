@@ -2327,3 +2327,96 @@ func TestCreateFull_AuxiliaryFileNotExist(t *testing.T) {
 	assert.Empty(t, manifest.StringMappingFile, "StringMappingFile should be empty in manifest")
 	assert.Empty(t, manifest.SeriesMappingFile, "SeriesMappingFile should be empty in manifest")
 }
+
+func TestRestoreFromLatest(t *testing.T) {
+	// Mock restoreFromFullFunc for testing purposes
+	originalRestoreFromFull := restoreFromFullFunc
+	defer func() { restoreFromFullFunc = originalRestoreFromFull }()
+
+	t.Run("Success", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		// Create multiple snapshot directories to ensure the latest is chosen
+		snapshotDir1 := filepath.Join(snapshotsBaseDir, "1000")
+		snapshotDir2 := filepath.Join(snapshotsBaseDir, "2000") // This one is later
+		require.NoError(t, os.MkdirAll(snapshotDir1, 0755))
+		require.NoError(t, os.MkdirAll(snapshotDir2, 0755))
+
+		var calledSnapshotDir string
+		var calledOpts RestoreOptions
+		restoreFromFullFunc = func(opts RestoreOptions, snapshotDir string) error {
+			calledOpts = opts
+			calledSnapshotDir = snapshotDir
+			return nil
+		}
+
+		// 2. Execution
+		opts := RestoreOptions{DataDir: filepath.Join(tempDir, "target")}
+		err := RestoreFromLatest(opts, snapshotsBaseDir)
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.Equal(t, snapshotDir2, calledSnapshotDir, "Should have called RestoreFromFull with the latest snapshot directory")
+		assert.Equal(t, opts.DataDir, calledOpts.DataDir, "Options should be passed through correctly")
+	})
+
+	t.Run("NoSnapshotsFound", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755)) // Directory exists but is empty
+
+		// 2. Execution
+		opts := RestoreOptions{DataDir: filepath.Join(tempDir, "target")}
+		err := RestoreFromLatest(opts, snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no snapshots found")
+	})
+
+	t.Run("FindLatestFails", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+
+		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+		expectedErr := fmt.Errorf("simulated readdir error")
+		helper.InterceptReadDir = func(name string) ([]os.DirEntry, error) {
+			return nil, expectedErr
+		}
+
+		// 2. Execution
+		opts := RestoreOptions{DataDir: filepath.Join(tempDir, "target"), wrapper: helper}
+		err := RestoreFromLatest(opts, snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		assert.Contains(t, err.Error(), "failed to find the latest snapshot")
+	})
+
+	t.Run("RestoreFromFullFails", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+		require.NoError(t, os.MkdirAll(filepath.Join(snapshotsBaseDir, "1000"), 0755))
+
+		expectedErr := fmt.Errorf("simulated restore error")
+		restoreFromFullFunc = func(opts RestoreOptions, snapshotDir string) error {
+			return expectedErr
+		}
+
+		// 2. Execution
+		opts := RestoreOptions{DataDir: filepath.Join(tempDir, "target")}
+		err := RestoreFromLatest(opts, snapshotsBaseDir)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr, "Error from RestoreFromFull should be propagated")
+	})
+}

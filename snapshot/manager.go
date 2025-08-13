@@ -52,6 +52,9 @@ func NewManagerWithTesting(provider EngineProvider, wrapper internal.PrivateSnap
 	return m
 }
 
+// restoreFromFullFunc is a variable to allow mocking RestoreFromFull in tests.
+var restoreFromFullFunc = RestoreFromFull
+
 func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error) {
 	p := m.provider
 	if err := p.CheckStarted(); err != nil {
@@ -606,9 +609,29 @@ func (r *restorer) swapDataDirectories() error {
 }
 
 func RestoreFromLatest(opts RestoreOptions, snapshotsBaseDir string) error {
-	// Implementation for RestoreFromLatestSnapshot would be moved here.
-	// This is a placeholder for brevity.
-	return fmt.Errorf("RestoreFromLatest not implemented yet")
+	restoreLogger := opts.Logger
+	if restoreLogger == nil {
+		restoreLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if opts.wrapper == nil {
+		opts.wrapper = newHelperSnapshot()
+	}
+
+	restoreLogger = restoreLogger.With("component", "RestoreFromLatest")
+	restoreLogger.Info("Attempting to restore from the latest snapshot.", "base_dir", snapshotsBaseDir)
+
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, opts.wrapper)
+	if err != nil {
+		return fmt.Errorf("failed to find the latest snapshot in %s: %w", snapshotsBaseDir, err)
+	}
+	if latestID == "" {
+		return fmt.Errorf("no snapshots found in %s to restore from", snapshotsBaseDir)
+	}
+
+	restoreLogger.Info("Found latest snapshot to restore from.", "snapshot_id", latestID, "path", latestPath)
+
+	// Call the (potentially mocked) restore function
+	return restoreFromFullFunc(opts, latestPath)
 }
 
 // findLatestSnapshot finds the most recent snapshot directory in a base directory.
