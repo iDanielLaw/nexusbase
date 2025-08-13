@@ -44,6 +44,10 @@ func (h *helperSnapshot) Open(name string) (*os.File, error) {
 	return os.Open(name)
 }
 
+func (h *helperSnapshot) Create(name string) (*os.File, error) {
+	return os.Create(name)
+}
+
 func (h *helperSnapshot) MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }

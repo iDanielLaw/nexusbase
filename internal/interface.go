@@ -39,6 +39,7 @@ type PrivateSnapshotHelper interface {
 	Rename(oldpath, newpath string) error
 	Stat(name string) (os.FileInfo, error)
 	Open(name string) (*os.File, error)
+	Create(name string) (*os.File, error)
 	MkdirAll(path string, perm os.FileMode) error
 	WriteFile(name string, data []byte, perm os.FileMode) error
 

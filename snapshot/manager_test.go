@@ -1256,7 +1256,11 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to read binary snapshot manifest")
 	})
 
-	t.Run("PreCreateSubdirError", func(t *testing.T) {
+	// This test simulates an error when creating the directory structure inside the
+	// temporary restore directory, which happens just before a file is copied.
+	// It was previously named "PreCreateSubdirError" but the logic has changed
+	// from pre-creating all directories to creating them just-in-time.
+	t.Run("DirectoryCreationForRestoreError", func(t *testing.T) {
 		defer func() { helper.InterceptMkdirAll = nil }()
 
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
@@ -1281,7 +1285,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		err = RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to pre-create required subdirectory")
+		assert.Contains(t, err.Error(), "failed to create directory for restoring file")
 	})
 
 	t.Run("CopyFileError", func(t *testing.T) {

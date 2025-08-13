@@ -78,7 +78,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	defer func() {
 		if err != nil {
 			p.GetLogger().Warn("Snapshot creation failed, cleaning up snapshot directory.", "snapshot_dir", snapshotDir, "error", err)
-			os.RemoveAll(snapshotDir)
+			m.wrapper.RemoveAll(snapshotDir)
 		}
 	}()
 
@@ -120,7 +120,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 		for _, table := range tablesInLevel {
 			baseFileName := filepath.Base(table.FilePath())
 			destPath := filepath.Join(snapshotDir, "sst", baseFileName)
-			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			if err := m.wrapper.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 				return fmt.Errorf("failed to create sst subdirectory in snapshot: %w", err)
 			}
 			if copyErr := m.wrapper.LinkOrCopyFile(table.FilePath(), destPath); copyErr != nil {
@@ -140,7 +140,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 
 	// 6. Create a snapshot of the Tag Index Manager state.
 	indexSnapshotDir := filepath.Join(snapshotDir, "index")
-	if err := os.MkdirAll(indexSnapshotDir, 0755); err != nil {
+	if err := m.wrapper.MkdirAll(indexSnapshotDir, 0755); err != nil {
 		return fmt.Errorf("failed to create subdirectory for index snapshot: %w", err)
 	}
 	if err := p.GetTagIndexManager().CreateSnapshot(indexSnapshotDir); err != nil {
@@ -169,10 +169,10 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 		return err
 	}
 	srcWALDir := p.GetWALPath()
-	if _, statErr := os.Stat(srcWALDir); !os.IsNotExist(statErr) {
+	if _, statErr := m.wrapper.Stat(srcWALDir); !os.IsNotExist(statErr) {
 		destWALDirName := "wal"
 		destWALDir := filepath.Join(snapshotDir, destWALDirName)
-		if err := os.MkdirAll(destWALDir, 0755); err != nil {
+		if err := m.wrapper.MkdirAll(destWALDir, 0755); err != nil {
 			return fmt.Errorf("failed to create wal directory in snapshot: %w", err)
 		}
 		if err := m.wrapper.LinkOrCopyDirectoryContents(srcWALDir, destWALDir); err != nil {
@@ -185,7 +185,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	// 9. Write the final manifest and CURRENT file.
 	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, p.GetClock().Now().UnixNano())
 	manifestPath := filepath.Join(snapshotDir, uniqueManifestFileName)
-	manifestFile, createErr := os.Create(manifestPath)
+	manifestFile, createErr := m.wrapper.Create(manifestPath)
 	if createErr != nil {
 		return fmt.Errorf("failed to create snapshot manifest file %s: %w", manifestPath, createErr)
 	}
