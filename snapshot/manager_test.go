@@ -20,6 +20,7 @@ import (
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/RoaringBitmap/roaring/roaring64"
@@ -237,7 +238,7 @@ type mockSnapshotHelper struct {
 	InterceptReadFile                    func(filename string) ([]byte, error)
 	InterceptMkdirTemp                   func(dir, pattern string) (string, error)
 	InterceptMkdirAll                    func(path string, perm os.FileMode) error
-	InterceptOpen                        func(name string) (*os.File, error)
+	InterceptOpen                        func(name string) (sys.FileInterface, error)
 	InterceptCopyFile                    func(src, dst string) error
 	InterceptReadManifestBinary          func(r io.Reader) (*core.SnapshotManifest, error)
 	InterceptReadDir                     func(name string) ([]os.DirEntry, error)
@@ -316,7 +317,7 @@ func (ms *mockSnapshotHelper) MkdirTemp(dir, pattern string) (string, error) {
 	return ms.helperSnapshot.MkdirTemp(dir, pattern)
 }
 
-func (ms *mockSnapshotHelper) Open(name string) (*os.File, error) {
+func (ms *mockSnapshotHelper) Open(name string) (sys.FileInterface, error) {
 	if ms.InterceptOpen != nil {
 		return ms.InterceptOpen(name)
 	}
@@ -1579,7 +1580,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		defer os.Remove(manifestPath)
 
 		expectedErr := fmt.Errorf("simulated open error")
-		helper.InterceptOpen = func(name string) (*os.File, error) {
+		helper.InterceptOpen = func(name string) (sys.FileInterface, error) {
 			if name == manifestPath {
 				return nil, expectedErr
 			}
@@ -1614,7 +1615,11 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to read manifest from")
 	})
 
-	t.Run("PreCreateSubdirError", func(t *testing.T) {
+	// This test simulates an error when creating the directory structure inside the
+	// temporary restore directory, which happens just before a file is copied.
+	// It was previously named "PreCreateSubdirError" but the logic has changed
+	// from pre-creating all directories to creating them just-in-time.
+	t.Run("DirectoryCreationForRestoreError", func(t *testing.T) {
 		defer func() { helper.InterceptMkdirAll = nil }()
 
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
@@ -1639,7 +1644,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		err = RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to pre-create required subdirectory")
+		assert.Contains(t, err.Error(), "failed to create directory for restoring file")
 	})
 
 	t.Run("CopyFileError", func(t *testing.T) {

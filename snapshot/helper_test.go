@@ -182,19 +182,21 @@ func TestHelperSnapshot_SaveJSON(t *testing.T) {
 
 func TestHelperSnapshot_CopyAuxiliaryFile(t *testing.T) {
 	h, tempDir := setupHelperTest(t)
-	srcPath := filepath.Join(tempDir, "aux.log")
+	h.MkdirAll(tempDir, 0755)
+	srcPath := filepath.Join(tempDir, "auxiliary.log")
 	snapshotDir := filepath.Join(tempDir, "snapshot")
 	require.NoError(t, h.MkdirAll(snapshotDir, 0755))
-	require.NoError(t, h.WriteFile(srcPath, []byte("aux data"), 0644))
+	t.Log("Creating auxiliary file folder: ", tempDir, ", srcPath: ", srcPath, ", snapshotDir:", snapshotDir)
+	require.NoError(t, h.WriteFile(srcPath, []byte("auxiliary data"), 0644), "Failed to write auxiliary source file")
 
 	var manifestField string
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Happy path
-	err := h.CopyAuxiliaryFile(srcPath, "aux_copy.log", snapshotDir, &manifestField, logger)
+	err := h.CopyAuxiliaryFile(srcPath, "auxiliary_copy.log", snapshotDir, &manifestField, logger)
 	require.NoError(t, err)
-	assert.Equal(t, "aux_copy.log", manifestField)
-	assert.FileExists(t, filepath.Join(snapshotDir, "aux_copy.log"))
+	assert.Equal(t, "auxiliary_copy.log", manifestField)
+	assert.FileExists(t, filepath.Join(snapshotDir, "auxiliary_copy.log"))
 
 	// Source does not exist
 	manifestField = ""
