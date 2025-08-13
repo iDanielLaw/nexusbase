@@ -34,6 +34,12 @@ func (h *helperSnapshot) MkdirTemp(dir, pattern string) (string, error) {
 }
 
 func (h *helperSnapshot) Rename(oldpath, newpath string) error {
+	// Ensure the destination directory exists before renaming. This is a common
+	// cross-platform issue, especially on Windows where rename can fail if the
+	// parent directory of the new path does not exist.
+	if err := h.MkdirAll(filepath.Dir(newpath), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory for newpath %s: %w", newpath, err)
+	}
 	return os.Rename(oldpath, newpath)
 }
 
@@ -46,6 +52,12 @@ func (h *helperSnapshot) Open(name string) (*os.File, error) {
 }
 
 func (h *helperSnapshot) Create(name string) (*os.File, error) {
+	// Ensure the parent directory exists before creating the file. This is crucial
+	// for robustness, as os.Create will fail on some OSes (like Windows) if the
+	// parent directory does not exist.
+	if err := h.MkdirAll(filepath.Dir(name), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create parent directory for %s: %w", name, err)
+	}
 	return os.Create(name)
 }
 
@@ -54,6 +66,10 @@ func (h *helperSnapshot) MkdirAll(path string, perm os.FileMode) error {
 }
 
 func (h *helperSnapshot) WriteFile(name string, data []byte, perm os.FileMode) error {
+	// Ensure the parent directory exists before writing the file for robustness.
+	if err := h.MkdirAll(filepath.Dir(name), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory for %s: %w", name, err)
+	}
 	return os.WriteFile(name, data, perm)
 }
 
