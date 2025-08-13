@@ -276,23 +276,14 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 	}
 	restoreLogger.Info("Snapshot manifest loaded.", "sequence_number", manifest.SequenceNumber)
 
-	// 3a. Pre-create all necessary subdirectories in the temporary location.
-	requiredDirs := []string{
-		filepath.Join(tempRestoreDir, "sst"),
-		// Use the constant from the indexer package to avoid hardcoding the directory name.
-		filepath.Join(tempRestoreDir, indexer.IndexSSTDirName),
-		filepath.Join(tempRestoreDir, "wal"),
-	}
-	for _, dir := range requiredDirs {
-		if err := opts.wrapper.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to pre-create required subdirectory %s: %w", dir, err)
-		}
-	}
-
 	// Restore the tag index
 	srcIndexDir := filepath.Join(snapshotDir, indexer.IndexDirName)
-	destIndexDir := filepath.Join(tempRestoreDir, "index_sst")
+	// Use the constant from the indexer package to avoid hardcoding the directory name.
+	destIndexDir := filepath.Join(tempRestoreDir, indexer.IndexSSTDirName)
 	if _, err := opts.wrapper.Stat(srcIndexDir); !os.IsNotExist(err) {
+		if err := opts.wrapper.MkdirAll(destIndexDir, 0755); err != nil {
+			return fmt.Errorf("failed to create destination index directory %s: %w", destIndexDir, err)
+		}
 		if err := opts.wrapper.CopyDirectoryContents(srcIndexDir, destIndexDir); err != nil {
 			return fmt.Errorf("failed to copy tag index files from snapshot: %w", err)
 		}
@@ -306,13 +297,16 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 		}
 	}
 
-	// 3b. Copy files from the manifest.
+	// Copy files from the manifest.
 	for _, fileName := range filesToCopy {
 		if fileName == "" {
 			continue
 		}
 		srcPath := filepath.Join(snapshotDir, fileName)
 		destPath := filepath.Join(tempRestoreDir, fileName)
+		if err := opts.wrapper.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return fmt.Errorf("failed to create directory for restoring file %s: %w", destPath, err)
+		}
 		if _, err := opts.wrapper.Stat(srcPath); os.IsNotExist(err) {
 			restoreLogger.Warn("File listed in manifest not found in snapshot directory, skipping.", "file", fileName)
 			continue
@@ -329,6 +323,9 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 		destWALPath := filepath.Join(tempRestoreDir, manifest.WALFile)
 		if stat, err := opts.wrapper.Stat(srcWALPath); err == nil {
 			if stat.IsDir() {
+				if err := opts.wrapper.MkdirAll(destWALPath, 0755); err != nil {
+					return fmt.Errorf("failed to create WAL directory %s: %w", destWALPath, err)
+				}
 				if err := opts.wrapper.CopyDirectoryContents(srcWALPath, destWALPath); err != nil {
 					return fmt.Errorf("failed to copy WAL directory from snapshot: %w", err)
 				}

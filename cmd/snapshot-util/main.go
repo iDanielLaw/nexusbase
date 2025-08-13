@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/snapshot"
 	// We need access to the unexported readManifestBinary function.
 	// For this utility, we might need to make it public or copy its logic.
 	// Let's assume we have a way to call it, perhaps via a new `snapshot` package.
@@ -112,8 +113,8 @@ func listSnapshots(baseDir string) ([]SnapshotInfo, error) {
         dirName := filepath.Base(snapshotDir)
         ts, err := time.Parse("20060102T150405Z", dirName)
         if err != nil {
-            // Fallback if parsing fails
-            ts = time.Now()
+            // Return an error or use a zero time value instead of time.Now() to avoid misleading output.
+            return nil, fmt.Errorf("failed to parse timestamp from directory name %s: %w", dirName, err)
         }
 
         snapshots = append(snapshots, SnapshotInfo{
@@ -137,5 +138,5 @@ func readManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
     // This function would need to be made accessible to the utility.
     // For brevity, the full implementation is omitted here.
     // You would copy the exact code from the original file.
-    return nil, fmt.Errorf("readManifestBinary not implemented in this example")
+    return snapshot.ReadManifestBinary(r)
 }
