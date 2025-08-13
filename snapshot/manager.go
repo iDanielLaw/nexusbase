@@ -173,6 +173,25 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	return nil
 }
 
+// incrementalCreator holds the state for a single incremental snapshot creation.
+type incrementalCreator struct {
+	m                *manager
+	ctx              context.Context
+	snapshotsBaseDir string
+	parentID         string
+	parentPath       string
+	parentManifest   *core.SnapshotManifest
+	newSnapshotID    string
+	snapshotDir      string
+	newManifest      *core.SnapshotManifest
+}
+
+func (m *manager) ListSnapshots(snapshotsBaseDir string) ([]Info, error) {
+	// Implementation for ListSnapshots would be moved here from the snapshot-util.
+	// This is a placeholder for brevity.
+	return nil, fmt.Errorf("ListSnapshots not implemented yet")
+}
+
 func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string) (err error) {
 	p := m.provider
 	if err := p.CheckStarted(); err != nil {
@@ -182,60 +201,118 @@ func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string
 	defer span.End()
 	span.SetAttributes(attribute.String("snapshot.base_dir", snapshotsBaseDir))
 
-	// 1. Find the parent snapshot
-	parentID, parentPath, err := findLatestSnapshot(snapshotsBaseDir, m.wrapper)
-	if err != nil {
-		return fmt.Errorf("failed to find latest snapshot: %w", err)
+	creator := &incrementalCreator{
+		m:                m,
+		ctx:              ctx,
+		snapshotsBaseDir: snapshotsBaseDir,
 	}
-	if parentID == "" {
-		return fmt.Errorf("cannot create incremental snapshot: no parent snapshot found in %s. Please create a full snapshot first", snapshotsBaseDir)
-	}
-	p.GetLogger().Info("Found parent snapshot for incremental creation.", "parent_id", parentID)
+	return creator.run()
+}
 
-	// 2. Read parent manifest
-	parentManifest, _, err := readManifestFromDir(parentPath, m.wrapper)
-	if err != nil {
-		return fmt.Errorf("failed to read parent snapshot manifest from %s: %w", parentPath, err)
-	}
-
-	// 3. Check if there are any new changes
-	currentSeqNum := p.GetSequenceNumber()
-	if currentSeqNum <= parentManifest.SequenceNumber {
-		p.GetLogger().Info("Skipping incremental snapshot: no new data since parent.", "current_seq", currentSeqNum, "parent_seq", parentManifest.SequenceNumber)
-		return nil
-	}
-
-	// 4. Create new snapshot directory
-	newSnapshotID := fmt.Sprintf("%d_incr", p.GetClock().Now().UnixNano())
-	snapshotDir := filepath.Join(snapshotsBaseDir, newSnapshotID)
-	if err := m.wrapper.MkdirAll(snapshotDir, 0755); err != nil {
-		return fmt.Errorf("failed to create incremental snapshot directory: %w", err)
-	}
+// run orchestrates the entire incremental snapshot creation process.
+func (c *incrementalCreator) run() (err error) {
+	// Defer cleanup for the new snapshot directory if it gets created.
 	defer func() {
-		if err != nil {
-			p.GetLogger().Warn("Incremental snapshot creation failed, cleaning up.", "snapshot_dir", snapshotDir, "error", err)
-			m.wrapper.RemoveAll(snapshotDir)
+		if err != nil && c.snapshotDir != "" {
+			c.m.provider.GetLogger().Warn("Incremental snapshot creation failed, cleaning up.", "snapshot_dir", c.snapshotDir, "error", err)
+			c.m.wrapper.RemoveAll(c.snapshotDir)
 		}
 	}()
 
-	// 5. Flush memtables (same as full snapshot)
+	// The sequence of operations
+	shouldSkip, err := c.findAndValidateParent()
+	if err != nil {
+		return err
+	}
+	if shouldSkip {
+		return nil // No error, just nothing to do.
+	}
+
+	if err := c.prepareNewSnapshotDir(); err != nil {
+		return err
+	}
+
+	if err := c.flushMemtables(); err != nil {
+		return err
+	}
+
+	if err := c.buildAndCopyNewFiles(); err != nil {
+		return err
+	}
+
+	if err := c.finalizeSnapshot(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// findAndValidateParent finds the latest snapshot, reads its manifest, and checks if an incremental snapshot is needed.
+func (c *incrementalCreator) findAndValidateParent() (shouldSkip bool, err error) {
+	p := c.m.provider
+	// 1. Find the parent snapshot
+	parentID, parentPath, err := findLatestSnapshot(c.snapshotsBaseDir, c.m.wrapper)
+	if err != nil {
+		return false, fmt.Errorf("failed to find latest snapshot: %w", err)
+	}
+	if parentID == "" {
+		return false, fmt.Errorf("cannot create incremental snapshot: no parent snapshot found in %s. Please create a full snapshot first", c.snapshotsBaseDir)
+	}
+	c.parentID = parentID
+	c.parentPath = parentPath
+	p.GetLogger().Info("Found parent snapshot for incremental creation.", "parent_id", c.parentID)
+
+	// 2. Read parent manifest
+	parentManifest, _, err := readManifestFromDir(c.parentPath, c.m.wrapper)
+	if err != nil {
+		return false, fmt.Errorf("failed to read parent snapshot manifest from %s: %w", c.parentPath, err)
+	}
+	c.parentManifest = parentManifest
+
+	// 3. Check if there are any new changes using the pre-flush sequence number.
+	currentSeqNum := p.GetSequenceNumber()
+	if currentSeqNum <= c.parentManifest.SequenceNumber {
+		p.GetLogger().Info("Skipping incremental snapshot: no new data since parent.", "current_seq", currentSeqNum, "parent_seq", c.parentManifest.SequenceNumber)
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// prepareNewSnapshotDir creates the new directory for the incremental snapshot.
+func (c *incrementalCreator) prepareNewSnapshotDir() error {
+	p := c.m.provider
+	c.newSnapshotID = fmt.Sprintf("%d_incr", p.GetClock().Now().UnixNano())
+	c.snapshotDir = filepath.Join(c.snapshotsBaseDir, c.newSnapshotID)
+	if err := c.m.wrapper.MkdirAll(c.snapshotDir, 0755); err != nil {
+		return fmt.Errorf("failed to create incremental snapshot directory: %w", err)
+	}
+	p.GetLogger().Info("Creating incremental snapshot.", "id", c.newSnapshotID, "parent_id", c.parentID)
+	return nil
+}
+
+// flushMemtables flushes any outstanding memtables to L0.
+func (c *incrementalCreator) flushMemtables() error {
+	p := c.m.provider
 	p.Lock()
 	memtablesToFlush, _ := p.GetMemtablesForFlush()
 	p.Unlock()
 	if len(memtablesToFlush) > 0 {
 		for _, mem := range memtablesToFlush {
-			if flushErr := p.FlushMemtableToL0(mem, ctx); flushErr != nil {
+			if flushErr := p.FlushMemtableToL0(mem, c.ctx); flushErr != nil {
 				return fmt.Errorf("failed to flush memtable during incremental snapshot: %w", flushErr)
 			}
 		}
 	}
+	return nil
+}
 
-	// 6. Identify and copy new/changed files
-	p.GetLogger().Info("Creating incremental snapshot.", "id", newSnapshotID, "parent_id", parentID)
-
+// buildAndCopyNewFiles identifies new SSTables, copies them, and builds the new manifest.
+func (c *incrementalCreator) buildAndCopyNewFiles() error {
+	p := c.m.provider
 	// Build set of parent SSTable file paths for quick lookup
 	parentSSTables := make(map[string]struct{})
-	for _, level := range parentManifest.Levels {
+	for _, level := range c.parentManifest.Levels {
 		for _, table := range level.Tables {
 			parentSSTables[table.FileName] = struct{}{}
 		}
@@ -245,11 +322,11 @@ func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string
 	levelStates, unlockFunc := p.GetLevelsManager().GetSSTablesForRead()
 	defer unlockFunc()
 
-	newManifest := core.SnapshotManifest{
+	c.newManifest = &core.SnapshotManifest{
 		Type:                core.SnapshotTypeIncremental,
-		ParentID:            parentID,
+		ParentID:            c.parentID,
 		CreatedAt:           p.GetClock().Now(),
-		SequenceNumber:      currentSeqNum,
+		SequenceNumber:      p.GetSequenceNumber(), // Get sequence number *after* flush for accuracy.
 		LastWALSegmentIndex: p.GetWAL().ActiveSegmentIndex(),
 		Levels:              make([]core.SnapshotLevelManifest, 0),
 		SSTableCompression:  p.GetSSTableCompressionType(),
@@ -262,11 +339,11 @@ func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string
 		for _, table := range tablesInLevel {
 			relativeFileName := filepath.Join("sst", filepath.Base(table.FilePath()))
 			if _, exists := parentSSTables[relativeFileName]; !exists {
-				destPath := filepath.Join(snapshotDir, relativeFileName)
-				if err := m.wrapper.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+				destPath := filepath.Join(c.snapshotDir, relativeFileName)
+				if err := c.m.wrapper.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 					return fmt.Errorf("failed to create sst subdirectory in incremental snapshot: %w", err)
 				}
-				if copyErr := m.wrapper.LinkOrCopyFile(table.FilePath(), destPath); copyErr != nil {
+				if copyErr := c.m.wrapper.LinkOrCopyFile(table.FilePath(), destPath); copyErr != nil {
 					return fmt.Errorf("failed to copy new SSTable %s for incremental snapshot: %w", table.FilePath(), copyErr)
 				}
 				levelManifest.Tables = append(levelManifest.Tables, core.SSTableMetadata{
@@ -275,27 +352,24 @@ func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string
 			}
 		}
 		if len(levelManifest.Tables) > 0 {
-			newManifest.Levels = append(newManifest.Levels, levelManifest)
+			c.newManifest.Levels = append(c.newManifest.Levels, levelManifest)
 		}
-	}
-
-	// For simplicity and correctness, we copy the entire current state of WAL, index, and auxiliary files.
-	// The "increment" is that we only copied new SSTables. The restore process will overlay this state.
-	if err := m.copyAuxiliaryAndWALFiles(snapshotDir, &newManifest); err != nil {
-		return err
-	}
-
-	// 7. Write the final manifest and CURRENT file for the new snapshot.
-	if _, err := m.writeManifestAndCurrentFunc(snapshotDir, &newManifest); err != nil {
-		return err
 	}
 	return nil
 }
 
-func (m *manager) ListSnapshots(snapshotsBaseDir string) ([]Info, error) {
-	// Implementation for ListSnapshots would be moved here from the snapshot-util.
-	// This is a placeholder for brevity.
-	return nil, fmt.Errorf("ListSnapshots not implemented yet")
+// finalizeSnapshot copies auxiliary files and writes the new manifest and CURRENT file.
+func (c *incrementalCreator) finalizeSnapshot() error {
+	// For simplicity and correctness, we copy the entire current state of WAL, index, and auxiliary files.
+	if err := c.m.copyAuxiliaryAndWALFiles(c.snapshotDir, c.newManifest); err != nil {
+		return err
+	}
+
+	// Write the final manifest and CURRENT file for the new snapshot.
+	if _, err := c.m.writeManifestAndCurrentFunc(c.snapshotDir, c.newManifest); err != nil {
+		return err
+	}
+	return nil
 }
 
 // copyAuxiliaryAndWALFiles is a helper for CreateFull and CreateIncremental.
