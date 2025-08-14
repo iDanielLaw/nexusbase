@@ -17,6 +17,7 @@ import (
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type testEntry struct {
@@ -550,6 +551,83 @@ func TestLoadSSTable_FileTooSmall_New(t *testing.T) {
 	}
 }
 
+func TestSSTableWriter_ErrorHandling(t *testing.T) {
+	compressor := &compressors.NoCompressionCompressor{}
+	baseOpts := core.SSTableWriterOptions{
+		EstimatedKeys:                10,
+		BloomFilterFalsePositiveRate: 0.01,
+		BlockSize:                    DefaultBlockSize,
+		Compressor:                   compressor,
+		Logger:                       slog.Default(),
+	}
+
+	t.Run("NewSSTableWriter_CreateError", func(t *testing.T) {
+		// Create a read-only directory to cause sys.Create to fail.
+		// This is OS-dependent, works on Unix-like systems.
+		readOnlyDir := t.TempDir()
+		require.NoError(t, os.Chmod(readOnlyDir, 0555)) // r-x r-x r-x
+		defer os.Chmod(readOnlyDir, 0755)              // Cleanup
+
+		opts := baseOpts
+		opts.DataDir = readOnlyDir
+		opts.ID = 1
+
+		_, err := NewSSTableWriter(opts)
+		require.Error(t, err, "NewSSTableWriter should fail in a read-only directory")
+		assert.Contains(t, err.Error(), "permission denied", "Error message should indicate a permission issue")
+	})
+
+	t.Run("Finish_RenameError", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := baseOpts
+		opts.DataDir = tempDir
+		opts.ID = 2
+
+		writer, err := NewSSTableWriter(opts)
+		require.NoError(t, err)
+
+		// Create a directory where the final .sst file should be, to cause os.Rename to fail.
+		finalPath := writer.FilePath()[:len(writer.FilePath())-len(filepath.Ext(writer.FilePath()))] + ".sst"
+		err = os.Mkdir(finalPath, 0755)
+		require.NoError(t, err)
+
+		// Add some data so Finish() doesn't operate on an empty file
+		require.NoError(t, writer.Add([]byte("key"), []byte("val"), core.EntryTypePutEvent, 1))
+
+		err = writer.Finish()
+		require.Error(t, err, "Finish should fail when the target path is a directory")
+		assert.Contains(t, err.Error(), "failed to rename temporary sstable file", "Error message should indicate rename failure")
+
+		// The writer should have aborted and cleaned up the .tmp file
+		_, statErr := os.Stat(writer.FilePath())
+		assert.True(t, os.IsNotExist(statErr), "The .tmp file should be removed after a failed Finish")
+	})
+
+	t.Run("Abort_RemovesTempFile", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := baseOpts
+		opts.DataDir = tempDir
+		opts.ID = 3
+
+		writer, err := NewSSTableWriter(opts)
+		require.NoError(t, err)
+
+		tempPath := writer.FilePath()
+		_, err = os.Stat(tempPath)
+		require.NoError(t, err, "Temp file should exist after NewSSTableWriter")
+
+		err = writer.Abort()
+		require.NoError(t, err)
+
+		_, err = os.Stat(tempPath)
+		assert.True(t, os.IsNotExist(err), "Temp file should not exist after Abort")
+
+		// Calling Abort again should not cause an error
+		err = writer.Abort()
+		require.NoError(t, err, "Calling Abort multiple times should not error")
+	})
+}
+
 // TODO: Add more corruption tests for the new block-based format (e.g., corrupted block index, corrupted block data).
 
 func TestSSTableIterator_New(t *testing.T) {
@@ -1001,6 +1079,63 @@ func TestSSTable_CorruptedBlockChecksum(t *testing.T) {
 	} else {
 		t.Logf("Correctly received error from Get on corrupted block: %v", errGet)
 	}
+}
+
+func TestSSTable_VerifyIntegrity_CorruptedBlock(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := slog.Default()
+	entries := []testEntry{
+		{Key: []byte("key1"), Value: []byte("value1"), EntryType: core.EntryTypePutEvent, PointID: 1},
+		{Key: []byte("key2"), Value: []byte("value2"), EntryType: core.EntryTypePutEvent, PointID: 2},
+	}
+	fileID := uint64(202)
+
+	// 1. Create a valid SSTable
+	compressor := &compressors.NoCompressionCompressor{}
+	writerOpts := core.SSTableWriterOptions{
+		DataDir:                      tempDir,
+		ID:                           fileID,
+		EstimatedKeys:                uint64(len(entries)),
+		BloomFilterFalsePositiveRate: 0.01,
+		BlockSize:                    32,
+		Compressor:                   compressor,
+		Logger:                       logger,
+	}
+	writer, err := NewSSTableWriter(writerOpts)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		require.NoError(t, writer.Add(entry.Key, entry.Value, entry.EntryType, entry.PointID))
+	}
+	require.NoError(t, writer.Finish())
+	validSSTPath := writer.FilePath()
+
+	// 2. Load the valid SSTable to get block offset information
+	validSST, err := LoadSSTable(LoadSSTableOptions{FilePath: validSSTPath, ID: fileID, Logger: logger})
+	require.NoError(t, err)
+	require.NotEmpty(t, validSST.index.entries, "SSTable should have index entries")
+	firstBlockMeta := validSST.index.entries[0]
+	validSST.Close()
+
+	// 3. Read the file content and corrupt the checksum of the first block
+	fileData, err := os.ReadFile(validSSTPath)
+	require.NoError(t, err)
+
+	checksumByteToCorruptOffset := int(firstBlockMeta.BlockOffset) + 1 // +1 to skip compression flag
+	require.Less(t, checksumByteToCorruptOffset, len(fileData), "Offset should be in bounds")
+	fileData[checksumByteToCorruptOffset]++ // Flip a bit in the checksum
+
+	// 4. Write back the corrupted data
+	require.NoError(t, os.WriteFile(validSSTPath, fileData, 0644))
+
+	// 5. Load the corrupted SSTable
+	corruptedSST, err := LoadSSTable(LoadSSTableOptions{FilePath: validSSTPath, ID: fileID, Logger: logger})
+	require.NoError(t, err, "LoadSSTable should succeed even with corrupted block, as it reads lazily")
+	defer corruptedSST.Close()
+
+	// 6. Verify integrity with deep check, which should fail
+	errs := corruptedSST.VerifyIntegrity(true)
+	require.NotEmpty(t, errs, "VerifyIntegrity with deepCheck should find an error")
+	assert.Contains(t, errs[0].Error(), "checksum mismatch", "Expected a checksum mismatch error")
 }
 
 func TestSSTable_Close(t *testing.T) {
