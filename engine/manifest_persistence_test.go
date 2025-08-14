@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -106,12 +107,12 @@ func TestManifestBinary_RoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// 1. Serialize to buffer
 			var buf bytes.Buffer
-			err := writeManifestBinary(&buf, tc.manifest)
+			err := snapshot.WriteManifestBinary(&buf, tc.manifest)
 			require.NoError(t, err)
 			require.NotEmpty(t, buf.Bytes(), "Serialized buffer should not be empty")
 
 			// 2. Deserialize from buffer
-			deserializedManifest, err := readManifestBinary(&buf)
+			deserializedManifest, err := snapshot.ReadManifestBinary(&buf)
 			require.NoError(t, err)
 			require.NotNil(t, deserializedManifest)
 
@@ -147,7 +148,7 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 		Levels:              []core.SnapshotLevelManifest{}, // Use empty levels for simplicity
 	}
 	var validBuf bytes.Buffer
-	err := writeManifestBinary(&validBuf, validManifest)
+	err := snapshot.WriteManifestBinary(&validBuf, validManifest)
 	require.NoError(t, err)
 	validBytes := validBuf.Bytes()
 
@@ -179,7 +180,7 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := readManifestBinary(bytes.NewReader(tc.data))
+			_, err := snapshot.ReadManifestBinary(bytes.NewReader(tc.data))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.errContain)
 		})

@@ -10,6 +10,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -76,7 +77,7 @@ func (e *storageEngine) persistManifest() (err error) {
 		}
 	}()
 
-	if err = writeManifestBinary(manifestFile, &manifest); err != nil {
+	if err = snapshot.WriteManifestBinary(manifestFile, &manifest); err != nil {
 		e.logger.Error("Failed to write binary manifest data.", "path", manifestFilePath, "error", err)
 		span.SetStatus(codes.Error, "write_manifest_failed")
 		return fmt.Errorf("failed to write binary manifest data: %w", err)

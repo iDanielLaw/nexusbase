@@ -111,38 +111,38 @@ func WriteManifestBinary(w io.Writer, manifest *core.SnapshotManifest) error {
 		}
 		for _, table := range level.Tables {
 			if err := binary.Write(w, binary.LittleEndian, table.ID); err != nil {
-				return err
+				return fmt.Errorf("failed to write table ID for level %d: %w", level.LevelNumber, err)
 			}
 			if err := writeBytesWithLength(w, []byte(table.FileName)); err != nil {
-				return err
+				return fmt.Errorf("failed to write FileName for level %d, table %d: %w", level.LevelNumber, table.ID, err)
 			}
 			if err := writeBytesWithLength(w, table.MinKey); err != nil {
-				return err
+				return fmt.Errorf("failed to write MinKey for level %d, table %d: %w", level.LevelNumber, table.ID, err)
 			}
 			if err := writeBytesWithLength(w, table.MaxKey); err != nil {
-				return err
+				return fmt.Errorf("failed to write MaxKey for level %d, table %d: %w", level.LevelNumber, table.ID, err)
 			}
 		}
 	}
 
 	// 5. Auxiliary Files
 	if err := writeStringWithLength(w, manifest.WALFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write WALFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.DeletedSeriesFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write DeletedSeriesFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.RangeTombstonesFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write RangeTombstonesFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.StringMappingFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write StringMappingFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.SeriesMappingFile); err != nil {
-		return err
+		return fmt.Errorf("failed to write SeriesMappingFile: %w", err)
 	}
 	if err := writeStringWithLength(w, manifest.SSTableCompression); err != nil {
-		return err
+		return fmt.Errorf("failed to write SSTableCompression: %w", err)
 	}
 
 	return nil
