@@ -31,6 +31,10 @@ type PruneOptions struct {
 	// For example, if KeepN is 2 and PruneOlderThan is 30 days, chains older than
 	// 30 days will be deleted, but the 2 newest chains will always be preserved.
 	PruneOlderThan time.Duration
+
+	// PruneBroken, if true, will automatically delete any snapshot that is part of
+	// a broken chain (i.e., it cannot be traced back to a valid full snapshot).
+	PruneBroken bool
 }
 
 // RestoreOptions contains the necessary parameters for a restore operation.

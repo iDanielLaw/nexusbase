@@ -2862,6 +2862,36 @@ func TestManager_Prune(t *testing.T) {
 		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
 	})
 
+	t.Run("PruneBroken_Only", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+
+		// A valid chain
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now().Add(-2*time.Hour))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_1.1", core.SnapshotTypeIncremental, "full_1", time.Now().Add(-1*time.Hour))
+
+		// A broken chain (parent does not exist)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "orphan_1", core.SnapshotTypeIncremental, "non_existent_parent", time.Now())
+
+		// Another broken chain (part of a chain whose root is missing)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "orphan_2", core.SnapshotTypeIncremental, "missing_full", time.Now())
+		createPruneTestSnapshot(t, snapshotsBaseDir, "orphan_3", core.SnapshotTypeIncremental, "orphan_2", time.Now())
+
+		// 2. Execution
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{PruneBroken: true})
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"orphan_1", "orphan_2", "orphan_3"}, deletedIDs)
+
+		// Check remaining files
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "incr_1.1"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "orphan_1"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "orphan_2"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "orphan_3"))
+	})
+
 	t.Run("RemoveAll_Error", func(t *testing.T) {
 		// 1. Setup
 		ctx, manager, snapshotsBaseDir := setup(t)

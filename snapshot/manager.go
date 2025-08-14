@@ -660,6 +660,7 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 	span.SetAttributes(
 		attribute.String("snapshot.base_dir", snapshotsBaseDir),
 		attribute.Int("snapshot.prune.keep_n", opts.KeepN),
+		attribute.Bool("snapshot.prune.prune_broken", opts.PruneBroken),
 	)
 
 	// 1. List all snapshots
@@ -675,6 +676,7 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 
 	// 2. Build data structures for easy traversal
 	infoMap := make(map[string]Info, len(infos))
+	allSnapshotIDs := make(map[string]struct{}, len(infos))
 	childrenMap := make(map[string][]string) // parentID -> []childID
 	var fullSnapshotRoots []Info
 
@@ -683,6 +685,7 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 		if info.Type == core.SnapshotTypeFull {
 			fullSnapshotRoots = append(fullSnapshotRoots, info)
 		}
+		allSnapshotIDs[info.ID] = struct{}{}
 		if info.ParentID != "" {
 			childrenMap[info.ParentID] = append(childrenMap[info.ParentID], info.ID)
 		}
@@ -692,64 +695,109 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 	if opts.KeepN < 0 {
 		return nil, fmt.Errorf("PruneOptions.KeepN cannot be negative")
 	}
-	if opts.KeepN <= 0 && opts.PruneOlderThan <= 0 {
+	if opts.KeepN <= 0 && opts.PruneOlderThan <= 0 && !opts.PruneBroken {
 		p.GetLogger().Info("Pruning skipped: no policies defined (KeepN and PruneOlderThan are not set).")
 		return []string{}, nil
 	}
 
-	// Sort full snapshots by creation time, oldest first, to evaluate them for pruning.
-	sort.Slice(fullSnapshotRoots, func(i, j int) bool {
-		return fullSnapshotRoots[i].CreatedAt.Before(fullSnapshotRoots[j].CreatedAt)
-	})
+	allIDsToPruneSet := make(map[string]struct{})
 
-	var chainsToPrune []Info
-	numChains := len(fullSnapshotRoots)
-	now := m.provider.GetClock().Now()
+	// Policy: Prune broken chains first, if requested.
+	if opts.PruneBroken {
+		validIDs := make(map[string]struct{})
+		// Traverse from all full snapshots to find all validly chained snapshots.
+		for _, root := range fullSnapshotRoots {
+			queue := []string{root.ID}
+			for len(queue) > 0 {
+				currentID := queue[0]
+				queue = queue[1:]
 
-	// Memoization cache for chain age calculation
-	chainAgeCache := make(map[string]time.Time)
-	findNewestTime := func(rootID string) time.Time {
-		if t, ok := chainAgeCache[rootID]; ok {
-			return t
-		}
-		t := findNewestTimeInChain(rootID, infoMap, childrenMap)
-		chainAgeCache[rootID] = t
-		return t
-	}
+				if _, visited := validIDs[currentID]; visited {
+					continue // Already processed this part of a (potentially merged) chain.
+				}
+				validIDs[currentID] = struct{}{}
 
-	for _, root := range fullSnapshotRoots {
-		// The KeepN policy acts as a safeguard. We cannot prune more than this.
-		if numChains <= opts.KeepN {
-			break
-		}
-
-		// If PruneOlderThan is set, we check the age of the chain.
-		if opts.PruneOlderThan > 0 {
-			newestTime := findNewestTime(root.ID)
-			if now.Sub(newestTime) <= opts.PruneOlderThan {
-				continue // This chain is not old enough, skip to the next.
+				if children, ok := childrenMap[currentID]; ok {
+					queue = append(queue, children...)
+				}
 			}
 		}
 
-		// If we are here, the chain is eligible for pruning (either no age limit, or it's old enough).
-		chainsToPrune = append(chainsToPrune, root)
-		numChains--
+		// Any snapshot not in validIDs is part of a broken chain.
+		for id := range allSnapshotIDs {
+			if _, isValid := validIDs[id]; !isValid {
+				allIDsToPruneSet[id] = struct{}{}
+			}
+		}
 	}
 
-	// 4. Collect all snapshot IDs within the chains to be pruned
-	var allIDsToPrune []string
+	// Filter out roots that are part of broken chains.
+	var validFullSnapshotRoots []Info
+	for _, root := range fullSnapshotRoots {
+		if _, isBroken := allIDsToPruneSet[root.ID]; !isBroken {
+			validFullSnapshotRoots = append(validFullSnapshotRoots, root)
+		}
+	}
+
+	// Sort the remaining valid full snapshots by creation time, newest first, to evaluate them for pruning.
+	sort.Slice(validFullSnapshotRoots, func(i, j int) bool {
+		return validFullSnapshotRoots[i].CreatedAt.After(validFullSnapshotRoots[j].CreatedAt)
+	})
+
+	var chainsToPrune []Info
+	// Only apply KeepN and PruneOlderThan policies if at least one is active.
+	if opts.KeepN > 0 || opts.PruneOlderThan > 0 {
+		now := m.provider.GetClock().Now()
+		chainAgeCache := make(map[string]time.Time)
+		findNewestTime := func(rootID string) time.Time {
+			if t, ok := chainAgeCache[rootID]; ok {
+				return t
+			}
+			t := findNewestTimeInChain(rootID, infoMap, childrenMap)
+			chainAgeCache[rootID] = t
+			return t
+		}
+
+		for i, root := range validFullSnapshotRoots {
+			// Determine if this chain should be kept based on the policies.
+			keep := false
+
+			// Rule 1: Keep if protected by the KeepN policy.
+			if opts.KeepN > 0 && i < opts.KeepN {
+				keep = true
+			}
+
+			// Rule 2: Keep if not old enough, but only if it's not already kept by KeepN.
+			if !keep && opts.PruneOlderThan > 0 {
+				newestTime := findNewestTime(root.ID)
+				if now.Sub(newestTime) <= opts.PruneOlderThan {
+					keep = true
+				}
+			}
+
+			if !keep {
+				chainsToPrune = append(chainsToPrune, root)
+			}
+		}
+	}
+
+	// 4. Collect all snapshot IDs from the policy-based pruning.
 	for _, root := range chainsToPrune {
 		// Use a queue for a breadth-first traversal to collect all descendants
 		queue := []string{root.ID}
 		for len(queue) > 0 {
 			currentID := queue[0]
 			queue = queue[1:]
-
-			allIDsToPrune = append(allIDsToPrune, currentID)
+			allIDsToPruneSet[currentID] = struct{}{}
 			if children, ok := childrenMap[currentID]; ok {
 				queue = append(queue, children...)
 			}
 		}
+	}
+
+	var allIDsToPrune []string
+	for id := range allIDsToPruneSet {
+		allIDsToPrune = append(allIDsToPrune, id)
 	}
 
 	// 5. Delete the snapshot directories
