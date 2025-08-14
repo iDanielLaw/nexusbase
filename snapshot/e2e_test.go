@@ -510,7 +510,9 @@ func restoreSnapshotChain(t *testing.T, latestSnapshotPath, targetDir string) er
 			if err != nil {
 				return err
 			}
-			if d.IsDir() { return nil }
+			if d.IsDir() {
+				return nil
+			}
 
 			relPath, err := filepath.Rel(currentSnapshotPath, path)
 			if err != nil {
@@ -597,4 +599,100 @@ func restoreSnapshotChain(t *testing.T, latestSnapshotPath, targetDir string) er
 	}
 
 	return nil
+}
+
+// TestSnapshot_E2E_MultiIncrementalAndRestoreChain tests creating a full snapshot,
+// followed by two incremental snapshots, and then restoring the full chain.
+func TestSnapshot_E2E_MultiIncrementalAndRestoreChain(t *testing.T) {
+	// --- 1. Setup ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	restoredDataDir := filepath.Join(baseDir, "data_restored_multi_chain")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// --- 2. Create Full Parent Snapshot (State 1) ---
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_1"), SeqNum: 90}))
+	require.NoError(t, provider.wal.Sync())
+
+	parentTime := mockClock.Now()
+	parentSnapshotID := fmt.Sprintf("%d_full", parentTime.UnixNano())
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, parentSnapshotID)
+
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// --- 3. Create First Incremental Snapshot (State 2) ---
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_2"), SeqNum: 190}))
+	require.NoError(t, provider.wal.Sync())
+
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+
+	// --- 4. Create Second Incremental Snapshot (State 3) ---
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3) // Add to L0, simulating compaction changes
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_3"), SeqNum: 290}))
+	require.NoError(t, provider.wal.Sync())
+
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+
+	// --- 5. Verify Final Incremental Snapshot ---
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+	require.NotEqual(t, parentSnapshotID, latestID)
+
+	// Check manifest
+	finalIncrManifest, _, err := readManifestFromDir(latestPath, newHelperSnapshot())
+	require.NoError(t, err)
+	assert.Equal(t, core.SnapshotTypeIncremental, finalIncrManifest.Type)
+	assert.NotEqual(t, parentSnapshotID, finalIncrManifest.ParentID) // Parent should be the first incremental
+	assert.Equal(t, uint64(300), finalIncrManifest.SequenceNumber)
+
+	// Check files: should contain ONLY the newest SSTable (sst3)
+	assert.NoFileExists(t, filepath.Join(latestPath, "sst", "1.sst"))
+	assert.NoFileExists(t, filepath.Join(latestPath, "sst", "2.sst"))
+	assert.FileExists(t, filepath.Join(latestPath, "sst", "3.sst"))
+	// It should contain the complete, current WAL state.
+	assert.FileExists(t, filepath.Join(latestPath, "wal", "00000001.wal"))
+
+	// --- 6. Restore from the full chain ---
+	err = restoreSnapshotChain(t, latestPath, restoredDataDir)
+	require.NoError(t, err)
+
+	// --- 7. Verify Restored State ---
+	restoredProvider := newTestE2EProvider(t, restoredDataDir)
+	defer restoredProvider.Close(t)
+
+	// Check levels: sst1 and sst3 should be in L0, sst2 in L1
+	counts, err := restoredProvider.levelsManager.GetLevelTableCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 2, counts[0], "Restored L0 should have 2 tables (sst1, sst3)")
+	assert.Equal(t, 1, counts[1], "Restored L1 should have 1 table (sst2)")
+
+	// Check WAL
+	walOpts := wal.Options{Dir: restoredProvider.walDir}
+	_, recoveredEntries, err := wal.Open(walOpts)
+	require.NoError(t, err)
+	// The WAL is copied entirely from the last snapshot, so it contains all entries.
+	require.Len(t, recoveredEntries, 3, "Should recover 3 entries from the restored WAL")
+	assert.Equal(t, []byte("wal_key_1"), recoveredEntries[0].Key)
+	assert.Equal(t, []byte("wal_key_2"), recoveredEntries[1].Key)
+	assert.Equal(t, []byte("wal_key_3"), recoveredEntries[2].Key)
 }

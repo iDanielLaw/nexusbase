@@ -239,6 +239,46 @@ func (m *manager) ListSnapshots(snapshotsBaseDir string) ([]Info, error) {
 	return infos, nil
 }
 
+// collectAllSSTablesInChain walks the snapshot parent chain starting from a given snapshot path
+// and collects a set of all unique SSTable file names present in the entire chain.
+func (m *manager) collectAllSSTablesInChain(snapshotBaseDir, startSnapshotPath string) (map[string]struct{}, error) {
+	allSSTables := make(map[string]struct{})
+	currentSnapshotPath := startSnapshotPath
+
+	for currentSnapshotPath != "" {
+		manifest, _, err := readManifestFromDir(currentSnapshotPath, m.wrapper)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read manifest from %s during chain walk: %w", currentSnapshotPath, err)
+		}
+
+		for _, level := range manifest.Levels {
+			for _, table := range level.Tables {
+				// The key is the relative path, e.g., "sst/1.sst"
+				allSSTables[table.FileName] = struct{}{}
+			}
+		}
+
+		if manifest.Type == core.SnapshotTypeFull {
+			break // Reached the root of the chain
+		}
+
+		if manifest.ParentID == "" {
+			// This should ideally not happen for a valid incremental snapshot.
+			m.provider.GetLogger().Warn("Incremental snapshot found without a ParentID during chain walk, stopping walk.", "snapshot_path", currentSnapshotPath)
+			break
+		}
+
+		// Move to the parent
+		parentPath := filepath.Join(snapshotBaseDir, manifest.ParentID)
+		if _, statErr := m.wrapper.Stat(parentPath); os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("parent snapshot %s not found for %s", manifest.ParentID, filepath.Base(currentSnapshotPath))
+		}
+		currentSnapshotPath = parentPath
+	}
+
+	return allSSTables, nil
+}
+
 func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string) (err error) {
 	p := m.provider
 	if err := p.CheckStarted(); err != nil {
@@ -357,12 +397,10 @@ func (c *incrementalCreator) flushMemtables() error {
 // buildAndCopyNewFiles identifies new SSTables, copies them, and builds the new manifest.
 func (c *incrementalCreator) buildAndCopyNewFiles() error {
 	p := c.m.provider
-	// Build set of parent SSTable file paths for quick lookup
-	parentSSTables := make(map[string]struct{})
-	for _, level := range c.parentManifest.Levels {
-		for _, table := range level.Tables {
-			parentSSTables[table.FileName] = struct{}{}
-		}
+	// Build set of parent SSTable file paths for quick lookup by walking the entire chain.
+	parentSSTables, err := c.m.collectAllSSTablesInChain(c.snapshotsBaseDir, c.parentPath)
+	if err != nil {
+		return fmt.Errorf("failed to collect SSTables from parent chain: %w", err)
 	}
 
 	// Get current SSTables

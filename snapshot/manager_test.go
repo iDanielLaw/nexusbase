@@ -2627,3 +2627,90 @@ func TestFindLatestSnapshot(t *testing.T) {
 		assert.Equal(t, filepath.Join(snapshotsBaseDir, "2000"), latestPath)
 	})
 }
+
+func TestManager_collectAllSSTablesInChain(t *testing.T) {
+	// Helper to create a snapshot directory with a manifest
+	createTestSnapshotDir := func(t *testing.T, baseDir, id string, manifest *core.SnapshotManifest) {
+		t.Helper()
+		snapshotDir := filepath.Join(baseDir, id)
+		require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+		manifestFileName, err := writeTestManifest(snapshotDir, manifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+	}
+
+	t.Run("Success_Full_Plus_Two_Incrementals", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, tempDir)
+		manager := NewManager(provider).(*manager)
+
+		// Create a chain: full -> incr1 -> incr2
+		fullID := "1_full"
+		incr1ID := "2_incr"
+		incr2ID := "3_incr"
+
+		fullManifest := &core.SnapshotManifest{
+			Type:   core.SnapshotTypeFull,
+			Levels: []core.SnapshotLevelManifest{{Tables: []core.SSTableMetadata{{FileName: "sst/1.sst"}}}},
+		}
+		createTestSnapshotDir(t, snapshotsBaseDir, fullID, fullManifest)
+
+		incr1Manifest := &core.SnapshotManifest{
+			Type:     core.SnapshotTypeIncremental,
+			ParentID: fullID,
+			Levels:   []core.SnapshotLevelManifest{{Tables: []core.SSTableMetadata{{FileName: "sst/2.sst"}}}},
+		}
+		createTestSnapshotDir(t, snapshotsBaseDir, incr1ID, incr1Manifest)
+
+		incr2Manifest := &core.SnapshotManifest{
+			Type:     core.SnapshotTypeIncremental,
+			ParentID: incr1ID,
+			Levels:   []core.SnapshotLevelManifest{{Tables: []core.SSTableMetadata{{FileName: "sst/3.sst"}}}},
+		}
+		createTestSnapshotDir(t, snapshotsBaseDir, incr2ID, incr2Manifest)
+
+		// 2. Execution
+		startPath := filepath.Join(snapshotsBaseDir, incr2ID)
+		collectedTables, err := manager.collectAllSSTablesInChain(snapshotsBaseDir, startPath)
+
+		// 3. Verification
+		require.NoError(t, err)
+		expected := map[string]struct{}{
+			"sst/1.sst": {},
+			"sst/2.sst": {},
+			"sst/3.sst": {},
+		}
+		assert.Equal(t, expected, collectedTables)
+	})
+
+	t.Run("Error_ParentNotFound", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+		provider := newMockEngineProvider(t, tempDir)
+		manager := NewManager(provider).(*manager)
+
+		// Create an incremental snapshot with a non-existent parent
+		incrID := "1_incr"
+		incrManifest := &core.SnapshotManifest{
+			Type:     core.SnapshotTypeIncremental,
+			ParentID: "non_existent_parent",
+			Levels:   []core.SnapshotLevelManifest{{Tables: []core.SSTableMetadata{{FileName: "sst/1.sst"}}}},
+		}
+		createTestSnapshotDir(t, snapshotsBaseDir, incrID, incrManifest)
+
+		// 2. Execution
+		startPath := filepath.Join(snapshotsBaseDir, incrID)
+		_, err := manager.collectAllSSTablesInChain(snapshotsBaseDir, startPath)
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent snapshot non_existent_parent not found")
+	})
+}
