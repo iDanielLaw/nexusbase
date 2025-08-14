@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,6 +101,19 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	tracer := noop.NewTracerProvider().Tracer("test")
 
+	// This simulates the engine's startup logic after a restore. The restore process
+	// places the tag index snapshot into `dataDir/index`. The TagIndexManager, however,
+	// expects its data to be in `dataDir/index_sst`. We must move the data to the
+	// correct location before the TagIndexManager is initialized and tries to load it.
+	indexSnapshotPath := filepath.Join(dataDir, indexer.IndexDirName)
+	indexDataPath := filepath.Join(dataDir, indexer.IndexSSTDirName)
+	if _, statErr := os.Stat(indexSnapshotPath); statErr == nil {
+		t.Logf("Moving restored tag index data from %s to %s", indexSnapshotPath, indexDataPath)
+		// Clean up any old index data dir first, just in case.
+		require.NoError(t, os.RemoveAll(indexDataPath))
+		require.NoError(t, os.Rename(indexSnapshotPath, indexDataPath))
+	}
+
 	walOpts := wal.Options{
 		Dir:      walDir,
 		SyncMode: wal.SyncDisabled,
@@ -130,6 +142,10 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 	}
 	tim, err := indexer.NewTagIndexManager(opts, deps, logger, tracer)
 	require.NoError(t, err)
+
+	// After moving the files, we need to explicitly load them into the manager.
+	err = tim.LoadFromFile(dataDir)
+	require.NoError(t, err, "Failed to load tag index from its data directory")
 	tim.Start()
 
 	return &testE2EProvider{
@@ -287,7 +303,7 @@ func TestSnapshot_E2E_CreateAndRestore(t *testing.T) {
 	assert.FileExists(t, filepath.Join(restoredDataDir, "sst", "2.sst"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "wal", "00000001.wal"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "wal", "00000002.wal"))
-	assert.FileExists(t, filepath.Join(restoredDataDir, indexer.IndexSSTDirName, indexer.IndexManifestFileName))
+	assert.FileExists(t, filepath.Join(restoredDataDir, indexer.IndexDirName, indexer.IndexManifestFileName))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "deleted_series.json"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "range_tombstones.json"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "string_mapping.log"))
@@ -368,7 +384,7 @@ func TestSnapshot_E2E_RestoreFailure_MissingManifest(t *testing.T) {
 
 	// --- 4. Verify the failure ---
 	require.Error(t, err, "RestoreFromFull should fail when the manifest file is missing")
-	assert.Contains(t, err.Error(), "could not read snapshot manifest", "Error message should indicate the manifest is missing")
+	assert.Contains(t, err.Error(), "failed to read manifest from", "Error message should indicate the manifest is missing")
 	assert.ErrorIs(t, err, os.ErrNotExist, "Underlying error should be os.ErrNotExist")
 
 	// Verify that the target directory was not created or was cleaned up.
@@ -376,13 +392,10 @@ func TestSnapshot_E2E_RestoreFailure_MissingManifest(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "Target data directory should not exist after a failed restore")
 }
 
-// TestSnapshot_E2E_CreateIncrementalAndRestoreChain tests the full lifecycle of creating
+// TestSnapshot_E2E_CreateIncrementalAndRestore tests the full lifecycle of creating
 // a full snapshot, followed by an incremental one, and then verifying that a
-// manual restore of the entire chain results in a correct final state.
-// NOTE: This test includes a helper function to perform a chained restore,
-// as the production `RestoreFromFull` is only designed for self-contained snapshots.
-// This test validates the *correctness of the created snapshot artifacts*.
-func TestSnapshot_E2E_CreateIncrementalAndRestoreChain(t *testing.T) {
+// restore of the incremental snapshot correctly reconstructs the state.
+func TestSnapshot_E2E_CreateIncrementalAndRestore(t *testing.T) {
 	// --- 1. Setup ---
 	baseDir := t.TempDir()
 	originalDataDir := filepath.Join(baseDir, "data_orig")
@@ -442,8 +455,12 @@ func TestSnapshot_E2E_CreateIncrementalAndRestoreChain(t *testing.T) {
 	assert.FileExists(t, filepath.Join(latestPath, "wal", "00000001.wal"))
 
 	// --- 6. Restore from the chain ---
-	err = restoreSnapshotChain(t, latestPath, restoredDataDir)
-	require.NoError(t, err)
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	err = RestoreFromFull(restoreOpts, latestPath)
+	require.NoError(t, err, "RestoreFromFull should succeed on an incremental snapshot")
 
 	// --- 7. Verify Restored State ---
 	restoredProvider := newTestE2EProvider(t, restoredDataDir)
@@ -463,138 +480,402 @@ func TestSnapshot_E2E_CreateIncrementalAndRestoreChain(t *testing.T) {
 	require.Len(t, recoveredEntries, 2, "Should recover 2 entries from the restored WAL")
 }
 
-// restoreSnapshotChain is a test helper that simulates a proper restore from a snapshot chain.
-// It walks the parent chain, copies all necessary files, and creates a new,
-// consolidated 'FULL' manifest representing the final state. This is necessary because
-// the production restore logic is not yet chain-aware, but we need to validate
-// that the artifacts created by CreateIncremental are correct and sufficient.
-func restoreSnapshotChain(t *testing.T, latestSnapshotPath, targetDir string) error {
-	t.Helper()
-	helper := newHelperSnapshot()
-	require.NoError(t, helper.MkdirAll(targetDir, 0755))
+// TestSnapshot_E2E_RestoreFromIncrementalChain tests creating a full snapshot,
+// followed by two incremental snapshots, and then restoring the full chain.
+func TestSnapshot_E2E_RestoreFromIncrementalChain(t *testing.T) {
+	// --- 1. Setup ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	restoredDataDir := filepath.Join(baseDir, "data_restored_multi_chain")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
 
-	// --- Step 1: Collect all unique files and manifests from the chain ---
-	filesToCopy := make(map[string]string) // Map of relative dest path -> absolute source path
-	allSSTables := make(map[uint64]core.SSTableMetadata)
-	allLevels := make(map[int]map[uint64]core.SSTableMetadata) // level -> tableID -> metadata
-	var finalManifest *core.SnapshotManifest
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
 
-	currentSnapshotPath := latestSnapshotPath
-	for currentSnapshotPath != "" {
-		manifest, _, err := readManifestFromDir(currentSnapshotPath, helper)
-		if err != nil {
-			return fmt.Errorf("failed to read manifest from %s: %w", currentSnapshotPath, err)
-		}
+	// --- 2. Create Full Parent Snapshot (State 1) ---
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_1"), SeqNum: 90}))
+	require.NoError(t, provider.wal.Sync())
 
-		// The latest manifest determines the final state (seq num, etc.)
-		if finalManifest == nil {
-			finalManifest = manifest
-		}
+	parentTime := mockClock.Now()
+	parentSnapshotID := fmt.Sprintf("%d_full", parentTime.UnixNano())
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, parentSnapshotID)
 
-		// Collect unique SSTables, walking backwards.
-		for _, level := range manifest.Levels {
-			if _, ok := allLevels[level.LevelNumber]; !ok {
-				allLevels[level.LevelNumber] = make(map[uint64]core.SSTableMetadata)
-			}
-			for _, table := range level.Tables {
-				if _, ok := allSSTables[table.ID]; !ok {
-					allSSTables[table.ID] = table
-					allLevels[level.LevelNumber][table.ID] = table
-				}
-			}
-		}
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
 
-		// Walk the directory and add files to our map if they don't exist yet.
-		// This ensures we get the newest version of each file as we walk backwards.
-		walkErr := filepath.WalkDir(currentSnapshotPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() { return nil }
+	// --- 3. Create First Incremental Snapshot (State 2) ---
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_2"), SeqNum: 190}))
+	require.NoError(t, provider.wal.Sync())
 
-			relPath, err := filepath.Rel(currentSnapshotPath, path)
-			if err != nil {
-				return err
-			}
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
 
-			// Don't copy old manifests or CURRENT files, we'll create a new one.
-			if strings.HasPrefix(filepath.Base(relPath), MANIFEST_FILE_PREFIX) || filepath.Base(relPath) == CURRENT_FILE_NAME {
-				return nil
-			}
+	// --- 4. Create Second Incremental Snapshot (State 3) ---
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3) // Add to L0, simulating compaction changes
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_3"), SeqNum: 290}))
+	require.NoError(t, provider.wal.Sync())
 
-			if _, exists := filesToCopy[relPath]; !exists {
-				filesToCopy[relPath] = path
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return fmt.Errorf("failed to walk dir %s: %w", currentSnapshotPath, walkErr)
-		}
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
 
-		// Move to the parent, ensuring the path is constructed correctly
-		currentSnapshotPath = "" // Assume we reached the end
-		if manifest.ParentID != "" {
-			parentPath := filepath.Join(filepath.Dir(latestSnapshotPath), manifest.ParentID)
-			if _, statErr := os.Stat(parentPath); statErr == nil {
-				currentSnapshotPath = parentPath
-			}
-		}
+	// --- 5. Verify Final Incremental Snapshot ---
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+	require.NotEqual(t, parentSnapshotID, latestID)
+
+	// Check manifest
+	finalIncrManifest, _, err := readManifestFromDir(latestPath, newHelperSnapshot())
+	require.NoError(t, err)
+	assert.Equal(t, core.SnapshotTypeIncremental, finalIncrManifest.Type)
+	assert.NotEqual(t, parentSnapshotID, finalIncrManifest.ParentID) // Parent should be the first incremental
+	assert.Equal(t, uint64(300), finalIncrManifest.SequenceNumber)
+
+	// Check files: should contain ONLY the newest SSTable (sst3)
+	assert.NoFileExists(t, filepath.Join(latestPath, "sst", "1.sst"))
+	assert.NoFileExists(t, filepath.Join(latestPath, "sst", "2.sst"))
+	assert.FileExists(t, filepath.Join(latestPath, "sst", "3.sst"))
+	// It should contain the complete, current WAL state.
+	assert.FileExists(t, filepath.Join(latestPath, "wal", "00000001.wal"))
+
+	// --- 6. Restore from the full chain ---
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	err = RestoreFromFull(restoreOpts, latestPath)
+	require.NoError(t, err, "RestoreFromFull should succeed on a multi-level incremental chain")
 
-	// --- Step 2: Copy all the collected files to the target directory ---
-	for relPath, srcPath := range filesToCopy {
-		destPath := filepath.Join(targetDir, relPath)
-		if err := helper.CopyFile(srcPath, destPath); err != nil {
-			return fmt.Errorf("failed to copy chained file from %s to %s: %w", srcPath, destPath, err)
-		}
+	// --- 7. Verify Restored State ---
+	restoredProvider := newTestE2EProvider(t, restoredDataDir)
+	defer restoredProvider.Close(t)
+
+	// Check levels: sst1 and sst3 should be in L0, sst2 in L1
+	counts, err := restoredProvider.levelsManager.GetLevelTableCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 2, counts[0], "Restored L0 should have 2 tables (sst1, sst3)")
+	assert.Equal(t, 1, counts[1], "Restored L1 should have 1 table (sst2)")
+
+	// Check WAL
+	walOpts := wal.Options{Dir: restoredProvider.walDir}
+	_, recoveredEntries, err := wal.Open(walOpts)
+	require.NoError(t, err)
+	// The WAL is copied entirely from the last snapshot, so it contains all entries.
+	require.Len(t, recoveredEntries, 3, "Should recover 3 entries from the restored WAL")
+	assert.Equal(t, []byte("wal_key_1"), recoveredEntries[0].Key)
+	assert.Equal(t, []byte("wal_key_2"), recoveredEntries[1].Key)
+	assert.Equal(t, []byte("wal_key_3"), recoveredEntries[2].Key)
+}
+
+func TestSnapshot_E2E_RestoreFromLatest_WithChain(t *testing.T) {
+	// --- 1. Setup: Create a snapshot chain (Full -> Incremental) ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	restoredDataDir := filepath.Join(baseDir, "data_restored_latest")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// Create Full Snapshot
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_1"), SeqNum: 90}))
+	require.NoError(t, provider.wal.Sync())
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// Create Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_2"), SeqNum: 190}))
+	require.NoError(t, provider.wal.Sync())
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+
+	// --- 2. Restore from the latest snapshot in the base directory ---
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	// This is the key part of the test: call RestoreFromLatest on the base directory
+	err = RestoreFromLatest(restoreOpts, snapshotsBaseDir)
+	require.NoError(t, err, "RestoreFromLatest should succeed with a snapshot chain")
 
-	// --- Step 3: Create and write the new consolidated manifest ---
-	if finalManifest == nil {
-		return fmt.Errorf("no manifest found in snapshot chain")
+	// --- 3. Verify Restored State ---
+	restoredProvider := newTestE2EProvider(t, restoredDataDir)
+	defer restoredProvider.Close(t)
+
+	// Check levels: sst1 should be in L0, sst2 in L1
+	counts, err := restoredProvider.levelsManager.GetLevelTableCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts[0], "Restored L0 should have 1 table (sst1)")
+	assert.Equal(t, 1, counts[1], "Restored L1 should have 1 table (sst2)")
+
+	// Check WAL: should contain entries from both snapshots
+	_, recoveredEntries, err := wal.Open(wal.Options{Dir: restoredProvider.walDir})
+	require.NoError(t, err)
+	require.Len(t, recoveredEntries, 2, "Should recover 2 entries from the restored WAL")
+}
+
+func TestSnapshot_E2E_RestoreFromBrokenChain(t *testing.T) {
+	// --- 1. Setup: Create a valid snapshot chain (Full -> Incr1 -> Incr2) ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	restoredDataDir := filepath.Join(baseDir, "data_restored_broken")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// Create Full Snapshot
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// Create First Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	middleSnapshotID, middleSnapshotPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// Create Second Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// --- 2. Break the chain by deleting the middle snapshot ---
+	t.Logf("Simulating broken chain by deleting middle snapshot: %s", middleSnapshotPath)
+	require.NoError(t, os.RemoveAll(middleSnapshotPath))
+
+	// --- 3. Attempt to restore from the end of the broken chain ---
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	err = RestoreFromFull(restoreOpts, latestPath)
 
-	consolidatedManifest := &core.SnapshotManifest{
-		Type:                core.SnapshotTypeFull, // The restored state is a full snapshot
-		CreatedAt:           finalManifest.CreatedAt,
-		SequenceNumber:      finalManifest.SequenceNumber,
-		ParentID:            "", // No parent
-		LastWALSegmentIndex: finalManifest.LastWALSegmentIndex,
-		WALFile:             finalManifest.WALFile,
-		DeletedSeriesFile:   finalManifest.DeletedSeriesFile,
-		RangeTombstonesFile: finalManifest.RangeTombstonesFile,
-		StringMappingFile:   finalManifest.StringMappingFile,
-		SeriesMappingFile:   finalManifest.SeriesMappingFile,
-		SSTableCompression:  finalManifest.SSTableCompression,
-		Levels:              make([]core.SnapshotLevelManifest, 0),
+	// --- 4. Verify the failure ---
+	require.Error(t, err, "RestoreFromFull should fail when the chain is broken")
+	expectedErrStr := fmt.Sprintf("parent snapshot %s not found for %s", middleSnapshotID, latestID)
+	assert.Contains(t, err.Error(), expectedErrStr, "Error message should indicate the missing parent")
+
+	// Verify that the target directory was not created or was cleaned up.
+	_, statErr := os.Stat(restoredDataDir)
+	assert.True(t, os.IsNotExist(statErr), "Target data directory should not exist after a failed restore")
+}
+
+func TestSnapshot_E2E_ValidateChain(t *testing.T) {
+	// --- 1. Setup: Create a valid snapshot chain (Full -> Incr1 -> Incr2) ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// Create Full Snapshot
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// Create First Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	middleSnapshotID, middleSnapshotPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// Create Second Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// --- 2. Validate the complete chain ---
+	t.Log("Validating complete chain...")
+	err = manager.Validate(latestPath)
+	require.NoError(t, err, "Validation of a complete chain should succeed")
+
+	// --- 3. Break the chain ---
+	t.Logf("Breaking chain by deleting middle snapshot: %s", middleSnapshotPath)
+	require.NoError(t, os.RemoveAll(middleSnapshotPath))
+
+	// --- 4. Validate the broken chain ---
+	t.Log("Validating broken chain...")
+	err = manager.Validate(latestPath)
+	require.Error(t, err, "Validation of a broken chain should fail")
+	expectedErrStr := fmt.Sprintf("parent snapshot %s for %s not found", middleSnapshotID, latestID)
+	assert.Contains(t, err.Error(), expectedErrStr, "Error message should indicate the missing parent")
+
+	// --- 5. Validate a non-existent snapshot ---
+	err = manager.Validate(filepath.Join(snapshotsBaseDir, "non_existent_snapshot"))
+	require.Error(t, err, "Validation of a non-existent snapshot should fail")
+	assert.Contains(t, err.Error(), "does not exist")
+}
+
+func TestSnapshot_E2E_Prune(t *testing.T) {
+	// --- 1. Setup: Create multiple snapshot chains ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// --- Chain 1 (Oldest, to be pruned) ---
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	chain1_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain1_full_dir))
+
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	require.NoError(t, manager.CreateIncremental(context.Background(), snapshotsBaseDir))
+
+	// --- Chain 2 (Newest, to be kept) ---
+	mockClock.Advance(time.Hour)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3)
+	chain2_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain2_full_dir))
+
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 400
+	sst4 := createDummySSTableForE2E(t, provider.sstDir, 4, 310)
+	provider.levelsManager.AddTableToLevel(1, sst4)
+	require.NoError(t, manager.CreateIncremental(context.Background(), snapshotsBaseDir))
+
+	// --- 2. List before pruning ---
+	infosBefore, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosBefore, 4, "Should have 4 snapshots before pruning")
+
+	// --- 3. Prune, keeping 1 latest full chain ---
+	deletedIDs, err := manager.Prune(context.Background(), snapshotsBaseDir, PruneOptions{KeepN: 1})
+	require.NoError(t, err, "Prune operation should succeed")
+
+	// --- 4. Verify results ---
+	assert.Len(t, deletedIDs, 2, "Should have deleted 2 snapshots from the oldest chain")
+
+	infosAfter, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosAfter, 2, "Should have 2 snapshots remaining after pruning")
+
+	// Verify that the remaining snapshots are from the newest chain
+	var remainingIDs []string
+	for _, info := range infosAfter {
+		remainingIDs = append(remainingIDs, info.ID)
 	}
+	assert.Contains(t, remainingIDs, filepath.Base(chain2_full_dir))
+	assert.NotContains(t, remainingIDs, filepath.Base(chain1_full_dir))
+}
 
-	// Reconstruct the levels from the collected tables
-	var levelNumbers []int
-	for levelNum := range allLevels {
-		levelNumbers = append(levelNumbers, levelNum)
-	}
-	sort.Ints(levelNumbers)
+func TestSnapshot_E2E_Prune_ByAge(t *testing.T) {
+	// --- 1. Setup: Create multiple snapshot chains with different ages ---
+	baseDir := t.TempDir()
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
 
-	for _, levelNum := range levelNumbers {
-		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0)}
-		for _, table := range allLevels[levelNum] {
-			levelManifest.Tables = append(levelManifest.Tables, table)
-		}
-		// Sort tables within the level by ID for deterministic output
-		sort.Slice(levelManifest.Tables, func(i, j int) bool {
-			return levelManifest.Tables[i].ID < levelManifest.Tables[j].ID
-		})
-		consolidatedManifest.Levels = append(consolidatedManifest.Levels, levelManifest)
-	}
+	provider := newTestE2EProvider(t, baseDir) // Use baseDir for dummy data
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
 
-	// Use the manager's internal function to write the manifest and CURRENT file
-	mockLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	m := NewManager(&mockProviderForTest{logger: mockLogger})
-	_, err := m.(*manager).writeManifestAndCurrent(targetDir, consolidatedManifest) // Use the concrete type to access the unexported method
-	if err != nil {
-		return fmt.Errorf("failed to write consolidated manifest: %w", err)
-	}
+	// --- Chain 1 (Old, to be pruned by age) ---
+	// Set clock to 3 days ago
+	mockClock.SetTime(time.Now().Add(-72 * time.Hour))
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	chain1_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain1_full_dir))
 
-	return nil
+	// --- Chain 2 (New, to be kept) ---
+	// Set clock to now
+	mockClock.SetTime(time.Now())
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	chain2_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain2_full_dir))
+
+	// --- 2. List before pruning ---
+	infosBefore, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosBefore, 2, "Should have 2 snapshots before pruning")
+
+	// --- 3. Prune, keeping chains newer than 48 hours ---
+	// This should delete chain 1 but keep chain 2.
+	deletedIDs, err := manager.Prune(context.Background(), snapshotsBaseDir, PruneOptions{PruneOlderThan: 48 * time.Hour})
+	require.NoError(t, err, "Prune operation should succeed")
+
+	// --- 4. Verify results ---
+	assert.Len(t, deletedIDs, 1, "Should have deleted 1 snapshot from the oldest chain")
+	assert.Equal(t, filepath.Base(chain1_full_dir), deletedIDs[0])
+
+	infosAfter, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosAfter, 1, "Should have 1 snapshot remaining after pruning")
+	assert.Equal(t, filepath.Base(chain2_full_dir), infosAfter[0].ID)
 }

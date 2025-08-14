@@ -11,10 +11,10 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
-	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/internal"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -231,12 +231,92 @@ func (m *manager) ListSnapshots(snapshotsBaseDir string) ([]Info, error) {
 		})
 	}
 
+	// Step 2: Calculate cumulative chain sizes for each snapshot using memoization.
+	chainSizeCache := make(map[string]int64)
+	var calculateChainSize func(id string) int64
+
+	// Create a quick lookup map for infos by ID.
+	infoMap := make(map[string]Info, len(infos))
+	for _, info := range infos {
+		infoMap[info.ID] = info
+	}
+
+	calculateChainSize = func(id string) int64 {
+		// Return from cache if already computed.
+		if size, ok := chainSizeCache[id]; ok {
+			return size
+		}
+
+		info, ok := infoMap[id]
+		if !ok {
+			// This can happen if a parent is mentioned but its directory was deleted.
+			// We treat its size as 0 for the calculation and don't cache it.
+			m.provider.GetLogger().Warn("Parent snapshot mentioned but not found during size calculation, treating its size as 0.", "missing_parent_id", id)
+			return 0
+		}
+
+		// Recursive step: The total size is this snapshot's individual size plus its parent's total chain size.
+		var parentChainSize int64
+		if info.ParentID != "" {
+			parentChainSize = calculateChainSize(info.ParentID)
+		}
+
+		totalSize := info.Size + parentChainSize
+		chainSizeCache[id] = totalSize
+		return totalSize
+	}
+
+	// Step 3: Populate the TotalChainSize for each info object.
+	for i := range infos {
+		infos[i].TotalChainSize = calculateChainSize(infos[i].ID)
+	}
+
 	// Sort by CreatedAt time, which is also implicitly sorting by ID/name.
 	sort.Slice(infos, func(i, j int) bool {
 		return infos[i].CreatedAt.Before(infos[j].CreatedAt)
 	})
 
 	return infos, nil
+}
+
+// collectAllSSTablesInChain walks the snapshot parent chain starting from a given snapshot path
+// and collects a set of all unique SSTable file names present in the entire chain.
+func (m *manager) collectAllSSTablesInChain(snapshotBaseDir, startSnapshotPath string) (map[string]struct{}, error) {
+	allSSTables := make(map[string]struct{})
+	currentSnapshotPath := startSnapshotPath
+
+	for currentSnapshotPath != "" {
+		manifest, _, err := readManifestFromDir(currentSnapshotPath, m.wrapper)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read manifest from %s during chain walk: %w", currentSnapshotPath, err)
+		}
+
+		for _, level := range manifest.Levels {
+			for _, table := range level.Tables {
+				// The key is the relative path, e.g., "sst/1.sst"
+				allSSTables[table.FileName] = struct{}{}
+			}
+		}
+
+		if manifest.Type == core.SnapshotTypeFull {
+			break // Reached the root of the chain
+		}
+
+		if manifest.ParentID == "" {
+			// This should ideally not happen for a valid incremental snapshot.
+			m.provider.GetLogger().Warn("Incremental snapshot found without a ParentID during chain walk, stopping walk.", "snapshot_path", currentSnapshotPath)
+			break
+		}
+
+		// Move to the parent
+		parentPath := filepath.Join(snapshotBaseDir, manifest.ParentID)
+		if _, statErr := m.wrapper.Stat(parentPath); os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("parent snapshot %s not found for %s", manifest.ParentID, filepath.Base(currentSnapshotPath))
+		}
+		currentSnapshotPath = parentPath
+	}
+
+	return allSSTables, nil
 }
 
 func (m *manager) CreateIncremental(ctx context.Context, snapshotsBaseDir string) (err error) {
@@ -357,12 +437,10 @@ func (c *incrementalCreator) flushMemtables() error {
 // buildAndCopyNewFiles identifies new SSTables, copies them, and builds the new manifest.
 func (c *incrementalCreator) buildAndCopyNewFiles() error {
 	p := c.m.provider
-	// Build set of parent SSTable file paths for quick lookup
-	parentSSTables := make(map[string]struct{})
-	for _, level := range c.parentManifest.Levels {
-		for _, table := range level.Tables {
-			parentSSTables[table.FileName] = struct{}{}
-		}
+	// Build set of parent SSTable file paths for quick lookup by walking the entire chain.
+	parentSSTables, err := c.m.collectAllSSTablesInChain(c.snapshotsBaseDir, c.parentPath)
+	if err != nil {
+		return fmt.Errorf("failed to collect SSTables from parent chain: %w", err)
 	}
 
 	// Get current SSTables
@@ -528,6 +606,248 @@ func (c *auxiliaryCopier) copyWAL() error {
 	return nil
 }
 
+// Validate checks the integrity of a given snapshot and its entire parent chain.
+// It walks the chain backwards to the full snapshot, ensuring all links exist
+// and their manifests are readable. It does not check the integrity of the data files themselves.
+func (m *manager) Validate(snapshotDir string) error {
+	p := m.provider
+	_, span := p.GetTracer().Start(context.Background(), "SnapshotManager.Validate")
+	defer span.End()
+	span.SetAttributes(attribute.String("snapshot.dir", snapshotDir))
+
+	p.GetLogger().Info("Starting validation of snapshot chain.", "start_snapshot", snapshotDir)
+
+	snapshotBaseDir := filepath.Dir(snapshotDir)
+	currentSnapshotPath := snapshotDir
+
+	if _, statErr := m.wrapper.Stat(currentSnapshotPath); os.IsNotExist(statErr) {
+		return fmt.Errorf("snapshot directory %s does not exist", currentSnapshotPath)
+	}
+
+	for {
+		manifest, _, err := readManifestFromDir(currentSnapshotPath, m.wrapper)
+		if err != nil {
+			return fmt.Errorf("validation failed: could not read manifest from %s: %w", currentSnapshotPath, err)
+		}
+		p.GetLogger().Debug("Validated manifest.", "snapshot_id", filepath.Base(currentSnapshotPath))
+
+		if manifest.Type == core.SnapshotTypeFull {
+			p.GetLogger().Info("Validation successful: reached full snapshot at the root of the chain.", "full_snapshot", currentSnapshotPath)
+			return nil // Reached the root of the chain, validation successful.
+		}
+
+		if manifest.ParentID == "" {
+			err := fmt.Errorf("validation failed: incremental snapshot %s is missing a ParentID", filepath.Base(currentSnapshotPath))
+			p.GetLogger().Error(err.Error())
+			return err
+		}
+
+		// Move to the parent
+		parentPath := filepath.Join(snapshotBaseDir, manifest.ParentID)
+		if _, statErr := m.wrapper.Stat(parentPath); os.IsNotExist(statErr) {
+			return fmt.Errorf("validation failed: parent snapshot %s for %s not found", manifest.ParentID, filepath.Base(currentSnapshotPath))
+		}
+		currentSnapshotPath = parentPath
+	}
+}
+
+// Prune deletes old snapshots based on the provided policy.
+// It returns a list of the snapshot IDs that were deleted.
+func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts PruneOptions) (deletedIDs []string, err error) {
+	p := m.provider
+	_, span := p.GetTracer().Start(ctx, "SnapshotManager.Prune")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("snapshot.base_dir", snapshotsBaseDir),
+		attribute.Int("snapshot.prune.keep_n", opts.KeepN),
+		attribute.Bool("snapshot.prune.prune_broken", opts.PruneBroken),
+	)
+
+	// 1. List all snapshots
+	infos, err := m.ListSnapshots(snapshotsBaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list snapshots for pruning: %w", err)
+	}
+
+	if len(infos) == 0 {
+		p.GetLogger().Info("Pruning skipped: no snapshots found.")
+		return []string{}, nil
+	}
+
+	// 2. Build data structures for easy traversal
+	infoMap := make(map[string]Info, len(infos))
+	allSnapshotIDs := make(map[string]struct{}, len(infos))
+	childrenMap := make(map[string][]string) // parentID -> []childID
+	var fullSnapshotRoots []Info
+
+	for _, info := range infos {
+		infoMap[info.ID] = info
+		if info.Type == core.SnapshotTypeFull {
+			fullSnapshotRoots = append(fullSnapshotRoots, info)
+		}
+		allSnapshotIDs[info.ID] = struct{}{}
+		if info.ParentID != "" {
+			childrenMap[info.ParentID] = append(childrenMap[info.ParentID], info.ID)
+		}
+	}
+
+	// 3. Identify chains to prune based on policies
+	if opts.KeepN < 0 {
+		return nil, fmt.Errorf("PruneOptions.KeepN cannot be negative")
+	}
+	if opts.KeepN <= 0 && opts.PruneOlderThan <= 0 && !opts.PruneBroken {
+		p.GetLogger().Info("Pruning skipped: no policies defined (KeepN and PruneOlderThan are not set).")
+		return []string{}, nil
+	}
+
+	allIDsToPruneSet := make(map[string]struct{})
+
+	// Policy: Prune broken chains first, if requested.
+	if opts.PruneBroken {
+		validIDs := make(map[string]struct{})
+		// Traverse from all full snapshots to find all validly chained snapshots.
+		for _, root := range fullSnapshotRoots {
+			queue := []string{root.ID}
+			for len(queue) > 0 {
+				currentID := queue[0]
+				queue = queue[1:]
+
+				if _, visited := validIDs[currentID]; visited {
+					continue // Already processed this part of a (potentially merged) chain.
+				}
+				validIDs[currentID] = struct{}{}
+
+				if children, ok := childrenMap[currentID]; ok {
+					queue = append(queue, children...)
+				}
+			}
+		}
+
+		// Any snapshot not in validIDs is part of a broken chain.
+		for id := range allSnapshotIDs {
+			if _, isValid := validIDs[id]; !isValid {
+				allIDsToPruneSet[id] = struct{}{}
+			}
+		}
+	}
+
+	// Filter out roots that are part of broken chains.
+	var validFullSnapshotRoots []Info
+	for _, root := range fullSnapshotRoots {
+		if _, isBroken := allIDsToPruneSet[root.ID]; !isBroken {
+			validFullSnapshotRoots = append(validFullSnapshotRoots, root)
+		}
+	}
+
+	// Sort the remaining valid full snapshots by creation time, newest first, to evaluate them for pruning.
+	sort.Slice(validFullSnapshotRoots, func(i, j int) bool {
+		return validFullSnapshotRoots[i].CreatedAt.After(validFullSnapshotRoots[j].CreatedAt)
+	})
+
+	var chainsToPrune []Info
+	// Only apply KeepN and PruneOlderThan policies if at least one is active.
+	if opts.KeepN > 0 || opts.PruneOlderThan > 0 {
+		now := m.provider.GetClock().Now()
+		chainAgeCache := make(map[string]time.Time)
+		findNewestTime := func(rootID string) time.Time {
+			if t, ok := chainAgeCache[rootID]; ok {
+				return t
+			}
+			t := findNewestTimeInChain(rootID, infoMap, childrenMap)
+			chainAgeCache[rootID] = t
+			return t
+		}
+
+		for i, root := range validFullSnapshotRoots {
+			// Determine if this chain should be kept based on the policies.
+			keep := false
+
+			// Rule 1: Keep if protected by the KeepN policy.
+			if opts.KeepN > 0 && i < opts.KeepN {
+				keep = true
+			}
+
+			// Rule 2: Keep if not old enough, but only if it's not already kept by KeepN.
+			if !keep && opts.PruneOlderThan > 0 {
+				newestTime := findNewestTime(root.ID)
+				if now.Sub(newestTime) <= opts.PruneOlderThan {
+					keep = true
+				}
+			}
+
+			if !keep {
+				chainsToPrune = append(chainsToPrune, root)
+			}
+		}
+	}
+
+	// 4. Collect all snapshot IDs from the policy-based pruning.
+	for _, root := range chainsToPrune {
+		// Use a queue for a breadth-first traversal to collect all descendants
+		queue := []string{root.ID}
+		for len(queue) > 0 {
+			currentID := queue[0]
+			queue = queue[1:]
+			allIDsToPruneSet[currentID] = struct{}{}
+			if children, ok := childrenMap[currentID]; ok {
+				queue = append(queue, children...)
+			}
+		}
+	}
+
+	var allIDsToPrune []string
+	for id := range allIDsToPruneSet {
+		allIDsToPrune = append(allIDsToPrune, id)
+	}
+
+	// 5. Delete the snapshot directories
+	var firstErr error
+	for _, id := range allIDsToPrune {
+		snapshotDir := filepath.Join(snapshotsBaseDir, id)
+		p.GetLogger().Info("Pruning snapshot directory.", "id", id, "path", snapshotDir)
+		if err := m.wrapper.RemoveAll(snapshotDir); err != nil {
+			// Log the error but continue trying to delete others.
+			// Return the first error encountered.
+			p.GetLogger().Error("Failed to prune snapshot directory.", "id", id, "path", snapshotDir, "error", err)
+			if firstErr == nil { // Store only the first error
+				firstErr = fmt.Errorf("failed to remove snapshot directory %s: %w", snapshotDir, err)
+			}
+		} else {
+			deletedIDs = append(deletedIDs, id)
+		}
+	}
+
+	return deletedIDs, firstErr
+}
+
+// findNewestTimeInChain finds the CreatedAt timestamp of the newest snapshot in a chain,
+// starting from a given root snapshot ID.
+func findNewestTimeInChain(rootID string, infoMap map[string]Info, childrenMap map[string][]string) time.Time {
+	rootInfo, ok := infoMap[rootID]
+	if !ok {
+		return time.Time{} // Should not happen if called from Prune
+	}
+	newestTime := rootInfo.CreatedAt
+
+	queue := []string{rootID}
+	visited := make(map[string]struct{})
+	visited[rootID] = struct{}{}
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		if info, ok := infoMap[currentID]; ok && info.CreatedAt.After(newestTime) {
+			newestTime = info.CreatedAt
+		}
+
+		if children, ok := childrenMap[currentID]; ok {
+			queue = append(queue, children...)
+		}
+	}
+	return newestTime
+}
+
 // writeManifestAndCurrent finalizes a snapshot by writing the manifest and CURRENT file.
 func (m *manager) writeManifestAndCurrent(snapshotDir string, manifest *core.SnapshotManifest) (string, error) {
 	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, manifest.CreatedAt.UnixNano())
@@ -581,8 +901,10 @@ func RestoreFromFull(opts RestoreOptions, snapshotDir string) error {
 
 // run orchestrates the entire restore process.
 func (r *restorer) run() (err error) {
-	if err := r.validateAndPrepare(); err != nil {
-		return err
+	r.logger.Info("Starting restore from snapshot.", "snapshot_dir", r.snapshotDir, "target_data_dir", r.opts.DataDir)
+
+	if _, err := r.wrapper.Stat(r.snapshotDir); os.IsNotExist(err) {
+		return fmt.Errorf("snapshot directory %s does not exist", r.snapshotDir)
 	}
 
 	if err := r.setupTempDir(); err != nil {
@@ -591,7 +913,7 @@ func (r *restorer) run() (err error) {
 	// Ensure the temporary directory is cleaned up if anything goes wrong after its creation.
 	defer r.cleanupTempDir()
 
-	if err := r.copyAllData(); err != nil {
+	if err := r.restoreChainToTempDir(); err != nil {
 		return err
 	}
 
@@ -600,24 +922,6 @@ func (r *restorer) run() (err error) {
 	}
 
 	r.logger.Info("Snapshot restoration complete. Data directory replaced.", "data_dir", r.opts.DataDir)
-	return nil
-}
-
-// validateAndPrepare performs initial safety checks and reads the snapshot manifest.
-func (r *restorer) validateAndPrepare() error {
-	r.logger.Info("Starting restore from snapshot.", "snapshot_dir", r.snapshotDir, "target_data_dir", r.opts.DataDir)
-
-	if _, err := r.wrapper.Stat(r.snapshotDir); os.IsNotExist(err) {
-		return fmt.Errorf("snapshot directory %s does not exist", r.snapshotDir)
-	}
-
-	manifest, manifestFileName, err := readManifestFromDir(r.snapshotDir, r.wrapper)
-	if err != nil {
-		return fmt.Errorf("could not read snapshot manifest: %w", err)
-	}
-	r.manifest = manifest
-	r.manifestFile = manifestFileName
-	r.logger.Info("Snapshot manifest loaded.", "sequence_number", r.manifest.SequenceNumber)
 	return nil
 }
 
@@ -634,125 +938,173 @@ func (r *restorer) setupTempDir() error {
 
 // cleanupTempDir removes the temporary directory. It's safe to call even if the directory doesn't exist.
 func (r *restorer) cleanupTempDir() {
-	if r.tempRestoreDir == "" {
-		return
-	}
-	if _, statErr := r.wrapper.Stat(r.tempRestoreDir); !os.IsNotExist(statErr) {
-		r.logger.Info("Cleaning up temporary restore directory.", "temp_dir", r.tempRestoreDir)
-		r.wrapper.RemoveAll(r.tempRestoreDir)
+	if r.tempRestoreDir != "" {
+		if _, statErr := r.wrapper.Stat(r.tempRestoreDir); !os.IsNotExist(statErr) {
+			r.logger.Info("Cleaning up temporary restore directory.", "temp_dir", r.tempRestoreDir)
+			r.wrapper.RemoveAll(r.tempRestoreDir)
+		}
 	}
 }
 
-// copyAllData copies all required files and directories from the snapshot to the temporary directory.
-func (r *restorer) copyAllData() error {
-	if err := r.copyIndex(); err != nil {
-		return err
+// restoreChainToTempDir walks the snapshot chain (even if it's just a single full snapshot)
+// and copies all necessary, unique files to the temporary restore directory, creating a
+// consolidated full manifest at the end.
+func (r *restorer) restoreChainToTempDir() error {
+	// --- Step 1: Collect all unique files and build a consolidated manifest model ---
+	filesToCopy := make(map[string]string) // Map of relative dest path -> absolute source path
+	allSSTables := make(map[uint64]core.SSTableMetadata)
+	allLevels := make(map[int]map[uint64]core.SSTableMetadata) // level -> tableID -> metadata
+	var finalManifest *core.SnapshotManifest
+
+	snapshotBaseDir := filepath.Dir(r.snapshotDir)
+	currentSnapshotPath := r.snapshotDir
+
+	for currentSnapshotPath != "" {
+		manifest, _, err := readManifestFromDir(currentSnapshotPath, r.wrapper)
+		if err != nil {
+			return fmt.Errorf("failed to read manifest from %s during restore chain walk: %w", currentSnapshotPath, err)
+		}
+
+		// The latest manifest determines the final state (seq num, WAL, etc.)
+		if finalManifest == nil {
+			finalManifest = manifest
+		}
+
+		// Collect unique SSTables, walking backwards.
+		for _, level := range manifest.Levels {
+			if _, ok := allLevels[level.LevelNumber]; !ok {
+				allLevels[level.LevelNumber] = make(map[uint64]core.SSTableMetadata)
+			}
+			for _, table := range level.Tables {
+				if _, ok := allSSTables[table.ID]; !ok {
+					allSSTables[table.ID] = table
+					allLevels[level.LevelNumber][table.ID] = table
+				}
+			}
+		}
+
+		// Walk the directory and add files to our map if they don't exist yet.
+		// This ensures we get the newest version of each file as we walk backwards.
+		walkErr := filepath.WalkDir(currentSnapshotPath, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+
+			relPath, err := filepath.Rel(currentSnapshotPath, path)
+			if err != nil {
+				return err
+			}
+
+			// Don't copy old snapshot manifests or the CURRENT file from the snapshot's root.
+			// We will create a new, consolidated one. This check should NOT apply to files
+			// in subdirectories (like the tag index's MANIFEST file).
+			isInRoot := !strings.Contains(relPath, string(filepath.Separator))
+			if isInRoot && (strings.HasPrefix(filepath.Base(relPath), MANIFEST_FILE_PREFIX) || filepath.Base(relPath) == CURRENT_FILE_NAME) {
+				return nil
+			}
+
+			if _, exists := filesToCopy[relPath]; !exists {
+				filesToCopy[relPath] = path
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return fmt.Errorf("failed to walk dir %s during restore: %w", currentSnapshotPath, walkErr)
+		}
+
+		// Move to the parent
+		if manifest.Type == core.SnapshotTypeFull {
+			break // Reached the root of the chain
+		}
+		if manifest.ParentID == "" {
+			r.logger.Warn("Incremental snapshot found without a ParentID during restore, stopping chain walk.", "snapshot_path", currentSnapshotPath)
+			break
+		}
+
+		parentPath := filepath.Join(snapshotBaseDir, manifest.ParentID)
+		if _, statErr := r.wrapper.Stat(parentPath); os.IsNotExist(statErr) {
+			return fmt.Errorf("parent snapshot %s not found for %s", manifest.ParentID, filepath.Base(currentSnapshotPath))
+		}
+		currentSnapshotPath = parentPath
 	}
-	if err := r.copyManifestFiles(); err != nil {
-		return err
+
+	// --- Step 2: Copy all the collected files to the temporary directory ---
+	for relPath, srcPath := range filesToCopy {
+		destPath := filepath.Join(r.tempRestoreDir, relPath)
+		if err := r.wrapper.CopyFile(srcPath, destPath); err != nil {
+			return fmt.Errorf("failed to copy chained file from %s to %s: %w", srcPath, destPath, err)
+		}
 	}
-	if err := r.copyWAL(); err != nil {
-		return err
+
+	// --- Step 3: Create and write the new consolidated manifest ---
+	if finalManifest == nil {
+		return fmt.Errorf("no manifest found in snapshot chain")
 	}
-	return nil
+
+	consolidatedManifest := &core.SnapshotManifest{
+		Type:                core.SnapshotTypeFull, // The restored state is a full snapshot
+		CreatedAt:           finalManifest.CreatedAt,
+		SequenceNumber:      finalManifest.SequenceNumber,
+		ParentID:            "", // No parent
+		LastWALSegmentIndex: finalManifest.LastWALSegmentIndex,
+		WALFile:             finalManifest.WALFile,
+		DeletedSeriesFile:   finalManifest.DeletedSeriesFile,
+		RangeTombstonesFile: finalManifest.RangeTombstonesFile,
+		StringMappingFile:   finalManifest.StringMappingFile,
+		SeriesMappingFile:   finalManifest.SeriesMappingFile,
+		SSTableCompression:  finalManifest.SSTableCompression,
+		Levels:              make([]core.SnapshotLevelManifest, 0),
+	}
+
+	// Reconstruct the levels from the collected tables
+	var levelNumbers []int
+	for levelNum := range allLevels {
+		levelNumbers = append(levelNumbers, levelNum)
+	}
+	sort.Ints(levelNumbers)
+
+	for _, levelNum := range levelNumbers {
+		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0)}
+		for _, table := range allLevels[levelNum] {
+			levelManifest.Tables = append(levelManifest.Tables, table)
+		}
+		// Sort tables within the level by ID for deterministic output
+		sort.Slice(levelManifest.Tables, func(i, j int) bool {
+			return levelManifest.Tables[i].ID < levelManifest.Tables[j].ID
+		})
+		consolidatedManifest.Levels = append(consolidatedManifest.Levels, levelManifest)
+	}
+
+	_, err := r.writeConsolidatedManifestAndCurrent(consolidatedManifest)
+	return err
 }
 
-// copyIndex copies the tag index directory from the snapshot.
-func (r *restorer) copyIndex() error {
-	srcIndexDir := filepath.Join(r.snapshotDir, indexer.IndexDirName)
-	destIndexDir := filepath.Join(r.tempRestoreDir, indexer.IndexSSTDirName)
-
-	if _, err := r.wrapper.Stat(srcIndexDir); os.IsNotExist(err) {
-		r.logger.Debug("Index directory not found in snapshot, skipping.", "path", srcIndexDir)
-		return nil // Not an error if it doesn't exist.
-	} else if err != nil {
-		return fmt.Errorf("failed to stat source index directory %s: %w", srcIndexDir, err)
+// writeConsolidatedManifestAndCurrent finalizes a restore by writing the manifest and CURRENT file.
+func (r *restorer) writeConsolidatedManifestAndCurrent(manifest *core.SnapshotManifest) (string, error) {
+	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, manifest.CreatedAt.UnixNano())
+	manifestPath := filepath.Join(r.tempRestoreDir, uniqueManifestFileName)
+	manifestFile, createErr := r.wrapper.Create(manifestPath)
+	if createErr != nil {
+		return "", fmt.Errorf("failed to create consolidated manifest file %s: %w", manifestPath, createErr)
 	}
 
-	if err := r.wrapper.MkdirAll(destIndexDir, 0755); err != nil {
-		return fmt.Errorf("failed to create destination index directory %s: %w", destIndexDir, err)
+	// The write function is a package-level function, so we can call it directly.
+	if writeErr := WriteManifestBinary(manifestFile, manifest); writeErr != nil {
+		manifestFile.Close()
+		return "", fmt.Errorf("failed to write consolidated binary snapshot manifest: %w", writeErr)
 	}
-	if err := r.wrapper.CopyDirectoryContents(srcIndexDir, destIndexDir); err != nil {
-		return fmt.Errorf("failed to copy tag index files from snapshot: %w", err)
-	}
-	r.logger.Debug("Restored tag index to temporary directory.")
-	return nil
-}
-
-// copyManifestFiles gathers all file paths from the manifest and copies them.
-func (r *restorer) copyManifestFiles() error {
-	filesToCopy := []string{r.manifestFile, r.manifest.DeletedSeriesFile, r.manifest.RangeTombstonesFile, r.manifest.StringMappingFile, r.manifest.SeriesMappingFile, CURRENT_FILE_NAME}
-	for _, level := range r.manifest.Levels {
-		for _, table := range level.Tables {
-			filesToCopy = append(filesToCopy, table.FileName)
-		}
+	if err := manifestFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close consolidated manifest file: %w", err)
 	}
 
-	for _, fileName := range filesToCopy {
-		if fileName == "" {
-			continue
-		}
-		if err := r.copyFile(fileName); err != nil {
-			return err
-		}
+	if err := r.wrapper.WriteFile(filepath.Join(r.tempRestoreDir, CURRENT_FILE_NAME), []byte(uniqueManifestFileName), 0644); err != nil {
+		return "", fmt.Errorf("failed to write CURRENT file to restored directory: %w", err)
 	}
-	return nil
-}
-
-// copyFile copies a single file from the snapshot source to the temp directory.
-// It handles missing source files by logging a warning and continuing.
-func (r *restorer) copyFile(fileName string) error {
-	srcPath := filepath.Join(r.snapshotDir, fileName)
-	destPath := filepath.Join(r.tempRestoreDir, fileName)
-
-	if _, err := r.wrapper.Stat(srcPath); os.IsNotExist(err) {
-		r.logger.Warn("File listed in manifest not found in snapshot directory, skipping.", "file", fileName)
-		return nil // Not an error, just skip.
-	} else if err != nil {
-		return fmt.Errorf("failed to stat source file %s: %w", srcPath, err)
-	}
-
-	// The helper's CopyFile implementation already ensures the parent directory exists.
-	if err := r.wrapper.CopyFile(srcPath, destPath); err != nil {
-		return fmt.Errorf("failed to copy file %s to temporary restore directory: %w", srcPath, err)
-	}
-	r.logger.Debug("Restored file to temporary directory.", "file", fileName)
-	return nil
-}
-
-// copyWAL copies the WAL directory or legacy WAL file from the snapshot.
-func (r *restorer) copyWAL() error {
-	if r.manifest.WALFile == "" {
-		return nil
-	}
-
-	srcWALPath := filepath.Join(r.snapshotDir, r.manifest.WALFile)
-	destWALPath := filepath.Join(r.tempRestoreDir, r.manifest.WALFile)
-
-	stat, err := r.wrapper.Stat(srcWALPath)
-	if os.IsNotExist(err) {
-		r.logger.Warn("WAL directory/file listed in manifest not found in snapshot, skipping.", "path", srcWALPath)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to stat source WAL path %s in snapshot: %w", srcWALPath, err)
-	}
-
-	if stat.IsDir() {
-		if err := r.wrapper.MkdirAll(destWALPath, 0755); err != nil {
-			return fmt.Errorf("failed to create WAL directory %s: %w", destWALPath, err)
-		}
-		if err := r.wrapper.CopyDirectoryContents(srcWALPath, destWALPath); err != nil {
-			return fmt.Errorf("failed to copy WAL directory from snapshot: %w", err)
-		}
-		r.logger.Debug("Restored WAL directory to temporary directory.")
-	} else {
-		if err := r.wrapper.CopyFile(srcWALPath, destWALPath); err != nil {
-			return fmt.Errorf("failed to copy legacy WAL file from snapshot: %w", err)
-		}
-		r.logger.Debug("Restored legacy WAL file to temporary directory.")
-	}
-	return nil
+	r.logger.Info("Consolidated manifest created successfully.", "restore_dir", r.tempRestoreDir, "manifest_file", uniqueManifestFileName)
+	return manifestPath, nil
 }
 
 // swapDataDirectories removes the original data directory and renames the temporary directory to the final destination.
