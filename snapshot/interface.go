@@ -5,21 +5,14 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/internal"
-)
-
-// SnapshotType defines the type of a snapshot.
-type SnapshotType string
-
-const (
-	SnapshotTypeFull        SnapshotType = "FULL"
-	SnapshotTypeIncremental SnapshotType = "INCR"
 )
 
 // Info holds metadata about a single snapshot, useful for listing.
 type Info struct {
 	ID        string // e.g., the timestamp-based directory name
-	Type      SnapshotType
+	Type      core.SnapshotType
 	CreatedAt time.Time
 	Size      int64 // Approximate size on disk
 	ParentID  string

@@ -48,6 +48,11 @@ func (mc *MockClock) SetTime(t time.Time) {
 	mc.mockTime = t
 }
 
+// Advance moves the mock time forward by the specified duration.
+func (mc *MockClock) Advance(d time.Duration) {
+	mc.mockTime = mc.mockTime.Add(d)
+}
+
 // UnixNano returns the mock time as a Unix nanosecond timestamp.
 // func (mc *MockClock) UnixNano() int60 {
 // 	return mc.mockTime.UnixNano()

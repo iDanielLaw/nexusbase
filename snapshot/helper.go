@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"syscall"
 
 	"github.com/INLOpen/nexusbase/core"
@@ -77,36 +79,14 @@ func (h *helperSnapshot) WriteFile(name string, data []byte, perm os.FileMode) e
 }
 
 func (h *helperSnapshot) CopyDirectoryContents(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(src, path)
-		if err != nil {
-			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
-		}
-
-		// Skip the root directory itself.
-		if relPath == "." {
-			return nil
-		}
-
-		dstPath := filepath.Join(dst, relPath)
-
-		if d.IsDir() {
-			return h.MkdirAll(dstPath, 0755)
-		}
-		// CopyFile will create the parent directory if it doesn't exist.
-		return h.CopyFile(path, dstPath)
-	})
+	return h.copyOrLinkDirectoryContents(src, dst, h.CopyFile)
 }
 
 func (h *helperSnapshot) LinkOrCopyFile(src, dst string) error {
 	// Ensure the destination directory exists before attempting to link.
 	// This is crucial for robustness, especially on Windows where os.Create
 	// (used by the CopyFile fallback) will fail if the parent dir is missing.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := h.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory for link %s: %w", dst, err)
 	}
 	err := os.Link(src, dst)
@@ -118,29 +98,88 @@ func (h *helperSnapshot) LinkOrCopyFile(src, dst string) error {
 }
 
 func (h *helperSnapshot) LinkOrCopyDirectoryContents(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	return h.copyOrLinkDirectoryContents(src, dst, h.LinkOrCopyFile)
+}
+
+// copyOrLinkDirectoryContents provides a parallel implementation for copying/linking directory contents.
+func (h *helperSnapshot) copyOrLinkDirectoryContents(src, dst string, fileOp func(src, dst string) error) error {
+	type fileJob struct {
+		src string
+		dst string
+	}
+
+	// 1. Walk the source directory to collect all directories and files.
+	var dirsToCreate []string
+	var filesToProcess []fileJob
+	walkErr := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-
 		relPath, err := filepath.Rel(src, path)
 		if err != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
-
-		// Skip the root directory itself.
 		if relPath == "." {
 			return nil
 		}
 
 		dstPath := filepath.Join(dst, relPath)
-
 		if d.IsDir() {
-			return h.MkdirAll(dstPath, 0755)
+			dirsToCreate = append(dirsToCreate, dstPath)
+		} else {
+			filesToProcess = append(filesToProcess, fileJob{src: path, dst: dstPath})
 		}
-		// LinkOrCopyFile will create the parent directory if it doesn't exist.
-		return h.LinkOrCopyFile(path, dstPath)
+		return nil
 	})
+	if walkErr != nil {
+		return fmt.Errorf("failed to walk source directory %s: %w", src, walkErr)
+	}
+
+	// 2. Create all destination directories sequentially. This is generally fast.
+	for _, dir := range dirsToCreate {
+		if err := h.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create destination subdirectory %s: %w", dir, err)
+		}
+	}
+
+	// 3. Process files in parallel using a worker pool.
+	numWorkers := runtime.NumCPU()
+	jobs := make(chan fileJob, len(filesToProcess))
+	errs := make(chan error, 1) // Buffered channel to capture the first error
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if err := fileOp(job.src, job.dst); err != nil {
+					// Try to send the error. If the channel is full, another error was already sent.
+					select {
+					case errs <- err:
+					default:
+					}
+					return // Stop processing on first error
+				}
+			}
+		}()
+	}
+
+	// Send jobs to workers
+	for _, job := range filesToProcess {
+		jobs <- job
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(errs)
+
+	// Check if any worker reported an error.
+	if err := <-errs; err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // CopyFile copies a file from src to dst.
@@ -153,7 +192,7 @@ func (h *helperSnapshot) CopyFile(src, dst string) error {
 
 	// This is slightly redundant if called from LinkOrCopyFile, but makes
 	// CopyFile safe to call directly. The performance impact is negligible.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := h.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory for %s: %w", dst, err)
 	}
 
@@ -175,6 +214,10 @@ func (h *helperSnapshot) CopyFile(src, dst string) error {
 
 func (h *helperSnapshot) ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	return ReadManifestBinary(r)
+}
+
+func (h *helperSnapshot) ReadDir(name string) ([]os.DirEntry, error) {
+	return os.ReadDir(name)
 }
 
 func (h *helperSnapshot) CopyAuxiliaryFile(srcPath, destFileName, snapshotDir string, manifestField *string, logger *slog.Logger) error {
@@ -206,7 +249,7 @@ func (h *helperSnapshot) SaveJSON(v interface{}, path string) error {
 	if err := h.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory for json file %s: %w", path, err)
 	}
-	data, err := json.MarshalIndent(v, "", "  ")
+	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}

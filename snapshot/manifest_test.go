@@ -3,6 +3,7 @@ package snapshot
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/stretchr/testify/assert"
@@ -11,8 +12,10 @@ import (
 
 func TestManifest_RoundTrip_Full(t *testing.T) {
 	// 1. Create a comprehensive manifest
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	manifest := &core.SnapshotManifest{
 		SequenceNumber: 12345,
+		CreatedAt:      now,
 		Levels: []core.SnapshotLevelManifest{
 			{
 				LevelNumber: 0,
@@ -48,10 +51,12 @@ func TestManifest_RoundTrip_Full(t *testing.T) {
 	require.NotNil(t, deserializedManifest)
 
 	// 4. Compare
+	assert.True(t, manifest.CreatedAt.Equal(deserializedManifest.CreatedAt))
 	assert.Equal(t, manifest, deserializedManifest, "Original and deserialized manifests should be identical")
 }
 
 func TestManifest_RoundTrip_EmptyAndNil(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	testCases := []struct {
 		name     string
 		manifest *core.SnapshotManifest
@@ -59,6 +64,7 @@ func TestManifest_RoundTrip_EmptyAndNil(t *testing.T) {
 		{
 			name: "Empty Manifest",
 			manifest: &core.SnapshotManifest{
+				CreatedAt:      now,
 				SequenceNumber: 1,
 				Levels:         []core.SnapshotLevelManifest{},
 			},
@@ -66,6 +72,7 @@ func TestManifest_RoundTrip_EmptyAndNil(t *testing.T) {
 		{
 			name: "Nil Levels Slice",
 			manifest: &core.SnapshotManifest{
+				CreatedAt:      now,
 				SequenceNumber: 2,
 				Levels:         nil,
 			},
@@ -73,6 +80,7 @@ func TestManifest_RoundTrip_EmptyAndNil(t *testing.T) {
 		{
 			name: "Level with empty tables slice",
 			manifest: &core.SnapshotManifest{
+				CreatedAt:      now,
 				SequenceNumber: 3,
 				Levels: []core.SnapshotLevelManifest{
 					{LevelNumber: 0, Tables: []core.SSTableMetadata{}},
@@ -82,6 +90,7 @@ func TestManifest_RoundTrip_EmptyAndNil(t *testing.T) {
 		{
 			name: "Table with nil keys",
 			manifest: &core.SnapshotManifest{
+				CreatedAt:      now,
 				SequenceNumber: 4,
 				Levels: []core.SnapshotLevelManifest{
 					{
@@ -112,6 +121,7 @@ func TestManifest_RoundTrip_EmptyAndNil(t *testing.T) {
 				deserialized.Levels = []core.SnapshotLevelManifest{}
 			}
 
+			assert.True(t, tc.manifest.CreatedAt.Equal(deserialized.CreatedAt))
 			assert.Equal(t, tc.manifest, deserialized)
 		})
 	}
@@ -146,6 +156,11 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 			errContain: "failed to read manifest header",
 		},
 		{
+			name:       "Truncated after header",
+			data:       validBytes[:14], // Header is 14 bytes, next read fails
+			errContain: "failed to read snapshot type",
+		},
+		{
 			name: "Invalid magic number",
 			data: func() []byte {
 				d := make([]byte, len(validBytes))
@@ -157,14 +172,9 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 			errContain: "invalid binary manifest magic number",
 		},
 		{
-			name:       "Truncated after header",
-			data:       validBytes[:14], // Header is 14 bytes
-			errContain: "failed to read sequence number",
-		},
-		{
 			name:       "Truncated in levels loop",
-			data:       validBytes[:32], // Truncate in the middle of reading the table count for the first level
-			errContain: "failed to read table count",
+			data:       validBytes[:32], // Truncates in the middle of LastWALSegmentIndex
+			errContain: "failed to read last WAL segment index",
 		},
 		{
 			name: "Truncated string length",

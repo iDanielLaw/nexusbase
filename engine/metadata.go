@@ -32,9 +32,11 @@ func (e *storageEngine) persistManifest() (err error) {
 
 	// Construct the manifest based on current levels state and sequence number
 	manifest := core.SnapshotManifest{
-		SequenceNumber:     e.sequenceNumber.Load(),
-		Levels:             make([]core.SnapshotLevelManifest, 0, e.levelsManager.MaxLevels()),
-		SSTableCompression: e.opts.SSTableCompressor.Type().String(),
+		SequenceNumber:      e.sequenceNumber.Load(),
+		Levels:              make([]core.SnapshotLevelManifest, 0, e.levelsManager.MaxLevels()),
+		SSTableCompression:  e.opts.SSTableCompressor.Type().String(),
+		CreatedAt:           e.clock.Now(),
+		LastWALSegmentIndex: e.wal.ActiveSegmentIndex(),
 	}
 
 	levelStates, unlockFunc := e.levelsManager.GetSSTablesForRead()

@@ -59,7 +59,7 @@ func HelperDataPoint(t *testing.T, metric string, tags map[string]string, ts int
 func MakeDataPoint(metric string, tags map[string]string, ts int64, fields map[string]any) (core.DataPoint, error) {
 	dp, err := core.NewSimpleDataPoint(metric, tags, ts, fields)
 	if err != nil {
-		return core.DataPoint{}, fmt.Errorf("Failed to create data point: %v", err)
+		return core.DataPoint{}, fmt.Errorf("failed to create data point: %v", err)
 	}
 	return *dp, nil
 }
@@ -67,11 +67,11 @@ func MakeDataPoint(metric string, tags map[string]string, ts int64, fields map[s
 // HelperFieldValueValidate retrieves a field from FieldValues and fails the test if not found.
 func HelperFieldValueValidate(fields core.FieldValues, selected string) (*core.PointValue, error) {
 	if len(fields) < 1 {
-		return nil, fmt.Errorf("Fields has no values")
+		return nil, fmt.Errorf("fields has no values")
 	}
 
 	if val, ok := fields[selected]; !ok {
-		return nil, fmt.Errorf("Field %s not found in fields", selected)
+		return nil, fmt.Errorf("field %s not found in fields", selected)
 	} else {
 		return &val, nil
 	}

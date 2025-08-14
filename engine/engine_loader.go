@@ -17,6 +17,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/memtable"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/wal"
 )
@@ -134,7 +135,7 @@ func (sl *StateLoader) loadStateFromDisk() (bool, error) {
 	}
 	defer file.Close()
 
-	manifest, err := readManifestBinary(file)
+	manifest, err := snapshot.ReadManifestBinary(file)
 	if err != nil {
 		// Here we could add logic to try parsing as JSON for backward compatibility
 		sl.logger.Warn("Error reading binary MANIFEST file, falling back to scanning data directory.", "path", manifestPath, "error", err)

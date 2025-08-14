@@ -126,6 +126,11 @@ func (ls *LevelState) Size() int {
 	return len(ls.tables)
 }
 
+// LevelNumber returns the number of the level.
+func (ls *LevelState) LevelNumber() int {
+	return ls.levelNumber
+}
+
 // TotalSize returns the total size of all tables in the level in bytes.
 func (ls *LevelState) TotalSize() int64 {
 	return ls.totalSize
