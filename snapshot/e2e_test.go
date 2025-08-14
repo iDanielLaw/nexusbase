@@ -579,3 +579,62 @@ func TestSnapshot_E2E_RestoreFromIncrementalChain(t *testing.T) {
 	assert.Equal(t, []byte("wal_key_2"), recoveredEntries[1].Key)
 	assert.Equal(t, []byte("wal_key_3"), recoveredEntries[2].Key)
 }
+
+func TestSnapshot_E2E_RestoreFromLatest_WithChain(t *testing.T) {
+	// --- 1. Setup: Create a snapshot chain (Full -> Incremental) ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	restoredDataDir := filepath.Join(baseDir, "data_restored_latest")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// Create Full Snapshot
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_1"), SeqNum: 90}))
+	require.NoError(t, provider.wal.Sync())
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// Create Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	require.NoError(t, provider.wal.Append(core.WALEntry{Key: []byte("wal_key_2"), SeqNum: 190}))
+	require.NoError(t, provider.wal.Sync())
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+
+	// --- 2. Restore from the latest snapshot in the base directory ---
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	// This is the key part of the test: call RestoreFromLatest on the base directory
+	err = RestoreFromLatest(restoreOpts, snapshotsBaseDir)
+	require.NoError(t, err, "RestoreFromLatest should succeed with a snapshot chain")
+
+	// --- 3. Verify Restored State ---
+	restoredProvider := newTestE2EProvider(t, restoredDataDir)
+	defer restoredProvider.Close(t)
+
+	// Check levels: sst1 should be in L0, sst2 in L1
+	counts, err := restoredProvider.levelsManager.GetLevelTableCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts[0], "Restored L0 should have 1 table (sst1)")
+	assert.Equal(t, 1, counts[1], "Restored L1 should have 1 table (sst2)")
+
+	// Check WAL: should contain entries from both snapshots
+	_, recoveredEntries, err := wal.Open(wal.Options{Dir: restoredProvider.walDir})
+	require.NoError(t, err)
+	require.Len(t, recoveredEntries, 2, "Should recover 2 entries from the restored WAL")
+}
