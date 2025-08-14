@@ -1,5 +1,3 @@
-github.com/INLOpen/skiplist v1.2.1-rc4 h1:emNsW21Oc+tbeAltBBaEfTmkVVpRJjZ1EehTkFMxnAg=
-github.com/INLOpen/skiplist v1.2.1-rc4/go.mod h1:srDtW5ifsC5ZYuxmD3w0V366L+4mQoX7KYhkx6wF1Dw=
 github.com/INLOpen/skiplist v1.2.1 h1:9hkAnEZ3u6UaioMMGNcuRxufSWQxra1c570ECeieGyM=
 github.com/INLOpen/skiplist v1.2.1/go.mod h1:srDtW5ifsC5ZYuxmD3w0V366L+4mQoX7KYhkx6wF1Dw=
 github.com/RoaringBitmap/roaring v1.9.4 h1:yhEIoH4YezLYT04s1nHehNO64EKFTop/wBhxv2QzDdQ=
