@@ -108,10 +108,10 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	// Re-acquire lock to get final state after flush
 	p.Lock()
 	currentSeqNum := p.GetSequenceNumber()
-	p.Unlock()
 
 	// 4. Get the final, consistent list of SSTables AFTER the synchronous flush.
 	levelStates, unlockFunc := p.GetLevelsManager().GetSSTablesForRead()
+	p.Unlock() // Unlock after getting both sequence number and table states
 	defer unlockFunc()
 
 	// Get the latest WAL segment index *after* any potential flushes.

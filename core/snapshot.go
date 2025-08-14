@@ -16,8 +16,6 @@ type SnapshotManifest struct {
 	CreatedAt      time.Time    `json:"created_at"`
 	SequenceNumber uint64       `json:"sequence_number"`
 	// ParentManifest stores the relative path to the parent manifest file,
-	// forming a chain for incremental snapshots. It's empty for a full snapshot.
-	ParentManifest      string                  `json:"parent_manifest,omitempty"`
 	ParentID            string                  `json:"parent_id,omitempty"`
 	LastWALSegmentIndex uint64                  `json:"last_wal_segment_index"`
 	Levels              []SnapshotLevelManifest `json:"levels"`

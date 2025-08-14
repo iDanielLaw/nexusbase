@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/snapshot"
 )
 
@@ -79,15 +78,6 @@ func run(snapshotDir, targetDataDir string, logger *slog.Logger) error {
 		if len(dir) > 0 {
 			return fmt.Errorf("target directory %s already exists and is not empty. Please specify a new or empty directory", targetDataDir)
 		}
-	}
-
-	// We need a default engine configuration to pass to RestoreFromSnapshot.
-	// The function primarily needs the target DataDir. Other options are not used
-	// during the file copy process but are required by the function signature.
-	// We can load a default config to get reasonable values.
-	_, err := config.LoadConfig("") // Load defaults
-	if err != nil {
-		return fmt.Errorf("failed to load default configuration: %w", err)
 	}
 
 	// Create snapshot restore options with the target data directory and logger.
