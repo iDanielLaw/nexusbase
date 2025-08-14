@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,6 +101,19 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	tracer := noop.NewTracerProvider().Tracer("test")
 
+	// This simulates the engine's startup logic after a restore. The restore process
+	// places the tag index snapshot into `dataDir/index`. The TagIndexManager, however,
+	// expects its data to be in `dataDir/index_sst`. We must move the data to the
+	// correct location before the TagIndexManager is initialized and tries to load it.
+	indexSnapshotPath := filepath.Join(dataDir, indexer.IndexDirName)
+	indexDataPath := filepath.Join(dataDir, indexer.IndexSSTDirName)
+	if _, statErr := os.Stat(indexSnapshotPath); statErr == nil {
+		t.Logf("Moving restored tag index data from %s to %s", indexSnapshotPath, indexDataPath)
+		// Clean up any old index data dir first, just in case.
+		require.NoError(t, os.RemoveAll(indexDataPath))
+		require.NoError(t, os.Rename(indexSnapshotPath, indexDataPath))
+	}
+
 	walOpts := wal.Options{
 		Dir:      walDir,
 		SyncMode: wal.SyncDisabled,
@@ -130,6 +142,10 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 	}
 	tim, err := indexer.NewTagIndexManager(opts, deps, logger, tracer)
 	require.NoError(t, err)
+
+	// After moving the files, we need to explicitly load them into the manager.
+	err = tim.LoadFromFile(dataDir)
+	require.NoError(t, err, "Failed to load tag index from its data directory")
 	tim.Start()
 
 	return &testE2EProvider{
@@ -287,7 +303,7 @@ func TestSnapshot_E2E_CreateAndRestore(t *testing.T) {
 	assert.FileExists(t, filepath.Join(restoredDataDir, "sst", "2.sst"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "wal", "00000001.wal"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "wal", "00000002.wal"))
-	assert.FileExists(t, filepath.Join(restoredDataDir, indexer.IndexSSTDirName, indexer.IndexManifestFileName))
+	assert.FileExists(t, filepath.Join(restoredDataDir, indexer.IndexDirName, indexer.IndexManifestFileName))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "deleted_series.json"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "range_tombstones.json"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "string_mapping.log"))
@@ -368,7 +384,7 @@ func TestSnapshot_E2E_RestoreFailure_MissingManifest(t *testing.T) {
 
 	// --- 4. Verify the failure ---
 	require.Error(t, err, "RestoreFromFull should fail when the manifest file is missing")
-	assert.Contains(t, err.Error(), "could not read snapshot manifest", "Error message should indicate the manifest is missing")
+	assert.Contains(t, err.Error(), "failed to read manifest from", "Error message should indicate the manifest is missing")
 	assert.ErrorIs(t, err, os.ErrNotExist, "Underlying error should be os.ErrNotExist")
 
 	// Verify that the target directory was not created or was cleaned up.
@@ -376,13 +392,10 @@ func TestSnapshot_E2E_RestoreFailure_MissingManifest(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "Target data directory should not exist after a failed restore")
 }
 
-// TestSnapshot_E2E_CreateIncrementalAndRestoreChain tests the full lifecycle of creating
+// TestSnapshot_E2E_CreateIncrementalAndRestore tests the full lifecycle of creating
 // a full snapshot, followed by an incremental one, and then verifying that a
-// manual restore of the entire chain results in a correct final state.
-// NOTE: This test includes a helper function to perform a chained restore,
-// as the production `RestoreFromFull` is only designed for self-contained snapshots.
-// This test validates the *correctness of the created snapshot artifacts*.
-func TestSnapshot_E2E_CreateIncrementalAndRestoreChain(t *testing.T) {
+// restore of the incremental snapshot correctly reconstructs the state.
+func TestSnapshot_E2E_CreateIncrementalAndRestore(t *testing.T) {
 	// --- 1. Setup ---
 	baseDir := t.TempDir()
 	originalDataDir := filepath.Join(baseDir, "data_orig")
@@ -442,8 +455,12 @@ func TestSnapshot_E2E_CreateIncrementalAndRestoreChain(t *testing.T) {
 	assert.FileExists(t, filepath.Join(latestPath, "wal", "00000001.wal"))
 
 	// --- 6. Restore from the chain ---
-	err = restoreSnapshotChain(t, latestPath, restoredDataDir)
-	require.NoError(t, err)
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	err = RestoreFromFull(restoreOpts, latestPath)
+	require.NoError(t, err, "RestoreFromFull should succeed on an incremental snapshot")
 
 	// --- 7. Verify Restored State ---
 	restoredProvider := newTestE2EProvider(t, restoredDataDir)
@@ -463,147 +480,9 @@ func TestSnapshot_E2E_CreateIncrementalAndRestoreChain(t *testing.T) {
 	require.Len(t, recoveredEntries, 2, "Should recover 2 entries from the restored WAL")
 }
 
-// restoreSnapshotChain is a test helper that simulates a proper restore from a snapshot chain.
-// It walks the parent chain, copies all necessary files, and creates a new,
-// consolidated 'FULL' manifest representing the final state. This is necessary because
-// the production restore logic is not yet chain-aware, but we need to validate
-// that the artifacts created by CreateIncremental are correct and sufficient.
-func restoreSnapshotChain(t *testing.T, latestSnapshotPath, targetDir string) error {
-	t.Helper()
-	helper := newHelperSnapshot()
-	require.NoError(t, helper.MkdirAll(targetDir, 0755))
-
-	// --- Step 1: Collect all unique files and manifests from the chain ---
-	filesToCopy := make(map[string]string) // Map of relative dest path -> absolute source path
-	allSSTables := make(map[uint64]core.SSTableMetadata)
-	allLevels := make(map[int]map[uint64]core.SSTableMetadata) // level -> tableID -> metadata
-	var finalManifest *core.SnapshotManifest
-
-	currentSnapshotPath := latestSnapshotPath
-	for currentSnapshotPath != "" {
-		manifest, _, err := readManifestFromDir(currentSnapshotPath, helper)
-		if err != nil {
-			return fmt.Errorf("failed to read manifest from %s: %w", currentSnapshotPath, err)
-		}
-
-		// The latest manifest determines the final state (seq num, etc.)
-		if finalManifest == nil {
-			finalManifest = manifest
-		}
-
-		// Collect unique SSTables, walking backwards.
-		for _, level := range manifest.Levels {
-			if _, ok := allLevels[level.LevelNumber]; !ok {
-				allLevels[level.LevelNumber] = make(map[uint64]core.SSTableMetadata)
-			}
-			for _, table := range level.Tables {
-				if _, ok := allSSTables[table.ID]; !ok {
-					allSSTables[table.ID] = table
-					allLevels[level.LevelNumber][table.ID] = table
-				}
-			}
-		}
-
-		// Walk the directory and add files to our map if they don't exist yet.
-		// This ensures we get the newest version of each file as we walk backwards.
-		walkErr := filepath.WalkDir(currentSnapshotPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-
-			relPath, err := filepath.Rel(currentSnapshotPath, path)
-			if err != nil {
-				return err
-			}
-
-			// Don't copy old manifests or CURRENT files, we'll create a new one.
-			if strings.HasPrefix(filepath.Base(relPath), MANIFEST_FILE_PREFIX) || filepath.Base(relPath) == CURRENT_FILE_NAME {
-				return nil
-			}
-
-			if _, exists := filesToCopy[relPath]; !exists {
-				filesToCopy[relPath] = path
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return fmt.Errorf("failed to walk dir %s: %w", currentSnapshotPath, walkErr)
-		}
-
-		// Move to the parent, ensuring the path is constructed correctly
-		currentSnapshotPath = "" // Assume we reached the end
-		if manifest.ParentID != "" {
-			parentPath := filepath.Join(filepath.Dir(latestSnapshotPath), manifest.ParentID)
-			if _, statErr := os.Stat(parentPath); statErr == nil {
-				currentSnapshotPath = parentPath
-			}
-		}
-	}
-
-	// --- Step 2: Copy all the collected files to the target directory ---
-	for relPath, srcPath := range filesToCopy {
-		destPath := filepath.Join(targetDir, relPath)
-		if err := helper.CopyFile(srcPath, destPath); err != nil {
-			return fmt.Errorf("failed to copy chained file from %s to %s: %w", srcPath, destPath, err)
-		}
-	}
-
-	// --- Step 3: Create and write the new consolidated manifest ---
-	if finalManifest == nil {
-		return fmt.Errorf("no manifest found in snapshot chain")
-	}
-
-	consolidatedManifest := &core.SnapshotManifest{
-		Type:                core.SnapshotTypeFull, // The restored state is a full snapshot
-		CreatedAt:           finalManifest.CreatedAt,
-		SequenceNumber:      finalManifest.SequenceNumber,
-		ParentID:            "", // No parent
-		LastWALSegmentIndex: finalManifest.LastWALSegmentIndex,
-		WALFile:             finalManifest.WALFile,
-		DeletedSeriesFile:   finalManifest.DeletedSeriesFile,
-		RangeTombstonesFile: finalManifest.RangeTombstonesFile,
-		StringMappingFile:   finalManifest.StringMappingFile,
-		SeriesMappingFile:   finalManifest.SeriesMappingFile,
-		SSTableCompression:  finalManifest.SSTableCompression,
-		Levels:              make([]core.SnapshotLevelManifest, 0),
-	}
-
-	// Reconstruct the levels from the collected tables
-	var levelNumbers []int
-	for levelNum := range allLevels {
-		levelNumbers = append(levelNumbers, levelNum)
-	}
-	sort.Ints(levelNumbers)
-
-	for _, levelNum := range levelNumbers {
-		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0)}
-		for _, table := range allLevels[levelNum] {
-			levelManifest.Tables = append(levelManifest.Tables, table)
-		}
-		// Sort tables within the level by ID for deterministic output
-		sort.Slice(levelManifest.Tables, func(i, j int) bool {
-			return levelManifest.Tables[i].ID < levelManifest.Tables[j].ID
-		})
-		consolidatedManifest.Levels = append(consolidatedManifest.Levels, levelManifest)
-	}
-
-	// Use the manager's internal function to write the manifest and CURRENT file
-	mockLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	m := NewManager(&mockProviderForTest{logger: mockLogger})
-	_, err := m.(*manager).writeManifestAndCurrent(targetDir, consolidatedManifest) // Use the concrete type to access the unexported method
-	if err != nil {
-		return fmt.Errorf("failed to write consolidated manifest: %w", err)
-	}
-
-	return nil
-}
-
-// TestSnapshot_E2E_MultiIncrementalAndRestoreChain tests creating a full snapshot,
+// TestSnapshot_E2E_RestoreFromIncrementalChain tests creating a full snapshot,
 // followed by two incremental snapshots, and then restoring the full chain.
-func TestSnapshot_E2E_MultiIncrementalAndRestoreChain(t *testing.T) {
+func TestSnapshot_E2E_RestoreFromIncrementalChain(t *testing.T) {
 	// --- 1. Setup ---
 	baseDir := t.TempDir()
 	originalDataDir := filepath.Join(baseDir, "data_orig")
@@ -673,8 +552,12 @@ func TestSnapshot_E2E_MultiIncrementalAndRestoreChain(t *testing.T) {
 	assert.FileExists(t, filepath.Join(latestPath, "wal", "00000001.wal"))
 
 	// --- 6. Restore from the full chain ---
-	err = restoreSnapshotChain(t, latestPath, restoredDataDir)
-	require.NoError(t, err)
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	err = RestoreFromFull(restoreOpts, latestPath)
+	require.NoError(t, err, "RestoreFromFull should succeed on a multi-level incremental chain")
 
 	// --- 7. Verify Restored State ---
 	restoredProvider := newTestE2EProvider(t, restoredDataDir)

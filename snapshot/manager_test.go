@@ -457,8 +457,6 @@ func setupRestorerTest(t *testing.T) (r *restorer, snapshotDir, targetDataDir st
 		logger:      opts.Logger.With("component", "RestoreFromSnapshot"),
 		wrapper:     opts.wrapper,
 	}
-	err = r.validateAndPrepare()
-	require.NoError(t, err, "validateAndPrepare should succeed in test setup")
 
 	return r, snapshotDir, targetDataDir, helper
 }
@@ -1738,14 +1736,16 @@ func TestRestoreFromFull(t *testing.T) {
 	// ตรวจสอบว่าไฟล์ทั้งหมดถูกคัดลอกไปยังไดเรกทอรีข้อมูลเป้าหมาย
 	assert.FileExists(t, filepath.Join(targetDataDir, "sst", "1.sst"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "wal", "000001.wal"))
-	assert.FileExists(t, filepath.Join(targetDataDir, indexer.IndexSSTDirName, "index1.sst"))
-	assert.FileExists(t, filepath.Join(targetDataDir, indexer.IndexSSTDirName, indexer.IndexManifestFileName))
+	assert.FileExists(t, filepath.Join(targetDataDir, "index", "index1.sst"))
+	assert.FileExists(t, filepath.Join(targetDataDir, "index", indexer.IndexManifestFileName))
 	assert.FileExists(t, filepath.Join(targetDataDir, "deleted_series.json"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "string_mapping.log"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "series_mapping.log"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "CURRENT"))
-	assert.FileExists(t, filepath.Join(targetDataDir, manifestFileName))
 
+	currentBytes, err := os.ReadFile(filepath.Join(targetDataDir, "CURRENT"))
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(targetDataDir, string(currentBytes)), "Consolidated manifest file pointed to by CURRENT should exist")
 	// ตรวจสอบเนื้อหาของไฟล์ที่คัดลอก
 	content, err := os.ReadFile(filepath.Join(targetDataDir, "sst", "1.sst"))
 	require.NoError(t, err)
@@ -1785,7 +1785,9 @@ func TestRestoreFromFull_TargetExists(t *testing.T) {
 
 	// ไฟล์ใหม่จาก snapshot ควรจะอยู่
 	assert.FileExists(t, filepath.Join(targetDataDir, "CURRENT"))
-	assert.FileExists(t, filepath.Join(targetDataDir, manifestFileName))
+	info, statErr := os.Stat(targetDataDir)
+	require.NoError(t, statErr)
+	assert.True(t, info.IsDir())
 }
 
 func TestRestoreFromFull_ErrorHandling(t *testing.T) {
@@ -1847,7 +1849,7 @@ func TestRestoreFromFull_ErrorHandling(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte("MANIFEST_missing.bin"), 0644))
 		err := RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "could not read snapshot manifest")
+		assert.Contains(t, err.Error(), "failed to read manifest from")
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	})
 
@@ -2009,7 +2011,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		err = RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to copy file")
+		assert.Contains(t, err.Error(), "failed to copy chained file")
 	})
 
 	t.Run("RemoveOriginalDirError", func(t *testing.T) {
@@ -2038,50 +2040,6 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		assert.ErrorIs(t, err, expectedErr)
 		assert.Contains(t, err.Error(), "failed to remove original data directory")
 	})
-}
-
-func TestRestoreFromFull_CopyDirectoryError(t *testing.T) {
-	// This test replaces the package-level copyDirectoryContents function to simulate errors.
-	helper := &mockSnapshotHelper{
-		helperSnapshot: newHelperSnapshot(),
-	}
-
-	// 1. Setup: Create a minimal valid snapshot structure
-	tempDir := t.TempDir()
-	snapshotDir := filepath.Join(tempDir, "snapshot_copy_dir_err")
-	targetDataDir := filepath.Join(tempDir, "target_copy_dir_err")
-	require.NoError(t, os.MkdirAll(snapshotDir, 0755))
-	// Create the index directory that the function will attempt to copy
-	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, indexer.IndexDirName), 0755))
-
-	// Create manifest and CURRENT file
-	manifestFileName := "MANIFEST_copy_err.bin"
-	manifestPath := filepath.Join(snapshotDir, manifestFileName)
-	f, err := os.Create(manifestPath)
-	require.NoError(t, err)
-	// An empty manifest is fine for this test, as we fail before copying its contents
-	require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
-	f.Close()
-	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
-
-	// 2. Simulate the error condition
-	expectedErr := fmt.Errorf("simulated copy directory error")
-	helper.InterceptCopyDirectoryContents = func(src, dst string) error {
-		// We only want to fail on the first call, which is for the index directory
-		if strings.HasSuffix(src, indexer.IndexDirName) {
-			return expectedErr
-		}
-		return helper.helperSnapshot.CopyDirectoryContents(src, dst)
-	}
-
-	// 3. Execution
-	restoreOpts := RestoreOptions{DataDir: targetDataDir, wrapper: helper}
-	err = RestoreFromFull(restoreOpts, snapshotDir)
-
-	// 4. Verification
-	require.Error(t, err, "RestoreFromFull should fail when copyDirectoryContents fails")
-	assert.ErrorIs(t, err, expectedErr, "The returned error should be the one from our mock")
-	assert.Contains(t, err.Error(), "failed to copy tag index files from snapshot")
 }
 
 func TestRestoreFromFull_RenameError(t *testing.T) {
@@ -2132,35 +2090,14 @@ func TestRestorer_ProcessErrors(t *testing.T) {
 	// This test focuses on error paths within the restorer's methods,
 	// assuming initial validation and temp dir creation succeed.
 
-	t.Run("CopyIndex_CopyContentsError", func(t *testing.T) {
-		// 1. Setup
-		r, _, _, helper := setupRestorerTest(t)
-		expectedErr := fmt.Errorf("simulated copy index error")
-
-		// 2. Inject error
-		helper.InterceptCopyDirectoryContents = func(src, dst string) error {
-			if strings.HasSuffix(src, indexer.IndexDirName) {
-				return expectedErr
-			}
-			return helper.helperSnapshot.CopyDirectoryContents(src, dst)
-		}
-
-		// 3. Execute and Verify
-		err := r.run()
-		require.Error(t, err)
-		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to copy tag index files from snapshot")
-		assert.NoFileExists(t, r.opts.DataDir, "Target data directory should be cleaned up on failure")
-	})
-
-	t.Run("CopyFile_CopyError", func(t *testing.T) {
+	t.Run("CopyFileError", func(t *testing.T) {
 		// 1. Setup
 		r, _, _, helper := setupRestorerTest(t)
 		expectedErr := fmt.Errorf("simulated copy file error")
 
 		// 2. Inject error
 		helper.InterceptCopyFile = func(src, dst string) error {
-			// Fail on the first file copy attempt (which will be one of the manifest files)
+			// Fail on any file copy attempt.
 			return expectedErr
 		}
 
@@ -2168,33 +2105,28 @@ func TestRestorer_ProcessErrors(t *testing.T) {
 		err := r.run()
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to copy file")
+		assert.Contains(t, err.Error(), "failed to copy chained file")
 		assert.NoFileExists(t, r.opts.DataDir, "Target data directory should be cleaned up on failure")
 	})
 
-	t.Run("CopyWAL_CopyDirError", func(t *testing.T) {
+	t.Run("ParentSnapshotNotFoundInChain", func(t *testing.T) {
 		// 1. Setup
 		r, _, _, helper := setupRestorerTest(t)
-		expectedErr := fmt.Errorf("simulated copy wal error")
-
-		// 2. Inject error
-		helper.InterceptCopyDirectoryContents = func(src, dst string) error {
-			// The index is copied first, so let that succeed.
-			if strings.HasSuffix(src, indexer.IndexDirName) {
-				return helper.helperSnapshot.CopyDirectoryContents(src, dst)
-			}
-			// Fail on the WAL copy
-			if strings.HasSuffix(src, "wal") {
-				return expectedErr
-			}
-			return helper.helperSnapshot.CopyDirectoryContents(src, dst)
+		// Create a corrupted manifest that is incremental and points to a non-existent parent.
+		corruptedManifest := &core.SnapshotManifest{
+			Type:     core.SnapshotTypeIncremental,
+			ParentID: "non_existent_parent_123",
 		}
 
+		// Rewrite the manifest in the snapshot dir
+		manifestFileName, err := writeTestManifest(r.snapshotDir, corruptedManifest)
+		require.NoError(t, err)
+		require.NoError(t, helper.WriteFile(filepath.Join(r.snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+
 		// 3. Execute and Verify
-		err := r.run()
+		err = r.run()
 		require.Error(t, err)
-		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to copy WAL directory from snapshot")
+		assert.Contains(t, err.Error(), "parent snapshot non_existent_parent_123 not found")
 		assert.NoFileExists(t, r.opts.DataDir, "Target data directory should be cleaned up on failure")
 	})
 
