@@ -2353,6 +2353,25 @@ func TestRestoreFromLatest(t *testing.T) {
 	})
 }
 
+// calculateDirSize is a test helper to get the deterministic size of a directory.
+func calculateDirSize(dir string) (int64, error) {
+	var totalSize int64
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			info, statErr := d.Info()
+			if statErr != nil {
+				return statErr
+			}
+			totalSize += info.Size()
+		}
+		return nil
+	})
+	return totalSize, err
+}
+
 func TestManager_ListSnapshots(t *testing.T) {
 	t.Run("SuccessWithFullAndIncremental", func(t *testing.T) {
 		// 1. Setup
@@ -2373,6 +2392,8 @@ func TestManager_ListSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.Join(fullSnapshotDir, "CURRENT"), []byte(manifestFileName1), 0644))
 		require.NoError(t, os.WriteFile(filepath.Join(fullSnapshotDir, "dummy.dat"), make([]byte, 1024), 0644)) // Add size
+		fullSize, err := calculateDirSize(fullSnapshotDir)
+		require.NoError(t, err)
 
 		// Create an incremental snapshot
 		time2 := time.Now().Add(-1 * time.Hour).Truncate(time.Second)
@@ -2384,6 +2405,8 @@ func TestManager_ListSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.Join(incrSnapshotDir, "CURRENT"), []byte(manifestFileName2), 0644))
 		require.NoError(t, os.WriteFile(filepath.Join(incrSnapshotDir, "dummy2.dat"), make([]byte, 512), 0644)) // Add size
+		incrSize, err := calculateDirSize(incrSnapshotDir)
+		require.NoError(t, err)
 
 		// 2. Execution
 		infos, err := manager.ListSnapshots(snapshotsBaseDir)
@@ -2396,14 +2419,16 @@ func TestManager_ListSnapshots(t *testing.T) {
 		assert.Equal(t, fullSnapshotID, infos[0].ID)
 		assert.Equal(t, core.SnapshotTypeFull, infos[0].Type)
 		assert.True(t, time1.Equal(infos[0].CreatedAt))
+		assert.Equal(t, fullSize, infos[0].Size)
+		assert.Equal(t, fullSize, infos[0].TotalChainSize, "Chain size for a full snapshot should be its own size")
 		assert.Empty(t, infos[0].ParentID)
-		assert.Greater(t, infos[0].Size, int64(1024)) // Manifest + CURRENT + dummy file
 
 		assert.Equal(t, incrSnapshotID, infos[1].ID)
 		assert.Equal(t, core.SnapshotTypeIncremental, infos[1].Type)
 		assert.True(t, time2.Equal(infos[1].CreatedAt))
 		assert.Equal(t, fullSnapshotID, infos[1].ParentID)
-		assert.Greater(t, infos[1].Size, int64(512)) // Manifest + CURRENT + dummy file
+		assert.Equal(t, incrSize, infos[1].Size)
+		assert.Equal(t, fullSize+incrSize, infos[1].TotalChainSize, "Chain size for an incremental snapshot should be its size plus its parent's")
 	})
 
 	t.Run("EmptyAndNonExistentDirectory", func(t *testing.T) {
@@ -2445,6 +2470,66 @@ func TestManager_ListSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, infos, 1, "Should only list the one valid snapshot")
 		assert.Equal(t, "valid_snapshot", infos[0].ID)
+	})
+
+	t.Run("WithBrokenChain", func(t *testing.T) {
+		// 1. Setup
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+		manager := NewManager(newMockEngineProvider(t, tempDir))
+
+		// Create full
+		time1 := time.Now().Add(-3 * time.Hour)
+		fullID := fmt.Sprintf("%d_full", time1.UnixNano())
+		fullDir := filepath.Join(snapshotsBaseDir, fullID)
+		require.NoError(t, os.MkdirAll(fullDir, 0755))
+		manifestFileName1, err := writeTestManifest(fullDir, &core.SnapshotManifest{Type: core.SnapshotTypeFull, CreatedAt: time1})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(fullDir, "CURRENT"), []byte(manifestFileName1), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(fullDir, "dummy.dat"), make([]byte, 100), 0644))
+		fullSize, _ := calculateDirSize(fullDir)
+
+		// Create incr1
+		time2 := time.Now().Add(-2 * time.Hour)
+		incr1ID := fmt.Sprintf("%d_incr1", time2.UnixNano())
+		incr1Dir := filepath.Join(snapshotsBaseDir, incr1ID)
+		require.NoError(t, os.MkdirAll(incr1Dir, 0755))
+		manifestFileName2, err := writeTestManifest(incr1Dir, &core.SnapshotManifest{Type: core.SnapshotTypeIncremental, ParentID: fullID, CreatedAt: time2})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(incr1Dir, "CURRENT"), []byte(manifestFileName2), 0644))
+
+		// Create incr2
+		time3 := time.Now().Add(-1 * time.Hour)
+		incr2ID := fmt.Sprintf("%d_incr2", time3.UnixNano())
+		incr2Dir := filepath.Join(snapshotsBaseDir, incr2ID)
+		require.NoError(t, os.MkdirAll(incr2Dir, 0755))
+		manifestFileName3, err := writeTestManifest(incr2Dir, &core.SnapshotManifest{Type: core.SnapshotTypeIncremental, ParentID: incr1ID, CreatedAt: time3})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(incr2Dir, "CURRENT"), []byte(manifestFileName3), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(incr2Dir, "dummy.dat"), make([]byte, 200), 0644))
+		incr2Size, _ := calculateDirSize(incr2Dir)
+
+		// Break the chain
+		require.NoError(t, os.RemoveAll(incr1Dir))
+
+		// 2. Execution
+		infos, err := manager.ListSnapshots(snapshotsBaseDir)
+		require.NoError(t, err)
+
+		// 3. Verification
+		require.Len(t, infos, 2) // full and incr2 remain
+		// The order is not guaranteed after filtering, so we find them.
+		var fullInfo, incr2Info Info
+		for _, info := range infos {
+			if info.ID == fullID {
+				fullInfo = info
+			} else if info.ID == incr2ID {
+				incr2Info = info
+			}
+		}
+		assert.Equal(t, fullSize, fullInfo.TotalChainSize)
+		assert.Equal(t, incr2Size, incr2Info.TotalChainSize, "Chain size for a snapshot with a missing parent should be its own size")
 	})
 
 	t.Run("ReadDirError", func(t *testing.T) {
@@ -2644,5 +2729,140 @@ func TestManager_collectAllSSTablesInChain(t *testing.T) {
 		// 3. Verification
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "parent snapshot non_existent_parent not found")
+	})
+}
+
+func TestManager_Prune(t *testing.T) {
+	// Helper to create a snapshot directory for pruning tests
+	createPruneTestSnapshot := func(t *testing.T, baseDir, id string, snapType core.SnapshotType, parentID string, createdAt time.Time) {
+		t.Helper()
+		snapshotDir := filepath.Join(baseDir, id)
+		require.NoError(t, os.MkdirAll(snapshotDir, 0755))
+		manifest := &core.SnapshotManifest{
+			Type:      snapType,
+			ParentID:  parentID,
+			CreatedAt: createdAt,
+		}
+		manifestFileName, err := writeTestManifest(snapshotDir, manifest)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "CURRENT"), []byte(manifestFileName), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "dummy.dat"), make([]byte, 10), 0644))
+	}
+
+	setup := func(t *testing.T) (context.Context, *manager, string) {
+		t.Helper()
+		ctx := context.Background()
+		tempDir := t.TempDir()
+		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+		provider := newMockEngineProvider(t, tempDir)
+		manager := NewManager(provider).(*manager)
+		return ctx, manager, snapshotsBaseDir
+	}
+
+	t.Run("Success_Keep1_OutOf_3_Chains", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+
+		// Chain 1 (oldest)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now().Add(-3*time.Hour))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_1.1", core.SnapshotTypeIncremental, "full_1", time.Now().Add(-2*time.Hour))
+
+		// Chain 2 (middle)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_2", core.SnapshotTypeFull, "", time.Now().Add(-1*time.Hour))
+
+		// Chain 3 (newest)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_3", core.SnapshotTypeFull, "", time.Now())
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_3.1", core.SnapshotTypeIncremental, "full_3", time.Now().Add(1*time.Minute))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_3.2", core.SnapshotTypeIncremental, "incr_3.1", time.Now().Add(2*time.Minute))
+
+		// 2. Execution
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 1})
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"full_1", "incr_1.1", "full_2"}, deletedIDs)
+
+		// Check remaining files
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "incr_1.1"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_2"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_3"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "incr_3.1"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "incr_3.2"))
+	})
+
+	t.Run("KeepN_MoreThanAvailable", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now())
+
+		// 2. Execution
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 5})
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.Empty(t, deletedIDs)
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
+	})
+
+	t.Run("KeepN_Is_Zero", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now())
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_1.1", core.SnapshotTypeIncremental, "full_1", time.Now().Add(1*time.Minute))
+
+		// 2. Execution
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 0})
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"full_1", "incr_1.1"}, deletedIDs)
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "incr_1.1"))
+	})
+
+	t.Run("KeepN_Is_Negative", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+
+		// 2. Execution
+		_, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: -1})
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "KeepN cannot be negative")
+	})
+
+	t.Run("RemoveAll_Error", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1_to_delete", core.SnapshotTypeFull, "", time.Now().Add(-2*time.Hour))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_2_to_delete", core.SnapshotTypeFull, "", time.Now().Add(-1*time.Hour))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_3_to_keep", core.SnapshotTypeFull, "", time.Now())
+
+		// Inject error
+		expectedErr := fmt.Errorf("simulated remove error")
+		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+		helper.InterceptRemoveAll = func(path string) error {
+			if strings.HasSuffix(path, "full_1_to_delete") {
+				return expectedErr
+			}
+			return os.RemoveAll(path)
+		}
+		manager.wrapper = helper
+
+		// 2. Execution
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 1})
+
+		// 3. Verification
+		require.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
+		// It should have successfully deleted the second one.
+		assert.ElementsMatch(t, []string{"full_2_to_delete"}, deletedIDs)
+
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_1_to_delete"))   // The one that failed
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_2_to_delete")) // The one that succeeded
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_3_to_keep"))     // The one that should be kept
 	})
 }

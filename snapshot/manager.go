@@ -230,6 +230,46 @@ func (m *manager) ListSnapshots(snapshotsBaseDir string) ([]Info, error) {
 		})
 	}
 
+	// Step 2: Calculate cumulative chain sizes for each snapshot using memoization.
+	chainSizeCache := make(map[string]int64)
+	var calculateChainSize func(id string) int64
+
+	// Create a quick lookup map for infos by ID.
+	infoMap := make(map[string]Info, len(infos))
+	for _, info := range infos {
+		infoMap[info.ID] = info
+	}
+
+	calculateChainSize = func(id string) int64 {
+		// Return from cache if already computed.
+		if size, ok := chainSizeCache[id]; ok {
+			return size
+		}
+
+		info, ok := infoMap[id]
+		if !ok {
+			// This can happen if a parent is mentioned but its directory was deleted.
+			// We treat its size as 0 for the calculation and don't cache it.
+			m.provider.GetLogger().Warn("Parent snapshot mentioned but not found during size calculation, treating its size as 0.", "missing_parent_id", id)
+			return 0
+		}
+
+		// Recursive step: The total size is this snapshot's individual size plus its parent's total chain size.
+		var parentChainSize int64
+		if info.ParentID != "" {
+			parentChainSize = calculateChainSize(info.ParentID)
+		}
+
+		totalSize := info.Size + parentChainSize
+		chainSizeCache[id] = totalSize
+		return totalSize
+	}
+
+	// Step 3: Populate the TotalChainSize for each info object.
+	for i := range infos {
+		infos[i].TotalChainSize = calculateChainSize(infos[i].ID)
+	}
+
 	// Sort by CreatedAt time, which is also implicitly sorting by ID/name.
 	sort.Slice(infos, func(i, j int) bool {
 		return infos[i].CreatedAt.Before(infos[j].CreatedAt)
@@ -608,6 +648,97 @@ func (m *manager) Validate(snapshotDir string) error {
 		}
 		currentSnapshotPath = parentPath
 	}
+}
+
+// Prune deletes old snapshots based on the provided policy.
+// It returns a list of the snapshot IDs that were deleted.
+func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts PruneOptions) (deletedIDs []string, err error) {
+	p := m.provider
+	_, span := p.GetTracer().Start(ctx, "SnapshotManager.Prune")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("snapshot.base_dir", snapshotsBaseDir),
+		attribute.Int("snapshot.prune.keep_n", opts.KeepN),
+	)
+
+	if opts.KeepN < 0 {
+		return nil, fmt.Errorf("PruneOptions.KeepN cannot be negative")
+	}
+
+	// 1. List all snapshots
+	infos, err := m.ListSnapshots(snapshotsBaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list snapshots for pruning: %w", err)
+	}
+
+	if len(infos) == 0 {
+		p.GetLogger().Info("Pruning skipped: no snapshots found.")
+		return []string{}, nil
+	}
+
+	// 2. Build data structures for easy traversal
+	infoMap := make(map[string]Info, len(infos))
+	childrenMap := make(map[string][]string) // parentID -> []childID
+	var fullSnapshotRoots []Info
+
+	for _, info := range infos {
+		infoMap[info.ID] = info
+		if info.Type == core.SnapshotTypeFull {
+			fullSnapshotRoots = append(fullSnapshotRoots, info)
+		}
+		if info.ParentID != "" {
+			childrenMap[info.ParentID] = append(childrenMap[info.ParentID], info.ID)
+		}
+	}
+
+	// 3. Identify chains to prune
+	// Sort full snapshots by creation time, newest first, to easily find the ones to keep.
+	sort.Slice(fullSnapshotRoots, func(i, j int) bool {
+		return fullSnapshotRoots[i].CreatedAt.After(fullSnapshotRoots[j].CreatedAt)
+	})
+
+	if opts.KeepN >= len(fullSnapshotRoots) {
+		p.GetLogger().Info("Pruning skipped: number of full snapshot chains is less than or equal to KeepN.", "chains_found", len(fullSnapshotRoots), "keep_n", opts.KeepN)
+		return []string{}, nil
+	}
+
+	chainsToPrune := fullSnapshotRoots[opts.KeepN:]
+	p.GetLogger().Info("Pruning snapshots.", "chains_to_keep", opts.KeepN, "chains_to_prune", len(chainsToPrune))
+
+	// 4. Collect all snapshot IDs within the chains to be pruned
+	var allIDsToPrune []string
+	for _, root := range chainsToPrune {
+		// Use a queue for a breadth-first traversal to collect all descendants
+		queue := []string{root.ID}
+		for len(queue) > 0 {
+			currentID := queue[0]
+			queue = queue[1:]
+
+			allIDsToPrune = append(allIDsToPrune, currentID)
+			if children, ok := childrenMap[currentID]; ok {
+				queue = append(queue, children...)
+			}
+		}
+	}
+
+	// 5. Delete the snapshot directories
+	var firstErr error
+	for _, id := range allIDsToPrune {
+		snapshotDir := filepath.Join(snapshotsBaseDir, id)
+		p.GetLogger().Info("Pruning snapshot directory.", "id", id, "path", snapshotDir)
+		if err := m.wrapper.RemoveAll(snapshotDir); err != nil {
+			// Log the error but continue trying to delete others.
+			// Return the first error encountered.
+			p.GetLogger().Error("Failed to prune snapshot directory.", "id", id, "path", snapshotDir, "error", err)
+			if firstErr == nil { // Store only the first error
+				firstErr = fmt.Errorf("failed to remove snapshot directory %s: %w", snapshotDir, err)
+			}
+		} else {
+			deletedIDs = append(deletedIDs, id)
+		}
+	}
+
+	return deletedIDs, firstErr
 }
 
 // writeManifestAndCurrent finalizes a snapshot by writing the manifest and CURRENT file.

@@ -764,3 +764,68 @@ func TestSnapshot_E2E_ValidateChain(t *testing.T) {
 	require.Error(t, err, "Validation of a non-existent snapshot should fail")
 	assert.Contains(t, err.Error(), "does not exist")
 }
+
+func TestSnapshot_E2E_Prune(t *testing.T) {
+	// --- 1. Setup: Create multiple snapshot chains ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// --- Chain 1 (Oldest, to be pruned) ---
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	chain1_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain1_full_dir))
+
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	require.NoError(t, manager.CreateIncremental(context.Background(), snapshotsBaseDir))
+
+	// --- Chain 2 (Newest, to be kept) ---
+	mockClock.Advance(time.Hour)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3)
+	chain2_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain2_full_dir))
+
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 400
+	sst4 := createDummySSTableForE2E(t, provider.sstDir, 4, 310)
+	provider.levelsManager.AddTableToLevel(1, sst4)
+	require.NoError(t, manager.CreateIncremental(context.Background(), snapshotsBaseDir))
+
+	// --- 2. List before pruning ---
+	infosBefore, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosBefore, 4, "Should have 4 snapshots before pruning")
+
+	// --- 3. Prune, keeping 1 latest full chain ---
+	deletedIDs, err := manager.Prune(context.Background(), snapshotsBaseDir, PruneOptions{KeepN: 1})
+	require.NoError(t, err, "Prune operation should succeed")
+
+	// --- 4. Verify results ---
+	assert.Len(t, deletedIDs, 2, "Should have deleted 2 snapshots from the oldest chain")
+
+	infosAfter, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosAfter, 2, "Should have 2 snapshots remaining after pruning")
+
+	// Verify that the remaining snapshots are from the newest chain
+	var remainingIDs []string
+	for _, info := range infosAfter {
+		remainingIDs = append(remainingIDs, info.ID)
+	}
+	assert.Contains(t, remainingIDs, filepath.Base(chain2_full_dir))
+	assert.NotContains(t, remainingIDs, filepath.Base(chain1_full_dir))
+}
