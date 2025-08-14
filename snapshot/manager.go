@@ -565,6 +565,51 @@ func (c *auxiliaryCopier) copyWAL() error {
 	return nil
 }
 
+// Validate checks the integrity of a given snapshot and its entire parent chain.
+// It walks the chain backwards to the full snapshot, ensuring all links exist
+// and their manifests are readable. It does not check the integrity of the data files themselves.
+func (m *manager) Validate(snapshotDir string) error {
+	p := m.provider
+	_, span := p.GetTracer().Start(context.Background(), "SnapshotManager.Validate")
+	defer span.End()
+	span.SetAttributes(attribute.String("snapshot.dir", snapshotDir))
+
+	p.GetLogger().Info("Starting validation of snapshot chain.", "start_snapshot", snapshotDir)
+
+	snapshotBaseDir := filepath.Dir(snapshotDir)
+	currentSnapshotPath := snapshotDir
+
+	if _, statErr := m.wrapper.Stat(currentSnapshotPath); os.IsNotExist(statErr) {
+		return fmt.Errorf("snapshot directory %s does not exist", currentSnapshotPath)
+	}
+
+	for {
+		manifest, _, err := readManifestFromDir(currentSnapshotPath, m.wrapper)
+		if err != nil {
+			return fmt.Errorf("validation failed: could not read manifest from %s: %w", currentSnapshotPath, err)
+		}
+		p.GetLogger().Debug("Validated manifest.", "snapshot_id", filepath.Base(currentSnapshotPath))
+
+		if manifest.Type == core.SnapshotTypeFull {
+			p.GetLogger().Info("Validation successful: reached full snapshot at the root of the chain.", "full_snapshot", currentSnapshotPath)
+			return nil // Reached the root of the chain, validation successful.
+		}
+
+		if manifest.ParentID == "" {
+			err := fmt.Errorf("validation failed: incremental snapshot %s is missing a ParentID", filepath.Base(currentSnapshotPath))
+			p.GetLogger().Error(err.Error())
+			return err
+		}
+
+		// Move to the parent
+		parentPath := filepath.Join(snapshotBaseDir, manifest.ParentID)
+		if _, statErr := m.wrapper.Stat(parentPath); os.IsNotExist(statErr) {
+			return fmt.Errorf("validation failed: parent snapshot %s for %s not found", manifest.ParentID, filepath.Base(currentSnapshotPath))
+		}
+		currentSnapshotPath = parentPath
+	}
+}
+
 // writeManifestAndCurrent finalizes a snapshot by writing the manifest and CURRENT file.
 func (m *manager) writeManifestAndCurrent(snapshotDir string, manifest *core.SnapshotManifest) (string, error) {
 	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, manifest.CreatedAt.UnixNano())

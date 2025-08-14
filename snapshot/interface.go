@@ -37,4 +37,8 @@ type ManagerInterface interface {
 
 	// ListSnapshots scans a base directory and returns information about all snapshots in the chain.
 	ListSnapshots(snapshotsBaseDir string) ([]Info, error)
+
+	// Validate checks the integrity of a snapshot and its entire parent chain.
+	// It verifies that all parent snapshots exist and their manifests are readable.
+	Validate(snapshotDir string) error
 }

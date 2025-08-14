@@ -638,3 +638,129 @@ func TestSnapshot_E2E_RestoreFromLatest_WithChain(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, recoveredEntries, 2, "Should recover 2 entries from the restored WAL")
 }
+
+func TestSnapshot_E2E_RestoreFromBrokenChain(t *testing.T) {
+	// --- 1. Setup: Create a valid snapshot chain (Full -> Incr1 -> Incr2) ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	restoredDataDir := filepath.Join(baseDir, "data_restored_broken")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// Create Full Snapshot
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// Create First Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	middleSnapshotID, middleSnapshotPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// Create Second Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// --- 2. Break the chain by deleting the middle snapshot ---
+	t.Logf("Simulating broken chain by deleting middle snapshot: %s", middleSnapshotPath)
+	require.NoError(t, os.RemoveAll(middleSnapshotPath))
+
+	// --- 3. Attempt to restore from the end of the broken chain ---
+	restoreOpts := RestoreOptions{
+		DataDir: restoredDataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	err = RestoreFromFull(restoreOpts, latestPath)
+
+	// --- 4. Verify the failure ---
+	require.Error(t, err, "RestoreFromFull should fail when the chain is broken")
+	expectedErrStr := fmt.Sprintf("parent snapshot %s not found for %s", middleSnapshotID, latestID)
+	assert.Contains(t, err.Error(), expectedErrStr, "Error message should indicate the missing parent")
+
+	// Verify that the target directory was not created or was cleaned up.
+	_, statErr := os.Stat(restoredDataDir)
+	assert.True(t, os.IsNotExist(statErr), "Target data directory should not exist after a failed restore")
+}
+
+func TestSnapshot_E2E_ValidateChain(t *testing.T) {
+	// --- 1. Setup: Create a valid snapshot chain (Full -> Incr1 -> Incr2) ---
+	baseDir := t.TempDir()
+	originalDataDir := filepath.Join(baseDir, "data_orig")
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, originalDataDir)
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// Create Full Snapshot
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	err := manager.CreateFull(context.Background(), parentSnapshotDir)
+	require.NoError(t, err)
+
+	// Create First Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	middleSnapshotID, middleSnapshotPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// Create Second Incremental Snapshot
+	mockClock.Advance(time.Second)
+	provider.sequenceNumber = 300
+	sst3 := createDummySSTableForE2E(t, provider.sstDir, 3, 210)
+	provider.levelsManager.AddTableToLevel(0, sst3)
+	err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
+	require.NoError(t, err)
+	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
+	require.NoError(t, err)
+
+	// --- 2. Validate the complete chain ---
+	t.Log("Validating complete chain...")
+	err = manager.Validate(latestPath)
+	require.NoError(t, err, "Validation of a complete chain should succeed")
+
+	// --- 3. Break the chain ---
+	t.Logf("Breaking chain by deleting middle snapshot: %s", middleSnapshotPath)
+	require.NoError(t, os.RemoveAll(middleSnapshotPath))
+
+	// --- 4. Validate the broken chain ---
+	t.Log("Validating broken chain...")
+	err = manager.Validate(latestPath)
+	require.Error(t, err, "Validation of a broken chain should fail")
+	expectedErrStr := fmt.Sprintf("parent snapshot %s for %s not found", middleSnapshotID, latestID)
+	assert.Contains(t, err.Error(), expectedErrStr, "Error message should indicate the missing parent")
+
+	// --- 5. Validate a non-existent snapshot ---
+	err = manager.Validate(filepath.Join(snapshotsBaseDir, "non_existent_snapshot"))
+	require.Error(t, err, "Validation of a non-existent snapshot should fail")
+	assert.Contains(t, err.Error(), "does not exist")
+}
