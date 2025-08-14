@@ -22,10 +22,15 @@ type Info struct {
 // PruneOptions defines the policies for pruning old snapshots.
 type PruneOptions struct {
 	// KeepN specifies the number of the most recent full snapshot chains to keep.
-	// A chain consists of a full snapshot and all its subsequent incremental snapshots.
-	// If KeepN is 0, all snapshots will be pruned.
-	// A negative value will result in an error.
+	// This acts as a safeguard; at least this many chains will be kept,
+	// regardless of their age. A zero or negative value means this policy is disabled.
 	KeepN int
+
+	// PruneOlderThan specifies that any snapshot chain whose newest snapshot is older
+	// than this duration will be pruned, subject to the KeepN policy.
+	// For example, if KeepN is 2 and PruneOlderThan is 30 days, chains older than
+	// 30 days will be deleted, but the 2 newest chains will always be preserved.
+	PruneOlderThan time.Duration
 }
 
 // RestoreOptions contains the necessary parameters for a restore operation.

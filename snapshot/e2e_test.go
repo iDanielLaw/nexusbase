@@ -829,3 +829,53 @@ func TestSnapshot_E2E_Prune(t *testing.T) {
 	assert.Contains(t, remainingIDs, filepath.Base(chain2_full_dir))
 	assert.NotContains(t, remainingIDs, filepath.Base(chain1_full_dir))
 }
+
+func TestSnapshot_E2E_Prune_ByAge(t *testing.T) {
+	// --- 1. Setup: Create multiple snapshot chains with different ages ---
+	baseDir := t.TempDir()
+	snapshotsBaseDir := filepath.Join(baseDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	provider := newTestE2EProvider(t, baseDir) // Use baseDir for dummy data
+	defer provider.Close(t)
+	manager := NewManager(provider)
+	mockClock, ok := provider.clock.(*utils.MockClock)
+	require.True(t, ok)
+
+	// --- Chain 1 (Old, to be pruned by age) ---
+	// Set clock to 3 days ago
+	mockClock.SetTime(time.Now().Add(-72 * time.Hour))
+	provider.sequenceNumber = 100
+	sst1 := createDummySSTableForE2E(t, provider.sstDir, 1, 10)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	chain1_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain1_full_dir))
+
+	// --- Chain 2 (New, to be kept) ---
+	// Set clock to now
+	mockClock.SetTime(time.Now())
+	provider.sequenceNumber = 200
+	sst2 := createDummySSTableForE2E(t, provider.sstDir, 2, 110)
+	provider.levelsManager.AddTableToLevel(1, sst2)
+	chain2_full_dir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d_full", mockClock.Now().UnixNano()))
+	require.NoError(t, manager.CreateFull(context.Background(), chain2_full_dir))
+
+	// --- 2. List before pruning ---
+	infosBefore, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosBefore, 2, "Should have 2 snapshots before pruning")
+
+	// --- 3. Prune, keeping chains newer than 48 hours ---
+	// This should delete chain 1 but keep chain 2.
+	deletedIDs, err := manager.Prune(context.Background(), snapshotsBaseDir, PruneOptions{PruneOlderThan: 48 * time.Hour})
+	require.NoError(t, err, "Prune operation should succeed")
+
+	// --- 4. Verify results ---
+	assert.Len(t, deletedIDs, 1, "Should have deleted 1 snapshot from the oldest chain")
+	assert.Equal(t, filepath.Base(chain1_full_dir), deletedIDs[0])
+
+	infosAfter, err := manager.ListSnapshots(snapshotsBaseDir)
+	require.NoError(t, err)
+	require.Len(t, infosAfter, 1, "Should have 1 snapshot remaining after pruning")
+	assert.Equal(t, filepath.Base(chain2_full_dir), infosAfter[0].ID)
+}

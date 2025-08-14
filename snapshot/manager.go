@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
@@ -661,10 +662,6 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 		attribute.Int("snapshot.prune.keep_n", opts.KeepN),
 	)
 
-	if opts.KeepN < 0 {
-		return nil, fmt.Errorf("PruneOptions.KeepN cannot be negative")
-	}
-
 	// 1. List all snapshots
 	infos, err := m.ListSnapshots(snapshotsBaseDir)
 	if err != nil {
@@ -691,19 +688,53 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 		}
 	}
 
-	// 3. Identify chains to prune
-	// Sort full snapshots by creation time, newest first, to easily find the ones to keep.
-	sort.Slice(fullSnapshotRoots, func(i, j int) bool {
-		return fullSnapshotRoots[i].CreatedAt.After(fullSnapshotRoots[j].CreatedAt)
-	})
-
-	if opts.KeepN >= len(fullSnapshotRoots) {
-		p.GetLogger().Info("Pruning skipped: number of full snapshot chains is less than or equal to KeepN.", "chains_found", len(fullSnapshotRoots), "keep_n", opts.KeepN)
+	// 3. Identify chains to prune based on policies
+	if opts.KeepN < 0 {
+		return nil, fmt.Errorf("PruneOptions.KeepN cannot be negative")
+	}
+	if opts.KeepN <= 0 && opts.PruneOlderThan <= 0 {
+		p.GetLogger().Info("Pruning skipped: no policies defined (KeepN and PruneOlderThan are not set).")
 		return []string{}, nil
 	}
 
-	chainsToPrune := fullSnapshotRoots[opts.KeepN:]
-	p.GetLogger().Info("Pruning snapshots.", "chains_to_keep", opts.KeepN, "chains_to_prune", len(chainsToPrune))
+	// Sort full snapshots by creation time, oldest first, to evaluate them for pruning.
+	sort.Slice(fullSnapshotRoots, func(i, j int) bool {
+		return fullSnapshotRoots[i].CreatedAt.Before(fullSnapshotRoots[j].CreatedAt)
+	})
+
+	var chainsToPrune []Info
+	numChains := len(fullSnapshotRoots)
+	now := m.provider.GetClock().Now()
+
+	// Memoization cache for chain age calculation
+	chainAgeCache := make(map[string]time.Time)
+	findNewestTime := func(rootID string) time.Time {
+		if t, ok := chainAgeCache[rootID]; ok {
+			return t
+		}
+		t := findNewestTimeInChain(rootID, infoMap, childrenMap)
+		chainAgeCache[rootID] = t
+		return t
+	}
+
+	for _, root := range fullSnapshotRoots {
+		// The KeepN policy acts as a safeguard. We cannot prune more than this.
+		if numChains <= opts.KeepN {
+			break
+		}
+
+		// If PruneOlderThan is set, we check the age of the chain.
+		if opts.PruneOlderThan > 0 {
+			newestTime := findNewestTime(root.ID)
+			if now.Sub(newestTime) <= opts.PruneOlderThan {
+				continue // This chain is not old enough, skip to the next.
+			}
+		}
+
+		// If we are here, the chain is eligible for pruning (either no age limit, or it's old enough).
+		chainsToPrune = append(chainsToPrune, root)
+		numChains--
+	}
 
 	// 4. Collect all snapshot IDs within the chains to be pruned
 	var allIDsToPrune []string
@@ -739,6 +770,34 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 	}
 
 	return deletedIDs, firstErr
+}
+
+// findNewestTimeInChain finds the CreatedAt timestamp of the newest snapshot in a chain,
+// starting from a given root snapshot ID.
+func findNewestTimeInChain(rootID string, infoMap map[string]Info, childrenMap map[string][]string) time.Time {
+	rootInfo, ok := infoMap[rootID]
+	if !ok {
+		return time.Time{} // Should not happen if called from Prune
+	}
+	newestTime := rootInfo.CreatedAt
+
+	queue := []string{rootID}
+	visited := make(map[string]struct{})
+	visited[rootID] = struct{}{}
+
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+
+		if info, ok := infoMap[currentID]; ok && info.CreatedAt.After(newestTime) {
+			newestTime = info.CreatedAt
+		}
+
+		if children, ok := childrenMap[currentID]; ok {
+			queue = append(queue, children...)
+		}
+	}
+	return newestTime
 }
 
 // writeManifestAndCurrent finalizes a snapshot by writing the manifest and CURRENT file.

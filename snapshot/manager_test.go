@@ -2760,33 +2760,32 @@ func TestManager_Prune(t *testing.T) {
 		return ctx, manager, snapshotsBaseDir
 	}
 
-	t.Run("Success_Keep1_OutOf_3_Chains", func(t *testing.T) {
+	t.Run("Success_KeepN_Only", func(t *testing.T) {
 		// 1. Setup
 		ctx, manager, snapshotsBaseDir := setup(t)
 
 		// Chain 1 (oldest)
 		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now().Add(-3*time.Hour))
 		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_1.1", core.SnapshotTypeIncremental, "full_1", time.Now().Add(-2*time.Hour))
-
 		// Chain 2 (middle)
 		createPruneTestSnapshot(t, snapshotsBaseDir, "full_2", core.SnapshotTypeFull, "", time.Now().Add(-1*time.Hour))
-
 		// Chain 3 (newest)
 		createPruneTestSnapshot(t, snapshotsBaseDir, "full_3", core.SnapshotTypeFull, "", time.Now())
 		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_3.1", core.SnapshotTypeIncremental, "full_3", time.Now().Add(1*time.Minute))
 		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_3.2", core.SnapshotTypeIncremental, "incr_3.1", time.Now().Add(2*time.Minute))
 
 		// 2. Execution
-		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 1})
+		// Keep the 2 newest full chains (full_2 and full_3)
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 2})
 
 		// 3. Verification
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"full_1", "incr_1.1", "full_2"}, deletedIDs)
+		assert.ElementsMatch(t, []string{"full_1", "incr_1.1"}, deletedIDs)
 
 		// Check remaining files
 		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
 		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "incr_1.1"))
-		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_2"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_2"))
 		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_3"))
 		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "incr_3.1"))
 		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "incr_3.2"))
@@ -2798,7 +2797,7 @@ func TestManager_Prune(t *testing.T) {
 		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now())
 
 		// 2. Execution
-		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 5})
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 1})
 
 		// 3. Verification
 		require.NoError(t, err)
@@ -2806,32 +2805,61 @@ func TestManager_Prune(t *testing.T) {
 		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
 	})
 
-	t.Run("KeepN_Is_Zero", func(t *testing.T) {
+	t.Run("PruneOlderThan_Only", func(t *testing.T) {
 		// 1. Setup
 		ctx, manager, snapshotsBaseDir := setup(t)
-		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now())
-		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_1.1", core.SnapshotTypeIncremental, "full_1", time.Now().Add(1*time.Minute))
+		// Chain 1 (old, should be pruned)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_old", core.SnapshotTypeFull, "", time.Now().Add(-48*time.Hour))
+		// Chain 2 (new, should be kept)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_new", core.SnapshotTypeFull, "", time.Now().Add(-1*time.Hour))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_new", core.SnapshotTypeIncremental, "full_new", time.Now())
 
 		// 2. Execution
-		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 0})
+		// Prune chains whose newest snapshot is older than 24 hours.
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{PruneOlderThan: 24 * time.Hour})
 
 		// 3. Verification
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"full_1", "incr_1.1"}, deletedIDs)
-		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
-		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "incr_1.1"))
+		assert.ElementsMatch(t, []string{"full_old"}, deletedIDs)
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_old"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_new"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "incr_new"))
 	})
 
-	t.Run("KeepN_Is_Negative", func(t *testing.T) {
+	t.Run("KeepN_And_PruneOlderThan_Combined", func(t *testing.T) {
 		// 1. Setup
 		ctx, manager, snapshotsBaseDir := setup(t)
+		// Chain 1 (very old, should be pruned)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now().Add(-72*time.Hour))
+		// Chain 2 (old, but should be kept by KeepN)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_2", core.SnapshotTypeFull, "", time.Now().Add(-48*time.Hour))
+		// Chain 3 (new, should be kept)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_3", core.SnapshotTypeFull, "", time.Now().Add(-1*time.Hour))
 
 		// 2. Execution
-		_, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: -1})
+		// Prune chains older than 24h, but always keep the 2 newest.
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 2, PruneOlderThan: 24 * time.Hour})
 
 		// 3. Verification
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "KeepN cannot be negative")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"full_1"}, deletedIDs) // Only full_1 is old enough AND not protected by KeepN
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_2")) // Kept by KeepN
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_3")) // Kept by KeepN and age
+	})
+
+	t.Run("No_Options_Set", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", time.Now())
+
+		// 2. Execution
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{})
+
+		// 3. Verification
+		require.NoError(t, err)
+		assert.Empty(t, deletedIDs, "Should not prune anything if no policies are set")
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
 	})
 
 	t.Run("RemoveAll_Error", func(t *testing.T) {
@@ -2853,7 +2881,7 @@ func TestManager_Prune(t *testing.T) {
 		manager.wrapper = helper
 
 		// 2. Execution
-		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 1})
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, PruneOptions{KeepN: 1}) // Prunes full_1 and full_2
 
 		// 3. Verification
 		require.Error(t, err)
