@@ -391,7 +391,7 @@ func (w *SSTableWriter) Finish() error {
 	// Flush any remaining entries in the current block
 	w.logger.Debug("Finishing writer, flushing final block", "buffer_len", w.currentBlockBuffer.Len(), "num_entries_in_block", w.numEntriesInBlock)
 	if err := w.flushCurrentBlock(); err != nil {
-		w.Abort() // Abort will also create its own span if tracer is set
+		w.abort() // Use non-locking abort
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -417,7 +417,7 @@ func (w *SSTableWriter) Finish() error {
 	// FR4.2: Get serialized index data and its checksum from indexBuilder
 	indexData, indexChecksum, err := w.indexBuilder.Build()
 	if err != nil {
-		w.Abort() // Attempt to clean up
+		w.abort() // Attempt to clean up
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -429,7 +429,7 @@ func (w *SSTableWriter) Finish() error {
 
 	// Write index checksum
 	if err := binary.Write(w.file, binary.LittleEndian, indexChecksum); err != nil {
-		w.Abort()
+		w.abort()
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -445,7 +445,7 @@ func (w *SSTableWriter) Finish() error {
 	indexOffset := w.offset
 	n, err := w.file.Write(indexData)
 	if err != nil {
-		w.Abort()
+		w.abort()
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -459,7 +459,7 @@ func (w *SSTableWriter) Finish() error {
 	bloomFilterOffset := w.offset
 	n, err = w.file.Write(bloomFilterData)
 	if err != nil {
-		w.Abort()
+		w.abort()
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -473,7 +473,7 @@ func (w *SSTableWriter) Finish() error {
 	minKeyOffset := w.offset
 	n, err = w.file.Write(w.minKey)
 	if err != nil {
-		w.Abort()
+		w.abort()
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -486,7 +486,7 @@ func (w *SSTableWriter) Finish() error {
 	maxKeyOffset := w.offset
 	n, err = w.file.Write(w.maxKey)
 	if err != nil {
-		w.Abort()
+		w.abort()
 		return fmt.Errorf("failed to write max key data: %w", err)
 	}
 	w.offset += int64(n)
@@ -508,7 +508,7 @@ func (w *SSTableWriter) Finish() error {
 	footerBuf.WriteString(MagicString) // Magic String
 
 	if _, err := w.file.Write(footerBuf.Bytes()); err != nil {
-		w.abort() // Use non-locking abort
+		w.abort() // Use non-locking abort.
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -518,7 +518,7 @@ func (w *SSTableWriter) Finish() error {
 
 	// FR7.1: Sync the file to disk
 	if err := w.file.Sync(); err != nil {
-		w.abort() // Use non-locking abort
+		w.abort() // Use non-locking abort.
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -590,7 +590,7 @@ func (w *SSTableWriter) abort() error {
 	var removeErr error
 	if w.filePath != "" {
 		for i := 0; i < maxRetries; i++ {
-			removeErr = os.Remove(w.filePath)
+			removeErr = sys.Remove(w.filePath)
 			if removeErr == nil || os.IsNotExist(removeErr) { // Success or file already gone
 				break
 			}

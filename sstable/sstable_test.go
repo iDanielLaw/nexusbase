@@ -28,6 +28,42 @@ type testEntry struct {
 	PointID   uint64 // Added for testing with sequence numbers
 }
 
+// mockFile is a mock implementation of sys.FileInterface for testing I/O errors.
+type mockFile struct {
+	name            string
+	writeShouldFail bool
+	writeErr        error
+	syncShouldFail  bool
+	syncErr         error
+	closeShouldFail bool
+	closeErr        error
+	buffer          bytes.Buffer // Simulate in-memory file content
+	writeFunc       func(p []byte) (n int, err error)
+}
+
+func (m *mockFile) Write(p []byte) (n int, err error) {
+	if m.writeFunc != nil {
+		return m.writeFunc(p)
+	}
+	if m.writeShouldFail {
+		return 0, m.writeErr
+	}
+	return m.buffer.Write(p)
+}
+
+func (m *mockFile) Sync() error {
+	if m.syncShouldFail {
+		return m.syncErr
+	}
+	return nil
+}
+
+func (m *mockFile) Close() error {
+	if m.closeShouldFail {
+		return m.closeErr
+	}
+	return nil
+}
 // mockFilter is a simple mock for the filter.Filter interface for testing.
 type mockFilter struct {
 	data map[string]bool
@@ -41,6 +77,18 @@ func (m *mockFilter) Contains(data []byte) bool {
 func (m *mockFilter) Bytes() []byte {
 	return nil
 }
+
+// Implement other methods of sys.FileInterface to satisfy the interface
+func (m *mockFile) Read(p []byte) (n int, err error)               { return m.buffer.Read(p) }
+func (m *mockFile) Seek(offset int64, whence int) (int64, error)   { return 0, nil }
+func (m *mockFile) Stat() (os.FileInfo, error)                     { return nil, nil }
+func (m *mockFile) Truncate(size int64) error                      { return nil }
+func (m *mockFile) Name() string                                   { return m.name }
+func (m *mockFile) WriteAt(p []byte, off int64) (n int, err error) { return m.Write(p) }
+func (m *mockFile) ReadAt(p []byte, off int64) (n int, err error)  { return 0, nil }
+func (m *mockFile) WriteString(s string) (n int, err error)        { return m.Write([]byte(s)) }
+func (m *mockFile) WriteTo(w io.Writer) (n int64, err error)       { return 0, nil }
+func (m *mockFile) ReadFrom(r io.Reader) (n int64, err error)      { return 0, nil }
 
 func createTestEntries() []testEntry {
 	return []testEntry{
@@ -583,6 +631,139 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 		assert.ErrorIs(t, err, mockErr, "The error should wrap the mocked error")
 	})
 
+	t.Run("NewSSTableWriter_InvalidBloomFilterRate", func(t *testing.T) {
+		opts := baseOpts
+		opts.DataDir = t.TempDir()
+		opts.ID = 4
+		opts.BloomFilterFalsePositiveRate = 1.5 // Invalid rate
+
+		_, err := NewSSTableWriter(opts)
+		require.Error(t, err, "NewSSTableWriter should fail with invalid bloom filter rate")
+		assert.Contains(t, err.Error(), "invalid arguments for NewBloomFilter", "Error message should indicate bloom filter issue")
+	})
+
+	t.Run("Add_FlushBlockError", func(t *testing.T) {
+		// 1. Setup mock file that will fail on write
+		mockErr := errors.New("simulated write error")
+		mockF := &mockFile{
+			name: "add_flush_error.tmp",
+		}
+
+		// 2. Mock sys.Create to return our mock file
+		originalCreate := sys.Create
+		sys.Create = func(name string) (sys.FileInterface, error) {
+			// The first write is the header, let it succeed.
+			mockF.writeShouldFail = false
+			return mockF, nil
+		}
+		defer func() { sys.Create = originalCreate }()
+
+		// 3. Create writer with a tiny block size to force a flush
+		opts := baseOpts
+		opts.DataDir = t.TempDir()
+		opts.ID = 5
+		opts.BlockSize = 32 // Very small block size
+
+		writer, err := NewSSTableWriter(opts)
+		require.NoError(t, err, "NewSSTableWriter should succeed initially")
+
+		// 4. First Add should succeed and fill the buffer
+		require.NoError(t, writer.Add([]byte("key1"), []byte("value1"), core.EntryTypePutEvent, 1))
+
+		// 5. Configure mock to fail on the next write (which will be the flush)
+		mockF.writeShouldFail = true
+		mockF.writeErr = mockErr
+
+		// 6. Second Add will trigger flushCurrentBlock, which will fail
+		err = writer.Add([]byte("key2"), []byte("value2"), core.EntryTypePutEvent, 2)
+		require.Error(t, err, "Add should fail when flushCurrentBlock fails")
+		assert.ErrorIs(t, err, mockErr, "The error from Add should wrap the mocked write error")
+	})
+
+	t.Run("Finish_WriteError", func(t *testing.T) {
+		// This test simulates an I/O error during the final metadata write in Finish().
+		mockErr := errors.New("simulated metadata write error")
+		mockF := &mockFile{name: "write_error.tmp"}
+
+		originalCreate := sys.Create
+		sys.Create = func(name string) (sys.FileInterface, error) { return mockF, nil }
+		defer func() { sys.Create = originalCreate }()
+
+		var removedPath string
+		originalRemove := sys.Remove
+		sys.Remove = func(name string) error {
+			removedPath = name
+			return nil
+		}
+		defer func() { sys.Remove = originalRemove }()
+
+		var writeCount int
+		mockF.writeFunc = func(p []byte) (n int, err error) {
+			writeCount++
+			// 1: header, 2: block compression flag, 3: block checksum, 4: block data
+			// Fail on the 5th write, which is the index checksum.
+			if writeCount == 5 {
+				return 0, mockErr
+			}
+			return mockF.buffer.Write(p) // Use the internal buffer for successful writes
+		}
+
+		opts := baseOpts
+		opts.DataDir = t.TempDir()
+		opts.ID = 8
+		writer, err := NewSSTableWriter(opts)
+		require.NoError(t, err)
+		filePathBeforeFinish := writer.FilePath() // Store path before it's cleared by abort()
+		require.NoError(t, writer.Add([]byte("key"), []byte("val"), core.EntryTypePutEvent, 1))
+
+		err = writer.Finish()
+		require.Error(t, err, "Finish should fail when a metadata write fails")
+		assert.ErrorIs(t, err, mockErr, "The error should wrap the mocked write error")
+		assert.Contains(t, err.Error(), "failed to write index checksum")
+
+		// Verify that Abort was called and the temp file was removed
+		assert.Equal(t, filePathBeforeFinish, removedPath, "The temp file should have been removed after a failed Finish")
+	})
+
+	t.Run("Finish_SyncError", func(t *testing.T) {
+		// 1. Setup mock file that fails on Sync
+		mockErr := errors.New("simulated sync error")
+		mockF := &mockFile{
+			name:           "sync_error.tmp",
+			syncShouldFail: true,
+			syncErr:        mockErr,
+		}
+
+		// 2. Mock sys.Create and sys.Remove
+		originalCreate := sys.Create
+		sys.Create = func(name string) (sys.FileInterface, error) { return mockF, nil }
+		defer func() { sys.Create = originalCreate }()
+
+		var removedPath string
+		originalRemove := sys.Remove
+		sys.Remove = func(name string) error {
+			removedPath = name
+			return nil // Simulate successful removal
+		}
+		defer func() { sys.Remove = originalRemove }()
+
+		// 3. Create writer, add data, and call Finish
+		opts := baseOpts
+		opts.DataDir = t.TempDir()
+		opts.ID = 6
+		writer, err := NewSSTableWriter(opts)
+		require.NoError(t, err)
+		filePathBeforeFinish := writer.FilePath() // Store path before it's cleared by abort()
+		require.NoError(t, writer.Add([]byte("key"), []byte("val"), core.EntryTypePutEvent, 1))
+
+		err = writer.Finish()
+		require.Error(t, err, "Finish should fail when Sync fails")
+		assert.ErrorIs(t, err, mockErr, "The error from Finish should wrap the mocked sync error")
+
+		// 4. Verify that Abort was called and the temp file was removed
+		assert.Equal(t, filePathBeforeFinish, removedPath, "The temp file should have been removed after a failed Finish")
+	})
+
 	t.Run("Finish_RenameError", func(t *testing.T) {
 		tempDir := t.TempDir()
 		opts := baseOpts
@@ -631,6 +812,28 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 		// Calling Abort again should not cause an error
 		err = writer.Abort()
 		require.NoError(t, err, "Calling Abort multiple times should not error")
+	})
+
+	t.Run("Abort_RemoveError", func(t *testing.T) {
+		// 1. Mock sys.Remove to fail
+		mockErr := errors.New("simulated remove error")
+		originalRemove := sys.Remove
+		sys.Remove = func(name string) error {
+			return mockErr
+		}
+		defer func() { sys.Remove = originalRemove }()
+
+		// 2. Create a writer
+		opts := baseOpts
+		opts.DataDir = t.TempDir()
+		opts.ID = 7
+		writer, err := NewSSTableWriter(opts)
+		require.NoError(t, err)
+
+		// 3. Call Abort and check for the propagated error
+		err = writer.Abort()
+		require.Error(t, err, "Abort should fail when os.Remove fails")
+		assert.ErrorIs(t, err, mockErr, "The error from Abort should wrap the mocked remove error")
 	})
 }
 
