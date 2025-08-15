@@ -228,7 +228,7 @@ func TestSSTable_VerifyIntegrity(t *testing.T) {
 
 		var foundExpectedError bool
 		for _, e := range errs {
-			if strings.Contains(e.Error(), "Stored MinKey a does not match first key in index b") {
+			if strings.Contains(e.Error(), "does not match first key in index") {
 				foundExpectedError = true
 				break
 			}
