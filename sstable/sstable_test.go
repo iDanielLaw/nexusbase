@@ -837,6 +837,65 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 	})
 }
 
+// TestSSTableWriter_flushCurrentBlock_WriteFailures provides targeted tests for write failures
+// that can occur within the flushCurrentBlock method. This is crucial for ensuring that I/O errors
+// during block flushing are handled gracefully.
+func TestSSTableWriter_flushCurrentBlock_WriteFailures(t *testing.T) {
+	mockErr := errors.New("simulated disk write error")
+	baseOpts := core.SSTableWriterOptions{
+		DataDir:                      t.TempDir(),
+		ID:                           99,
+		EstimatedKeys:                10,
+		BloomFilterFalsePositiveRate: 0.01,
+		BlockSize:                    DefaultBlockSize,
+		Compressor:                   &compressors.NoCompressionCompressor{},
+		Logger:                       slog.Default(),
+	}
+
+	// runTest is a helper function to run a sub-test with a specific write failure point.
+	// It sets up a mock file that will fail on the Nth write call.
+	runTest := func(t *testing.T, failOnWriteCount int, expectedErrSubstring string) {
+		mockF := &mockFile{name: "flush_fail.tmp"}
+		writeCounter := 0
+
+		// Mock sys.Create to return our controllable mock file.
+		originalCreate := sys.Create
+		sys.Create = func(name string) (sys.FileInterface, error) {
+			// The writeFunc allows us to control behavior for each Write call.
+			mockF.writeFunc = func(p []byte) (n int, err error) {
+				writeCounter++
+				// The first write is always the SSTable header in NewSSTableWriter.
+				// We want to test failures *within* flushCurrentBlock, which happens later.
+				if writeCounter == failOnWriteCount {
+					return 0, mockErr
+				}
+				return mockF.buffer.Write(p) // Successful write
+			}
+			return mockF, nil
+		}
+		defer func() { sys.Create = originalCreate }()
+
+		writer, err := NewSSTableWriter(baseOpts)
+		require.NoError(t, err)
+
+		// Add data to trigger a flush on Finish()
+		require.NoError(t, writer.Add([]byte("key"), []byte("value"), core.EntryTypePutEvent, 1))
+
+		// Call Finish(), which will call flushCurrentBlock internally.
+		err = writer.Finish()
+
+		// Assertions
+		require.Error(t, err, "Finish() should fail when an internal write fails")
+		assert.ErrorIs(t, err, mockErr, "The error should wrap the original disk error")
+		assert.Contains(t, err.Error(), expectedErrSubstring, "Error message should indicate the specific failure point")
+	}
+
+	// The SSTable header is write #1. The writes within flushCurrentBlock are #2, #3, #4.
+	t.Run("FailOnCompressionFlag", func(t *testing.T) { runTest(t, 2, "failed to write compression type flag") })
+	t.Run("FailOnChecksum", func(t *testing.T) { runTest(t, 3, "failed to write block checksum") })
+	t.Run("FailOnBlockData", func(t *testing.T) { runTest(t, 4, "failed to write data block") })
+}
+
 // TODO: Add more corruption tests for the new block-based format (e.g., corrupted block index, corrupted block data).
 
 func TestSSTableIterator_New(t *testing.T) {

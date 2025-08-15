@@ -45,7 +45,6 @@ func (b *Block) Find(keyToFind []byte) ([]byte, core.EntryType, uint64, error) {
 	if len(b.data) < 4 { // Must have at least num_restart_points (uint32)
 		return nil, 0, 0, ErrNotFound
 	}
-
 	// 1. Read the trailer to get restart points
 	numRestartPointsOffset := len(b.data) - 4
 	numRestartPoints := binary.LittleEndian.Uint32(b.data[numRestartPointsOffset:])
@@ -96,6 +95,21 @@ func (b *Block) Find(keyToFind []byte) ([]byte, core.EntryType, uint64, error) {
 	// 3. Linear scan from the found restart point.
 	blockIter := NewBlockIterator(entriesData[searchStartOffset:])
 	return findLinearScan(blockIter, keyToFind)
+}
+
+// getEntriesData is a helper to extract the slice of block data that contains
+// only the key-value entries, excluding the trailer.
+func (b *Block) getEntriesData() []byte {
+	if len(b.data) < 4 {
+		return nil
+	}
+	numRestartPointsOffset := len(b.data) - 4
+	numRestartPoints := binary.LittleEndian.Uint32(b.data[numRestartPointsOffset:])
+	trailerSize := (int(numRestartPoints) * 4) + 4
+	if len(b.data) < trailerSize {
+		return nil // Corrupted block
+	}
+	return b.data[:len(b.data)-trailerSize]
 }
 
 // findLinearScan performs a linear scan for a key from a given iterator's current position.

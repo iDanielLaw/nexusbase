@@ -129,15 +129,7 @@ func (w *SSTableWriter) flushCurrentBlock() error {
 	var span trace.Span
 	if w.tracer != nil {
 		_, span = w.tracer.Start(context.Background(), "SSTableWriter.flushCurrentBlock")
-		// Defer the span.End() call. The recover logic is still needed due to the observed panics.
-		defer func() {
-			if span != nil {
-				if r := recover(); r != nil {
-					w.logger.Error("Recovered from panic during span.End()", "panic", r)
-				}
-				span.End()
-			}
-		}()
+		defer span.End()
 	}
 
 	// REMOVED: w.mu.Lock()

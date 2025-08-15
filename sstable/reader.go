@@ -319,15 +319,13 @@ func (s *SSTable) Get(key []byte) (value []byte, entryType core.EntryType, err e
 	}
 
 	// FR4.8: Read block (through cache)
-	blockData, err := s.readBlock(blockMeta.BlockOffset, blockMeta.BlockLength, nil) // Pass nil semaphore for single Get operations
+	block, err := s.readBlock(blockMeta.BlockOffset, blockMeta.BlockLength, nil) // Pass nil semaphore for single Get operations
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read block for key %s: %w", string(key), err)
 	}
-	defer core.PutBuffer(blockData) // Return buffer to pool when function exits
-	// The cache now returns the raw decompressed bytes.
-	// The block itself is ephemeral and created on-demand.
+	// The readBlock function now returns a *Block and manages its own buffers.
+	// We don't need to put anything back into a pool here.
 
-	block := NewBlock(blockData.Bytes())
 	// Find in block now returns value, entryType, seqNum, error
 	valResult, typeResultFromBlock, _, errResultFromBlock := block.Find(key) // We ignore seqNum for Get's return signature for now
 
@@ -349,8 +347,8 @@ func (s *SSTable) Contains(key []byte) bool {
 }
 
 // readBlock reads a data block from the SSTable, utilizing the block cache.
-func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*bytes.Buffer, error) {
-	// Acquire a semaphore permit if provided. This limits concurrency.
+func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Block, error) {
+	// Acquire a semaphore permit if provided. This limits concurrency for block reads.
 	if sem != nil {
 		sem <- struct{}{}
 		defer func() {
@@ -376,12 +374,10 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*by
 			if span != nil {
 				span.SetAttributes(attribute.Bool("cache.hit", true))
 			}
-			// The cache stores []byte. We need to return a *bytes.Buffer.
 			if data, ok := cachedVal.([]byte); ok {
-				// Get a buffer from the pool and write the cached data into it.
-				buf := core.BufferPool.Get()
-				buf.Write(data)
-				return buf, nil
+				// Create a new block from the cached (and already decompressed) data.
+				// The block itself is ephemeral and not returned to any pool.
+				return NewBlock(data), nil
 			}
 			return nil, fmt.Errorf("invalid type in block cache for key %s", cacheKey)
 		}
@@ -416,34 +412,31 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*by
 		return nil, fmt.Errorf("checksum mismatch for block at offset %d: %w", offset, ErrCorrupted)
 	}
 
-	// Get a buffer from the pool to decompress into.
-	// This buffer will be returned to the caller, who is responsible for putting it back.
+	// Get a buffer from the pool to decompress into. We will return it to the pool in this function.
 	decompressionBuffer := core.BufferPool.Get()
+	defer core.BufferPool.Put(decompressionBuffer)
 
 	decompressor, errDecompressor := GetCompressor(core.CompressionType(compressionTypeByte))
 	if errDecompressor != nil {
-		core.BufferPool.Put(decompressionBuffer) // Return buffer on error
 		return nil, fmt.Errorf("failed to get decompressor for block at offset %d: %w", offset, errDecompressor)
 	}
 
 	decompressReader, err := decompressor.Decompress(dataOnDisk)
 	if err != nil {
-		core.BufferPool.Put(decompressionBuffer) // Return buffer on error
 		return nil, fmt.Errorf("failed to decompress block at offset %d: %w", offset, err)
 	}
 	defer decompressReader.Close()
 
 	if _, err := io.Copy(decompressionBuffer, decompressReader); err != nil {
-		core.BufferPool.Put(decompressionBuffer) // Return buffer on error
 		return nil, fmt.Errorf("failed to copy decompressed data to buffer: %w", err)
 	}
 
+	decompressedBytes := decompressionBuffer.Bytes()
 	// If caching is enabled, put a copy of the decompressed data into the cache.
 	if s.blockCache != nil {
 		cacheKey := fmt.Sprintf("%d-%d", s.id, offset)
-		// Create a copy for the cache. The original buffer is returned to the caller.
-		dataToCache := make([]byte, decompressionBuffer.Len())
-		copy(dataToCache, decompressionBuffer.Bytes())
+		dataToCache := make([]byte, len(decompressedBytes))
+		copy(dataToCache, decompressedBytes)
 		s.blockCache.Put(cacheKey, dataToCache)
 		if span != nil {
 			span.SetAttributes(attribute.Int("cache.put_block_size", len(dataToCache)))
@@ -451,7 +444,7 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*by
 	}
 
 	// Return the original buffer from the pool to the caller.
-	return decompressionBuffer, nil
+	return NewBlock(decompressedBytes), nil
 }
 
 // NewIterator creates an iterator for scanning entries within the SSTable.
@@ -568,14 +561,14 @@ func (s *SSTable) VerifyIntegrity(deepCheck bool) []error {
 		// 4. Verify index entries' FirstKey against actual block data (Deep Check)
 		if deepCheck {
 			// This can be resource-intensive as it involves reading blocks.
-			for i, indexEntry := range s.index.entries { // Pass nil semaphore for integrity checks
-				blockData, err := s.readBlock(indexEntry.BlockOffset, indexEntry.BlockLength, nil) // Uses cache if available
+			for i, indexEntry := range s.index.entries {
+				block, err := s.readBlock(indexEntry.BlockOffset, indexEntry.BlockLength, nil) // Uses cache if available
 				if err != nil {
 					errs = append(errs, fmt.Errorf("SSTable ID %d: Failed to read block for index entry %d (offset %d): %w",
 						s.id, i, indexEntry.BlockOffset, err))
 					continue
 				}
-				blockIter := NewBlockIterator(blockData.Bytes())
+				blockIter := NewBlockIterator(block.getEntriesData())
 				if blockIter.Next() {
 					actualFirstKeyInBlock := blockIter.Key()
 					if !bytes.Equal(indexEntry.FirstKey, actualFirstKeyInBlock) {
@@ -590,7 +583,6 @@ func (s *SSTable) VerifyIntegrity(deepCheck bool) []error {
 					// If writer ensures blocks are non-empty if indexed, this is an error.
 					errs = append(errs, fmt.Errorf("SSTable ID %d: Index entry %d points to an empty or unreadable block", s.id, i))
 				}
-				core.PutBuffer(blockData) // Return buffer to pool at the end of the loop
 			}
 		}
 
