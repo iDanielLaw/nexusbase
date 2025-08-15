@@ -34,7 +34,7 @@
 เริ่มต้นด้วยการ **Fork** Repository นี้ไปยังบัญชี GitHub ของคุณ จากนั้น **Clone** Repository ที่คุณ Fork มาลงบนเครื่องของคุณ:
 
 ```bash
-git clone https://github.com/INLOpen/nexusbase.git
+git clone https://github.com/YOUR_USERNAME/nexusbase.git
 cd nexusbase
 ```
 
