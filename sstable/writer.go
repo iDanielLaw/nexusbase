@@ -377,18 +377,24 @@ func (w *SSTableWriter) Finish() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// if w.finished { return nil } // Idempotent Finish
-	// w.finished = true
-
-	// Flush any remaining entries in the current block
-	w.logger.Debug("Finishing writer, flushing final block", "buffer_len", w.currentBlockBuffer.Len(), "num_entries_in_block", w.numEntriesInBlock)
-	if err := w.flushCurrentBlock(); err != nil {
-		w.abort() // Use non-locking abort
+	// Helper to handle errors consistently by aborting and wrapping the error.
+	// This simplifies the main logic flow significantly.
+	handleErrorAndAbort := func(err error, message string) error {
+		if err == nil {
+			return nil
+		}
+		w.abort() // The non-locking abort is called.
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return fmt.Errorf("failed to flush final block: %w", err)
+		return fmt.Errorf("%s: %w", message, err)
+	}
+
+	// Flush any remaining entries in the current block
+	w.logger.Debug("Finishing writer, flushing final block", "buffer_len", w.currentBlockBuffer.Len(), "num_entries_in_block", w.numEntriesInBlock)
+	if err := w.flushCurrentBlock(); err != nil {
+		return handleErrorAndAbort(err, "failed to flush final block")
 	}
 
 	w.logger.Debug("SSTableWriter final min/max keys before footer write",
@@ -409,77 +415,48 @@ func (w *SSTableWriter) Finish() error {
 	// FR4.2: Get serialized index data and its checksum from indexBuilder
 	indexData, indexChecksum, err := w.indexBuilder.Build()
 	if err != nil {
-		w.abort() // Attempt to clean up
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return fmt.Errorf("failed to build index: %w", err)
+		return handleErrorAndAbort(err, "failed to build index")
 	}
 
 	w.logger.Debug("Index built", "index_data_len", len(indexData), "index_entries", len(w.indexBuilder.entries))
 
 	// Write index checksum
 	if err := binary.Write(w.file, binary.LittleEndian, indexChecksum); err != nil {
-		w.abort()
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return fmt.Errorf("failed to write index checksum: %w", err)
+		return handleErrorAndAbort(err, "failed to write index checksum")
 	}
 	w.offset += int64(core.ChecksumSize) // Add checksum size to offset
 
 	// FR4.3: Get serialized bloom filter data from w.bloomFilter
 	bloomFilterData := w.bloomFilter.Bytes()
 
+	var n int
 	// Write index data to file. Record its offset and length.
 	indexOffset := w.offset
-	n, err := w.file.Write(indexData)
-	if err != nil {
-		w.abort()
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return fmt.Errorf("failed to write index data: %w", err)
+	if n, err = w.file.Write(indexData); err != nil {
+		return handleErrorAndAbort(err, "failed to write index data")
 	}
 	w.offset += int64(n)
 	indexLen := uint32(n)
 
 	// Write bloom filter data to file. Record its offset and length.
 	bloomFilterOffset := w.offset
-	n, err = w.file.Write(bloomFilterData)
-	if err != nil {
-		w.abort()
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return fmt.Errorf("failed to write bloom filter data: %w", err)
+	if n, err = w.file.Write(bloomFilterData); err != nil {
+		return handleErrorAndAbort(err, "failed to write bloom filter data")
 	}
 	w.offset += int64(n)
 	bloomFilterLen := uint32(n)
 
 	// Write MinKey and MaxKey data to file. Record their offsets and lengths.
 	minKeyOffset := w.offset
-	n, err = w.file.Write(w.minKey)
-	if err != nil {
-		w.abort()
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return fmt.Errorf("failed to write min key data: %w", err)
+	if n, err = w.file.Write(w.minKey); err != nil {
+		return handleErrorAndAbort(err, "failed to write min key data")
 	}
 	w.offset += int64(n)
 	minKeyLen := uint32(n)
 
 	maxKeyOffset := w.offset
-	n, err = w.file.Write(w.maxKey)
-	if err != nil {
-		w.abort()
-		return fmt.Errorf("failed to write max key data: %w", err)
+	if n, err = w.file.Write(w.maxKey); err != nil {
+		return handleErrorAndAbort(err, "failed to write max key data")
 	}
 	w.offset += int64(n)
 	maxKeyLen := uint32(n)
@@ -500,34 +477,24 @@ func (w *SSTableWriter) Finish() error {
 	footerBuf.WriteString(MagicString) // Magic String
 
 	if _, err := w.file.Write(footerBuf.Bytes()); err != nil {
-		w.abort() // Use non-locking abort.
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return fmt.Errorf("failed to write footer: %w", err)
+		return handleErrorAndAbort(err, "failed to write footer")
 	}
 
 	// FR7.1: Sync the file to disk
 	if err := w.file.Sync(); err != nil {
-		w.abort() // Use non-locking abort.
-		if span != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		return fmt.Errorf("failed to sync sstable file: %w", err)
+		return handleErrorAndAbort(err, "failed to sync sstable file")
 	}
 
-	// Close the file
+	// Close the file. A close error is less critical. We log it but don't abort
+	// because the data is likely already on disk, and the rename might still succeed.
 	if err := w.file.Close(); err != nil {
-		// Don't call Abort() here as the file might be partially valid or already synced.
-		// The rename might fail, but the temp file might still exist.
+		w.logger.Warn("Failed to close temporary sstable file before rename, proceeding anyway.", "error", err)
 		if span != nil {
 			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			// Do not set status to Error, as we are proceeding.
 		}
-		w.file = nil // Set to nil after closing to prevent double-close in abort()
 	}
+	w.file = nil // Set to nil after closing to prevent double-close in abort()
 
 	if gcErr := sys.GC(); gcErr != nil {
 		w.logger.Warn("Failed to run GC to aid file handle release (Windows workaround).", "error", gcErr)
@@ -549,13 +516,8 @@ func (w *SSTableWriter) Finish() error {
 	}
 
 	if renameErr != nil {
-		// If rename fails, the .tmp file still exists. abort might try to clean it.
-		w.abort() // Attempt to clean up .tmp file if rename fails
-		if span != nil {
-			span.RecordError(renameErr)
-			span.SetStatus(codes.Error, renameErr.Error())
-		}
-		return fmt.Errorf("failed to rename temporary sstable file %s to %s after %d retries: %w", w.filePath, finalPath, maxRetries, renameErr)
+		// This is a critical failure, so we abort.
+		return handleErrorAndAbort(renameErr, fmt.Sprintf("failed to rename temporary sstable file %s to %s after %d retries", w.filePath, finalPath, maxRetries))
 	}
 	w.filePath = finalPath // Update to final path
 
