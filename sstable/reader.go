@@ -62,7 +62,7 @@ type LoadSSTableOptions struct {
 // It reads the footer, deserializes the index and Bloom filter,
 // and populates the SSTable metadata.
 // Corresponds to FR4.6.
-func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
+func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	var span trace.Span
 	if opts.Tracer != nil {
 		// Assuming context.Background() for internal operations not tied to a specific request context
@@ -79,15 +79,21 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// FR6.1: Consider using a FileOpener interface for testability. For now, direct os.Open.
 	file, err := sys.Open(opts.FilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open sstable file %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to open sstable file %s: %w", opts.FilePath, err)
 	}
+	// Use defer with a named error return to ensure the file is closed on any error path.
+	defer func() {
+		if err != nil {
+			file.Close()
+		}
+	}()
 
 	// Read header bytes first to isolate file I/O from binary parsing.
 	// This helps debug issues where binary.Read might behave unexpectedly on a file handle.
 	headerSize := binary.Size(core.FileHeader{})
 	if headerSize <= 0 {
 		// This would be a programming error in core.FileHeader definition.
-		return nil, fmt.Errorf("invalid FileHeader size: %d", headerSize)
+		return nil, fmt.Errorf("invalid FileHeader size: %d", headerSize) // Early return for programming error
 	}
 	headerBytes := make([]byte, headerSize)
 	if _, err := io.ReadFull(file, headerBytes); err != nil {
@@ -98,26 +104,23 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// Now parse the header from the in-memory byte slice.
 	var header core.FileHeader
 	if err := binary.Read(bytes.NewReader(headerBytes), binary.LittleEndian, &header); err != nil {
-		return nil, fmt.Errorf("failed to parse sstable header from bytes: %w", err)
+		return nil, fmt.Errorf("failed to parse sstable header from bytes: %w", err) // Return err directly
 	}
 
 	if header.Magic != core.SSTableMagic {
-		file.Close()
 		return nil, fmt.Errorf("invalid sstable magic number in %s. Got: %x, Want: %x", opts.FilePath, header.Magic, core.SSTableMagic)
 	}
 	if header.Version != core.CurrentVersion {
-		file.Close()
 		return nil, fmt.Errorf("unsupported sstable version in %s. Got: %d, Want: %d", opts.FilePath, header.Version, core.CurrentVersion)
 	}
 
 	stat, err := file.Stat()
 	if err != nil {
-		file.Close()
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to stat sstable file %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to stat sstable file %s: %w", opts.FilePath, err)
 	}
 	fileSize := stat.Size()
 
@@ -128,21 +131,18 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 			span.RecordError(ErrCorrupted)
 			span.SetStatus(codes.Error, ErrCorrupted.Error())
 		}
-		file.Close()
-		return nil, fmt.Errorf("sstable file %s is too small to be valid (size: %d, min: %d): %w", opts.FilePath, fileSize, minValidSize, ErrCorrupted) // FR7.2
+		return nil, fmt.Errorf("sstable file %s is too small to be valid (size: %d, min: %d): %w", opts.FilePath, fileSize, minValidSize, ErrCorrupted)
 	}
 
 	// Read the fixed part of the footer (excluding magic string)
 	footerFixedBytes := make([]byte, FooterFixedComponentSize)
 	// Read from position: fileSize - FooterSize up to fileSize - MagicStringLen
-	_, err = file.ReadAt(footerFixedBytes, fileSize-int64(FooterSize))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(footerFixedBytes, fileSize-int64(FooterSize)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read footer fixed components from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read footer fixed components from %s: %w", opts.FilePath, err)
 	}
 
 	footerReader := bytes.NewReader(footerFixedBytes)
@@ -162,43 +162,37 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 
 	// Read and verify Magic String (FR4.1, FR7.2)
 	magicBytes := make([]byte, MagicStringLen)
-	_, err = file.ReadAt(magicBytes, fileSize-int64(MagicStringLen))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(magicBytes, fileSize-int64(MagicStringLen)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read magic string from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read magic string from %s: %w", opts.FilePath, err)
 	}
 	if string(magicBytes) != MagicString {
-		file.Close()
 		if span != nil {
 			span.RecordError(ErrCorrupted)
 			span.SetStatus(codes.Error, ErrCorrupted.Error())
 		}
-		return nil, fmt.Errorf("invalid magic string in sstable file %s: got %s, want %s: %w", opts.FilePath, string(magicBytes), MagicString, ErrCorrupted) // FR7.2
+		return nil, fmt.Errorf("invalid magic string in sstable file %s: got %s, want %s: %w", opts.FilePath, string(magicBytes), MagicString, ErrCorrupted)
 	}
 
 	// Read and deserialize Bloom Filter (FR4.3)
 	bloomFilterData := make([]byte, bloomFilterLen)
-	_, err = file.ReadAt(bloomFilterData, int64(bloomFilterOffset))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(bloomFilterData, int64(bloomFilterOffset)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read bloom filter data from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read bloom filter data from %s: %w", opts.FilePath, err)
 	}
-	filter, err := DeserializeBloomFilter(bloomFilterData) // Use sstable.DeserializeBloomFilter
-	if err != nil {
-		file.Close()
+	var filter filter.Filter
+	if filter, err = DeserializeBloomFilter(bloomFilterData); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to deserialize filter from %s: %w", opts.FilePath, err) // FR7.2 (corruption)
+		return nil, fmt.Errorf("failed to deserialize filter from %s: %w", opts.FilePath, err)
 	}
 
 	// Read and deserialize Index (FR4.2)
@@ -207,7 +201,6 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// So, the checksum is at indexOffset - core.ChecksumSize.
 	checksumOffset := int64(indexOffset) - int64(core.ChecksumSize)
 	if checksumOffset < 0 {
-		file.Close()
 		if span != nil {
 			span.RecordError(ErrCorrupted)
 			span.SetStatus(codes.Error, ErrCorrupted.Error())
@@ -216,9 +209,7 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	}
 
 	checksumBytes := make([]byte, core.ChecksumSize)
-	_, err = file.ReadAt(checksumBytes, checksumOffset)
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(checksumBytes, checksumOffset); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -228,36 +219,31 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	indexChecksum := binary.LittleEndian.Uint32(checksumBytes)
 
 	actualIndexData := make([]byte, indexLen)
-	_, err = file.ReadAt(actualIndexData, int64(indexOffset))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(actualIndexData, int64(indexOffset)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read index data from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read index data from %s: %w", opts.FilePath, err)
 	}
 
-	idx, err := DeserializeIndex(actualIndexData, indexChecksum, opts.Tracer, opts.Logger)
-	if err != nil {
-		file.Close()
+	var idx *Index
+	if idx, err = DeserializeIndex(actualIndexData, indexChecksum, opts.Tracer, opts.Logger); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to deserialize index from %s: %w", opts.FilePath, err) // FR7.2 (corruption)
+		return nil, fmt.Errorf("failed to deserialize index from %s: %w", opts.FilePath, err)
 	}
 
 	// FR4.4: Read minKey and maxKey directly from their sections using offsets from the footer
 	minKey := make([]byte, minKeyLen)
 	if _, err := file.ReadAt(minKey, int64(minKeyOffset)); err != nil {
-		file.Close()
 		return nil, fmt.Errorf("failed to read minKey data from %s: %w", opts.FilePath, err)
 	}
 
 	maxKey := make([]byte, maxKeyLen)
 	if _, err := file.ReadAt(maxKey, int64(maxKeyOffset)); err != nil {
-		file.Close()
 		return nil, fmt.Errorf("failed to read maxKey data from %s: %w", opts.FilePath, err)
 	}
 
@@ -265,7 +251,7 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// This is effectively the offset of the first metadata block (e.g., index block).
 	actualDataEndOffset := int64(indexOffset)
 
-	sst := &SSTable{
+	sst = &SSTable{
 		file:          file,
 		filePath:      opts.FilePath,
 		id:            opts.ID,
