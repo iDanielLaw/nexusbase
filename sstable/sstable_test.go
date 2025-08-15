@@ -16,6 +16,7 @@ import (
 	"github.com/INLOpen/nexusbase/cache" // For new BlockCache
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -562,19 +563,24 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 	}
 
 	t.Run("NewSSTableWriter_CreateError", func(t *testing.T) {
-		// Create a read-only directory to cause sys.Create to fail.
-		// This is OS-dependent, works on Unix-like systems.
-		readOnlyDir := t.TempDir()
-		require.NoError(t, os.Chmod(readOnlyDir, 0555)) // r-x r-x r-x
-		defer os.Chmod(readOnlyDir, 0755)              // Cleanup
+		// This test now uses a mock file creation function instead of relying on
+		// OS-specific directory permissions, making it cross-platform compatible.
+		originalCreate := sys.Create
+		defer func() { sys.Create = originalCreate }() // Restore original function after test
+
+		// Mock sys.Create to always return an error.
+		mockErr := errors.New("simulated create error")
+		sys.Create = func(name string) (sys.FileInterface, error) {
+			return nil, mockErr
+		}
 
 		opts := baseOpts
-		opts.DataDir = readOnlyDir
+		opts.DataDir = t.TempDir() // We still need a valid temp dir
 		opts.ID = 1
 
 		_, err := NewSSTableWriter(opts)
-		require.Error(t, err, "NewSSTableWriter should fail in a read-only directory")
-		assert.Contains(t, err.Error(), "permission denied", "Error message should indicate a permission issue")
+		require.Error(t, err, "NewSSTableWriter should fail when sys.Create fails")
+		assert.ErrorIs(t, err, mockErr, "The error should wrap the mocked error")
 	})
 
 	t.Run("Finish_RenameError", func(t *testing.T) {

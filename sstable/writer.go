@@ -534,6 +534,7 @@ func (w *SSTableWriter) Finish() error {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
+		w.file = nil // Set to nil after closing to prevent double-close in abort()
 	}
 
 	if gcErr := sys.GC(); gcErr != nil {
