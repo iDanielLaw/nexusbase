@@ -20,7 +20,6 @@ func TestRestoreUtil(t *testing.T) {
 	baseDir := t.TempDir()
 
 	originalDataDir := filepath.Join(baseDir, "original_data")
-	snapshotDir := filepath.Join(baseDir, "snapshot_data")
 	restoredDataDir := filepath.Join(baseDir, "restored_data")
 
 	// --- 1. Setup: Create an original database and a snapshot ---
@@ -61,7 +60,8 @@ func TestRestoreUtil(t *testing.T) {
 	}
 
 	// Create snapshot
-	if err := engine1.CreateSnapshot(snapshotDir); err != nil {
+	createdSnapshotPath, err := engine1.CreateSnapshot(context.Background())
+	if err != nil {
 		t.Fatalf("Failed to create snapshot: %v", err)
 	}
 	if err := engine1.Close(); err != nil {
@@ -69,7 +69,7 @@ func TestRestoreUtil(t *testing.T) {
 	}
 
 	// --- 2. Execution: Run the restore utility logic ---
-	err = run(snapshotDir, restoredDataDir, slog.Default())
+	err = run(createdSnapshotPath, restoredDataDir, slog.Default())
 	if err != nil {
 		t.Fatalf("restore-util run() failed: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestRestoreUtil(t *testing.T) {
 
 	// --- 4. Test error case: target directory not empty ---
 	// The restoredDataDir is now not empty. Running again should fail.
-	err = run(snapshotDir, restoredDataDir, slog.Default())
+	err = run(createdSnapshotPath, restoredDataDir, slog.Default())
 	if err == nil {
 		t.Fatal("Expected error when target directory is not empty, but got nil")
 	}

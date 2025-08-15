@@ -84,15 +84,22 @@ func newMockEngineProvider(t *testing.T, dataDir string) *mockEngineProvider {
 }
 
 func (m *mockEngineProvider) CheckStarted() error {
+	// Lenient mock: just return the state, don't require an expectation.
 	if m.isStarted {
 		return nil
 	}
 	return fmt.Errorf("engine not started")
 }
-func (m *mockEngineProvider) GetWAL() wal.WALInterface          { return m.wal }
-func (m *mockEngineProvider) GetClock() utils.Clock             { return m.clock }
-func (m *mockEngineProvider) GetLogger() *slog.Logger           { return m.logger }
-func (m *mockEngineProvider) GetTracer() trace.Tracer           { return m.tracer }
+func (m *mockEngineProvider) GetWAL() wal.WALInterface { return m.wal }
+func (m *mockEngineProvider) GetClock() utils.Clock    { return m.clock }
+func (m *mockEngineProvider) GetLogger() *slog.Logger {
+	// Lenient mock: just return the logger.
+	return m.logger
+}
+func (m *mockEngineProvider) GetTracer() trace.Tracer {
+	// Lenient mock: just return the tracer.
+	return m.tracer
+}
 func (m *mockEngineProvider) GetHookManager() hooks.HookManager { return m.hooks }
 func (m *mockEngineProvider) GetLevelsManager() levels.Manager  { return m.levelsManager }
 func (m *mockEngineProvider) GetTagIndexManager() indexer.TagIndexManagerInterface {
@@ -105,9 +112,12 @@ func (m *mockEngineProvider) GetPrivateSeriesIDStore() internal.PrivateManagerSt
 	return m.seriesIDStore
 }
 func (m *mockEngineProvider) GetSSTableCompressionType() string { return m.sstableCompression }
-func (m *mockEngineProvider) GetSequenceNumber() uint64         { return m.sequenceNumber }
-func (m *mockEngineProvider) Lock()                             { m.lockMu.Lock() }
-func (m *mockEngineProvider) Unlock()                           { m.lockMu.Unlock() }
+func (m *mockEngineProvider) GetSequenceNumber() uint64 {
+	args := m.Called()
+	return args.Get(0).(uint64)
+}
+func (m *mockEngineProvider) Lock()   { m.lockMu.Lock() }
+func (m *mockEngineProvider) Unlock() { m.lockMu.Unlock() }
 
 func (m *mockEngineProvider) GetMemtablesForFlush() ([]*memtable.Memtable, *memtable.Memtable) {
 	args := m.Called()
@@ -143,6 +153,11 @@ func (m *mockEngineProvider) GetRangeTombstones() map[string][]core.RangeTombsto
 		return nil
 	}
 	return args.Get(0).(map[string][]core.RangeTombstone)
+}
+
+func (m *mockEngineProvider) GetDataDir() string {
+	args := m.Called()
+	return args.String(0)
 }
 
 // mockTagIndexManager เป็น mock สำหรับ indexer.TagIndexManagerInterface
@@ -497,10 +512,7 @@ func TestManager_CreateFull(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dataDir, 0755))
 
 	provider := newMockEngineProvider(t, dataDir)
-	require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
-
-	// กำหนดค่าสถานะของ mock provider
-	provider.sequenceNumber = 123
+	provider.On("GetSequenceNumber").Return(uint64(123)).Once()
 	provider.deletedSeries = map[string]uint64{"deleted_series_1": 100}
 	provider.rangeTombstones = map[string][]core.RangeTombstone{
 		"range_tombstone_series_1": {{MinTimestamp: 100, MaxTimestamp: 200, SeqNum: 101}},
@@ -510,6 +522,7 @@ func TestManager_CreateFull(t *testing.T) {
 	provider.memtablesToFlush = []*memtable.Memtable{mem1}
 
 	// สร้าง SSTables จำลองและเพิ่มเข้าไปใน mock levels manager
+	require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
 	sst1 := createDummySSTable(t, provider.sstDir, 1)
 	sst2 := createDummySSTable(t, provider.sstDir, 2)
 	provider.levelsManager.AddTableToLevel(0, sst1)
@@ -553,7 +566,7 @@ func TestManager_CreateFull(t *testing.T) {
 	manifest, err := ReadManifestBinary(f)
 	require.NoError(t, err)
 
-	assert.Equal(t, provider.sequenceNumber, manifest.SequenceNumber)
+	assert.Equal(t, uint64(123), manifest.SequenceNumber)
 	assert.Equal(t, provider.sstableCompression, manifest.SSTableCompression)
 	require.Len(t, manifest.Levels, 2)
 	assert.Equal(t, 0, manifest.Levels[0].LevelNumber)
@@ -653,6 +666,7 @@ func TestManager_CreateFull_TagIndexSnapshotError(t *testing.T) {
 	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
+	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 
 	provider.wal.On("ActiveSegmentIndex").Return(0)
 	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
@@ -694,6 +708,7 @@ func TestManager_CreateFull_SSTableCopyError(t *testing.T) {
 	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
+	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 	provider.wal.On("ActiveSegmentIndex").Return(0)
 	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
@@ -741,6 +756,7 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(provider.deletedSeries)
 		provider.On("GetRangeTombstones").Return(nil)
+		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil) // Add expectation for this call
 		provider.wal.On("ActiveSegmentIndex").Return(0)
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
@@ -778,6 +794,7 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
+		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil) // Add expectation for this call
 		provider.wal.On("ActiveSegmentIndex").Return(0)
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
@@ -825,6 +842,7 @@ func TestManager_CreateFull_CopyAuxiliaryFileError(t *testing.T) {
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
+		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
 		provider.wal.On("ActiveSegmentIndex").Return(0)
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
@@ -873,6 +891,7 @@ func TestManager_CreateFull_WALCopyError(t *testing.T) {
 		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
+		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
 		provider.wal.On("ActiveSegmentIndex").Return(1)
 		provider.stringStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
@@ -944,6 +963,7 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	provider.On("GetMemtablesForFlush").Return(nil, nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
+	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
 	provider.wal.On("ActiveSegmentIndex").Return(0)
 	provider.stringStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
@@ -999,6 +1019,7 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	provider.memtablesToFlush = []*memtable.Memtable{} // No memtables
 	provider.deletedSeries = nil
 	provider.rangeTombstones = nil
+	provider.On("GetSequenceNumber").Return(uint64(1)).Once()
 	// Levels manager is already empty by default
 
 	// Set up mock expectations for an empty run
@@ -1066,7 +1087,6 @@ func TestManager_CreateFull_HookCancellation(t *testing.T) {
 	expectedHookError := fmt.Errorf("snapshot creation cancelled by hook")
 
 	// Add the required mock expectation for the initial check
-	provider.On("CheckStarted").Return(nil)
 
 	// Register a hook that returns an error
 	lis := &mockThrowErrorListener{err: expectedHookError}
@@ -1088,7 +1108,7 @@ func TestManager_CreateFull_HookCancellation(t *testing.T) {
 
 func TestManager_CreateIncremental(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
-		// 1. Setup
+		// 1. Setup Phase
 		tempDir := t.TempDir()
 		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
 		dataDir := filepath.Join(tempDir, "data")
@@ -1104,16 +1124,20 @@ func TestManager_CreateIncremental(t *testing.T) {
 
 		manager := NewManager(provider)
 
-		// --- Create a Full Parent Snapshot First ---
+		// --- Define state for parent snapshot ---
 		parentTime := mockClock.Now()
 		parentSnapshotDir := filepath.Join(snapshotsBaseDir, fmt.Sprintf("%d", parentTime.UnixNano()))
 		parentSnapshotID := filepath.Base(parentSnapshotDir)
-
 		parentSST := createDummySSTable(t, provider.sstDir, 1)
-		provider.levelsManager.AddTableToLevel(0, parentSST)
-		provider.sequenceNumber = 100
 
-		// Mock calls for the parent snapshot creation
+		// --- Define state for incremental snapshot ---
+		mockClock.Advance(time.Second) // Advance time for new snapshot ID
+		newSST := createDummySSTable(t, provider.sstDir, 2)
+
+		// --- Set ALL mock expectations upfront ---
+
+		// Mocks for CreateFull call
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For CreateFull
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
@@ -1123,22 +1147,12 @@ func TestManager_CreateIncremental(t *testing.T) {
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path).Once()
 		provider.wal.On("Path").Return(provider.walDir).Once()
 
-		err := manager.CreateFull(context.Background(), parentSnapshotDir)
-		require.NoError(t, err)
-
-		// --- Prepare for Incremental Snapshot ---
-		mockClock.Advance(time.Second) // Advance time for new snapshot ID
-
-		// Add a new SSTable and advance sequence number
-		newSST := createDummySSTable(t, provider.sstDir, 2)
-		provider.levelsManager.AddTableToLevel(0, newSST)
-		provider.sequenceNumber = 150
-
-		// Mock calls for the incremental snapshot
+		// Mocks for CreateIncremental call
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent check
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For new manifest
 		provider.On("GetDeletedSeries").Return(map[string]uint64{"new_deleted": 140}).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
-		// The path for CreateSnapshot will be determined inside CreateIncremental
 		provider.tagIndexManager.On("CreateSnapshot", mock.MatchedBy(func(path string) bool {
 			return strings.HasSuffix(path, "index") && strings.Contains(path, "_incr")
 		})).Return(nil).Once()
@@ -1147,11 +1161,18 @@ func TestManager_CreateIncremental(t *testing.T) {
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path).Once()
 		provider.wal.On("Path").Return(provider.walDir).Once()
 
-		// 2. Execution
+		// --- Execution Phase ---
+		// 1. Create the Full Parent Snapshot
+		provider.levelsManager.AddTableToLevel(0, parentSST) // State for CreateFull
+		err := manager.CreateFull(context.Background(), parentSnapshotDir)
+		require.NoError(t, err)
+
+		// 2. Prepare and Create the Incremental Snapshot
+		provider.levelsManager.AddTableToLevel(0, newSST) // State for CreateIncremental
 		err = manager.CreateIncremental(context.Background(), snapshotsBaseDir)
 		require.NoError(t, err)
 
-		// 3. Verification
+		// --- Verification Phase ---
 		// Find the new incremental snapshot directory
 		latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, newHelperSnapshot())
 		require.NoError(t, err)
@@ -1216,15 +1237,16 @@ func TestManager_CreateIncremental(t *testing.T) {
 
 		// Create a full parent snapshot
 		parentSnapshotDir := filepath.Join(snapshotsBaseDir, "parent")
-		provider.sequenceNumber = 100
-		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
-		provider.On("GetDeletedSeries").Return(nil).Once()
-		provider.On("GetRangeTombstones").Return(nil).Once()
-		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil).Once()
-		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
-		provider.stringStore.On("GetLogFilePath").Return("").Once()
-		provider.seriesIDStore.On("GetLogFilePath").Return("").Once()
-		provider.wal.On("Path").Return(provider.walDir).Once()
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For CreateFull
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For CreateIncremental check
+		provider.On("GetMemtablesForFlush").Return(nil, nil)
+		provider.On("GetDeletedSeries").Return(nil)
+		provider.On("GetRangeTombstones").Return(nil)
+		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+		provider.wal.On("ActiveSegmentIndex").Return(1)
+		provider.stringStore.On("GetLogFilePath").Return("")
+		provider.seriesIDStore.On("GetLogFilePath").Return("")
+		provider.wal.On("Path").Return(provider.walDir)
 		err := manager.CreateFull(context.Background(), parentSnapshotDir)
 		require.NoError(t, err)
 
@@ -1262,7 +1284,9 @@ func TestManager_CreateIncremental(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(parentSnapshotDir, "CURRENT"), []byte("MANIFEST_corrupt.bin"), 0644))
 
 		// 2. Execution
-		manager := NewManager(newMockEngineProvider(t, dataDir))
+		provider := newMockEngineProvider(t, dataDir)
+		provider.On("GetSequenceNumber").Return(uint64(100))
+		manager := NewManager(provider)
 		err := manager.CreateIncremental(context.Background(), snapshotsBaseDir)
 
 		// 3. Verification
@@ -1307,11 +1331,11 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
 
 		// Prepare for incremental
-		provider.sequenceNumber = 150 // Advance sequence number
 		memToFlush := memtable.NewMemtable(1024, provider.clock)
 		expectedErr := fmt.Errorf("simulated flush error")
 
 		// Mock calls for the incremental snapshot
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return([]*memtable.Memtable{memToFlush}, nil).Once()
 		provider.On("FlushMemtableToL0", memToFlush, mock.Anything).Return(expectedErr).Once()
 
@@ -1344,14 +1368,15 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
 
 		// Prepare for incremental
-		provider.sequenceNumber = 150 // Advance sequence number
 		newSST := createDummySSTable(t, provider.sstDir, 2)
 		provider.levelsManager.AddTableToLevel(0, newSST) // Add a new table
 		expectedErr := fmt.Errorf("simulated copy error")
 
 		// Mock calls for the incremental snapshot
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.On("GetSequenceNumber").Return(uint64(150))
 		helper.InterceptLinkOrCopyFile = func(src, dst string) error {
 			if strings.Contains(src, "2.sst") {
 				return expectedErr
@@ -1385,10 +1410,10 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
 
 		// Prepare for incremental
-		provider.sequenceNumber = 150 // Advance sequence number
 		expectedErr := fmt.Errorf("simulated tag index error")
 
 		// Mock calls for the incremental snapshot
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
@@ -1424,10 +1449,10 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
 
 		// Prepare for incremental
-		provider.sequenceNumber = 150 // Advance sequence number
 		expectedErr := fmt.Errorf("simulated write manifest error")
 
 		// Mock calls for the incremental snapshot
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
@@ -1470,9 +1495,9 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
 
 		// Prepare for incremental
-		provider.sequenceNumber = 150 // Advance sequence number
 		expectedErr := fmt.Errorf("simulated mkdir error")
 
+		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
 		// Mock the directory creation to fail
 		helper.InterceptMkdirAll = func(path string, perm os.FileMode) error {
 			// Fail only when creating the new snapshot directory
@@ -1653,16 +1678,15 @@ func TestManager_CreateFull_WriteCurrentFileError(t *testing.T) {
 	provider.On("GetMemtablesForFlush").Return()
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
+	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.wal.On("ActiveSegmentIndex").Return(0)
-	provider.wal.On("Path").Return(provider.walDir)
-	provider.wal.On("Path").Return(provider.walDir)
 	provider.stringStore.On("GetLogFilePath").Return("")
 	provider.seriesIDStore.On("GetLogFilePath").Return("")
 
 	// 2. Simulate the error condition
 	expectedErr := fmt.Errorf("simulated write CURRENT error")
 	helper.InterceptWriteFile = func(name string, data []byte, perm os.FileMode) error {
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 		if strings.HasSuffix(name, CURRENT_FILE_NAME) {
 			return expectedErr
 		}
@@ -2549,6 +2573,42 @@ func TestManager_ListSnapshots(t *testing.T) {
 		assert.ErrorIs(t, err, expectedErr)
 		assert.Contains(t, err.Error(), "failed to read snapshots base directory")
 	})
+}
+
+func TestManager_RestoreFrom(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	dataDir := filepath.Join(tempDir, "data")
+	snapshotPath := filepath.Join(tempDir, "snapshot")
+	provider := newMockEngineProvider(t, dataDir)
+	manager := NewManager(provider).(*manager)
+
+	// 2. Mock the restoreFromFullFunc
+	var calledOpts RestoreOptions
+	var calledPath string
+	expectedErr := fmt.Errorf("simulated restore error")
+
+	originalRestoreFunc := restoreFromFullFunc
+	defer func() { restoreFromFullFunc = originalRestoreFunc }() // Restore original function after test
+
+	restoreFromFullFunc = func(opts RestoreOptions, path string) error {
+		calledOpts = opts
+		calledPath = path
+		return expectedErr // Return an error to test error propagation
+	}
+
+	// 3. Mock provider methods that RestoreFrom will call
+	provider.On("GetDataDir").Return(dataDir)
+
+	// 4. Execution
+	err := manager.RestoreFrom(context.Background(), snapshotPath)
+
+	// 5. Verification
+	require.Error(t, err, "Expected RestoreFrom to return the error from the underlying function")
+	assert.ErrorIs(t, err, expectedErr)
+	provider.AssertExpectations(t)
+	assert.Equal(t, dataDir, calledOpts.DataDir, "DataDir in RestoreOptions is incorrect")
+	assert.Equal(t, snapshotPath, calledPath, "Snapshot path passed to restore function is incorrect")
 }
 
 func TestFindLatestSnapshot(t *testing.T) {

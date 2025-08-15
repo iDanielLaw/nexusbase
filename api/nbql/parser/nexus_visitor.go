@@ -10,6 +10,12 @@ type NexusVisitor interface {
 	// Visit a parse tree produced by NexusParser#statement.
 	VisitStatement(ctx *StatementContext) interface{}
 
+	// Visit a parse tree produced by NexusParser#snapshotStatement.
+	VisitSnapshotStatement(ctx *SnapshotStatementContext) interface{}
+
+	// Visit a parse tree produced by NexusParser#restoreStatement.
+	VisitRestoreStatement(ctx *RestoreStatementContext) interface{}
+
 	// Visit a parse tree produced by NexusParser#pushStatement.
 	VisitPushStatement(ctx *PushStatementContext) interface{}
 

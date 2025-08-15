@@ -39,9 +39,44 @@ func (e *Executor) Execute(ctx context.Context, cmd Command) (interface{}, error
 		return e.executeShow(ctx, c)
 	case *FlushStatement:
 		return e.executeFlush(ctx, c)
+	case *SnapshotStatement:
+		return e.executeSnapshot(ctx, c)
+	case *RestoreStatement:
+		return e.executeRestore(ctx, c)
 	default:
 		return "", fmt.Errorf("unknown or unsupported command type: %T", c)
 	}
+}
+
+// executeSnapshot handles the SNAPSHOT command.
+func (e *Executor) executeSnapshot(ctx context.Context, cmd *SnapshotStatement) (interface{}, error) {
+	// Note: The StorageEngineInterface needs to be updated with a CreateSnapshot method.
+	// e.g., CreateSnapshot(ctx context.Context) (snapshotPath string, err error)
+	snapshotPath, err := e.engine.CreateSnapshot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
+	// Return a structured response with the path to the created snapshot.
+	return map[string]interface{}{
+		"status":  "OK",
+		"message": fmt.Sprintf("Snapshot created successfully at: %s", snapshotPath),
+		"path":    snapshotPath,
+	}, nil
+}
+
+// executeRestore handles the RESTORE command.
+func (e *Executor) executeRestore(ctx context.Context, cmd *RestoreStatement) (interface{}, error) {
+	// Note: The StorageEngineInterface needs to be updated with a RestoreFromSnapshot method.
+	// e.g., RestoreFromSnapshot(ctx context.Context, path string, overwrite bool) error
+	err := e.engine.RestoreFromSnapshot(ctx, cmd.Path, cmd.Overwrite)
+	if err != nil {
+		// For restore, we return a standard ManipulateResponse even on error,
+		// but the error field will be populated.
+		return nil, fmt.Errorf("failed to restore from snapshot '%s': %w", cmd.Path, err)
+	}
+
+	return ManipulateResponse{Status: ResponseOK, RowsAffected: 1}, nil
 }
 
 // executePush handles the PUSH command.

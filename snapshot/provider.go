@@ -31,6 +31,7 @@ type EngineProvider interface {
 	GetPrivateStringStore() internal.PrivateManagerStore
 	GetPrivateSeriesIDStore() internal.PrivateManagerStore
 	GetSSTableCompressionType() string
+	GetDataDir() string
 	GetSequenceNumber() uint64
 
 	// Locking & State Manipulation

@@ -64,4 +64,7 @@ type ManagerInterface interface {
 	// Prune deletes old snapshots based on the provided policy.
 	// It returns a list of the snapshot IDs that were deleted.
 	Prune(ctx context.Context, snapshotsBaseDir string, opts PruneOptions) (deletedIDs []string, err error)
+
+	// RestoreFrom restores the database state from a given snapshot directory.
+	RestoreFrom(ctx context.Context, snapshotPath string) error
 }

@@ -173,6 +173,28 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	return nil
 }
 
+// RestoreFrom restores the database state from a given snapshot directory.
+// It constructs the necessary options from the engine provider and delegates
+// the core logic to the RestoreFromFull function.
+func (m *manager) RestoreFrom(ctx context.Context, snapshotPath string) error {
+	p := m.provider
+	_, span := p.GetTracer().Start(ctx, "SnapshotManager.RestoreFrom")
+	defer span.End()
+
+	// The engine is expected to be shut down by the caller (e.g., engine.RestoreFromSnapshot)
+	// before this method is called. We are only responsible for the file system operations.
+
+	opts := RestoreOptions{
+		DataDir: p.GetDataDir(),
+		Logger:  p.GetLogger(),
+		wrapper: m.wrapper, // Pass along the internal helper
+	}
+
+	// Delegate to the existing restore logic.
+	// The restoreFromFullFunc variable allows mocking for tests.
+	return restoreFromFullFunc(opts, snapshotPath)
+}
+
 // incrementalCreator holds the state for a single incremental snapshot creation.
 type incrementalCreator struct {
 	m                *manager

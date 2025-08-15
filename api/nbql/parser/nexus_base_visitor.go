@@ -11,6 +11,14 @@ func (v *BaseNexusVisitor) VisitStatement(ctx *StatementContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
+func (v *BaseNexusVisitor) VisitSnapshotStatement(ctx *SnapshotStatementContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseNexusVisitor) VisitRestoreStatement(ctx *RestoreStatementContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BaseNexusVisitor) VisitPushStatement(ctx *PushStatementContext) interface{} {
 	return v.VisitChildren(ctx)
 }

@@ -41,8 +41,11 @@ type StorageEngineInterface interface {
 	ForceFlush(ctx context.Context, wait bool) error
 	TriggerCompaction()
 	CreateIncrementalSnapshot(snapshotsBaseDir string) error
-	CreateSnapshot(snapshotDir string) error
 	VerifyDataConsistency() []error
+
+	CreateSnapshot(ctx context.Context) (snapshotPath string, err error)
+	RestoreFromSnapshot(ctx context.Context, path string, overwrite bool) error
+
 	// CleanupEngine is intended for internal use by the constructor to clean up
 	// resources if initialization fails.
 	CleanupEngine()
@@ -57,5 +60,5 @@ type StorageEngineInterface interface {
 	GetDLQDir() string
 	GetDataDir() string
 	GetWALPath() string
-	GetClock() (utils.Clock)
+	GetClock() utils.Clock
 }

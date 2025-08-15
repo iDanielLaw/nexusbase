@@ -182,9 +182,12 @@ func (m *testE2EProvider) GetPrivateSeriesIDStore() internal.PrivateManagerStore
 	return m.seriesIDStore
 }
 func (m *testE2EProvider) GetSSTableCompressionType() string { return m.sstableCompression }
-func (m *testE2EProvider) GetSequenceNumber() uint64         { return m.sequenceNumber }
-func (m *testE2EProvider) Lock()                             { m.lockMu.Lock() }
-func (m *testE2EProvider) Unlock()                           { m.lockMu.Unlock() }
+func (m *testE2EProvider) GetDataDir() string {
+	return m.dataDir
+}
+func (m *testE2EProvider) GetSequenceNumber() uint64 { return m.sequenceNumber }
+func (m *testE2EProvider) Lock()                     { m.lockMu.Lock() }
+func (m *testE2EProvider) Unlock()                   { m.lockMu.Unlock() }
 func (m *testE2EProvider) GetMemtablesForFlush() ([]*memtable.Memtable, *memtable.Memtable) {
 	// For this E2E test, we assume memtables are already flushed and we are snapshotting a stable state.
 	return nil, nil

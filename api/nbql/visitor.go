@@ -54,6 +54,12 @@ func (v *ASTBuilder) VisitStatement(ctx *parser.StatementContext) interface{} {
 	if ctx.FlushStatement() != nil {
 		return v.Visit(ctx.FlushStatement())
 	}
+	if ctx.SnapshotStatement() != nil {
+		return v.Visit(ctx.SnapshotStatement())
+	}
+	if ctx.RestoreStatement() != nil {
+		return v.Visit(ctx.RestoreStatement())
+	}
 	return nil // Should not happen with a valid grammar
 }
 
@@ -190,6 +196,31 @@ func (v *ASTBuilder) VisitFlushStatement(ctx *parser.FlushStatementContext) inte
 		flushType = FlushAll
 	}
 	return &FlushStatement{Type: flushType}
+}
+
+// VisitSnapshotStatement builds a SnapshotStatement from the parse tree.
+func (v *ASTBuilder) VisitSnapshotStatement(ctx *parser.SnapshotStatementContext) interface{} {
+	return &SnapshotStatement{}
+}
+
+// VisitRestoreStatement builds a RestoreStatement from the parse tree.
+// Note: This requires the ANTLR parser to be regenerated from the latest Nexus.g4 grammar.
+func (v *ASTBuilder) VisitRestoreStatement(ctx *parser.RestoreStatementContext) interface{} {
+	path := v.unquote(ctx.STRING_LITERAL().GetText())
+	if len(v.errors) > 0 {
+		return nil
+	}
+
+	overwrite := false
+	// K_OVERWRITE() will not be nil if 'WITH OVERWRITE' is present in the query.
+	if ctx.K_OVERWRITE() != nil {
+		overwrite = true
+	}
+
+	return &RestoreStatement{
+		Path:      path,
+		Overwrite: overwrite,
+	}
 }
 
 // VisitRemoveStatement builds a RemoveStatement from the parse tree.

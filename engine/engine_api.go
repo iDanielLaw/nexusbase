@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"sync"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/INLOpen/nexusbase/api/tsdb"
 	"github.com/INLOpen/nexusbase/hooks"
+
+	"path/filepath"
 
 	"github.com/INLOpen/nexusbase/core" // Import core package
 	"github.com/INLOpen/nexusbase/iterator"
@@ -1701,13 +1704,105 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 	return nil
 }
 
-// CreateSnapshot creates a full, self-contained snapshot of the database state.
-// This method now delegates the call to the dedicated snapshot manager.
-func (e *storageEngine) CreateSnapshot(snapshotDir string) error {
+// CreateSnapshot creates a full, consistent, point-in-time snapshot of the database.
+// It flushes all in-memory data, creates a manifest of the current state, and copies
+// all necessary data files to a new snapshot directory.
+func (e *storageEngine) CreateSnapshot(ctx context.Context) (string, error) {
+	if err := e.CheckStarted(); err != nil {
+		return "", err
+	}
+
+	ctx, span := e.tracer.Start(ctx, "StorageEngine.CreateSnapshot")
+	defer span.End()
+
+	e.logger.Info("Starting snapshot creation process...")
+
+	// 1. Acquire a full write lock to pause all other operations.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// 2. Flush all in-memory data to SSTables to ensure a consistent state on disk.
+	e.logger.Info("Flushing all memtables for snapshot consistency...")
+	if err := e.flushRemainingMemtables(); err != nil {
+		e.logger.Error("Failed to flush memtables during snapshot creation.", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "memtable_flush_failed")
+		return "", fmt.Errorf("failed to flush memtables for snapshot: %w", err)
+	}
+
+	// 3. Create a unique directory for the snapshot.
+	snapshotID := fmt.Sprintf("snapshot-%s", e.clock.Now().UTC().Format("20060102T150405Z"))
+	snapshotDir := filepath.Join(e.snapshotsBaseDir, snapshotID)
+	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		e.logger.Error("Failed to create snapshot directory.", "path", snapshotDir, "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "create_snapshot_dir_failed")
+		return "", fmt.Errorf("failed to create snapshot directory %s: %w", snapshotDir, err)
+	}
+	e.logger.Info("Snapshot directory created.", "path", snapshotDir)
+	span.SetAttributes(attribute.String("snapshot.path", snapshotDir))
+
+	// 4. Create and persist a new manifest file *inside the snapshot directory*.
+	// This captures the state of the LSM tree at this point in time.
+	if err := e.snapshotManager.CreateFull(ctx, snapshotDir); err != nil {
+		e.logger.Error("Failed to create snapshot via manager.", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "snapshot_manager_create_failed")
+		// Attempt to clean up the partially created snapshot directory
+		_ = os.RemoveAll(snapshotDir)
+		return "", fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
+	e.logger.Info("Snapshot created successfully.", "path", snapshotDir)
+	return snapshotDir, nil
+}
+
+// RestoreFromSnapshot restores the database state from a given snapshot directory.
+// This is a destructive operation. It shuts down the engine, wipes the current data,
+// copies the snapshot data, and restarts the engine.
+func (e *storageEngine) RestoreFromSnapshot(ctx context.Context, snapshotPath string, overwrite bool) error {
 	if err := e.CheckStarted(); err != nil {
 		return err
 	}
-	return e.snapshotManager.CreateFull(context.Background(), snapshotDir)
+
+	_, span := e.tracer.Start(ctx, "StorageEngine.RestoreFromSnapshot")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("snapshot.path", snapshotPath),
+		attribute.Bool("snapshot.overwrite", overwrite),
+	)
+
+	e.logger.Info("Starting restore from snapshot process...", "path", snapshotPath)
+
+	// 1. Validate snapshot directory
+	manifestPath := filepath.Join(snapshotPath, "MANIFEST")
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		e.logger.Error("Snapshot validation failed: MANIFEST file not found.", "path", snapshotPath)
+		span.SetStatus(codes.Error, "invalid_snapshot_no_manifest")
+		return fmt.Errorf("invalid snapshot directory: MANIFEST file not found in %s", snapshotPath)
+	}
+
+	// 2. Safety check for overwrite
+	if !overwrite {
+		if e.levelsManager.GetTotalTableCount() > 0 || e.mutableMemtable.Size() > 0 {
+			err := fmt.Errorf("database is not empty and OVERWRITE is not specified")
+			e.logger.Error("Restore aborted.", "error", err)
+			span.SetStatus(codes.Error, "restore_aborted_db_not_empty")
+			return err
+		}
+	}
+
+	// 3. Gracefully shut down the current engine instance.
+	e.logger.Info("Shutting down current engine instance for restore...")
+	if err := e.Close(); err != nil {
+		return fmt.Errorf("failed to shut down engine before restore: %w", err)
+	}
+
+	// At this point, the engine is stopped. We can now manipulate files.
+	// The caller (e.g., a server process) would be responsible for re-initializing
+	// and starting the engine after this method returns successfully.
+	// This implementation will perform the file operations and leave the engine in a "ready to start" state.
+	return e.snapshotManager.RestoreFrom(ctx, snapshotPath)
 }
 
 // CreateIncrementalSnapshot creates a snapshot containing only changes since the last one.

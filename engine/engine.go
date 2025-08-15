@@ -484,6 +484,80 @@ func (e *storageEngine) CheckStarted() error {
 	return nil
 }
 
+// wipeDataDirectory removes all engine-managed files and subdirectories from the data directory.
+// This is a helper function for the restore process.
+func (e *storageEngine) wipeDataDirectory() error {
+	// List of directories and files to remove.
+	// We don't remove the top-level data directory itself, just its contents.
+	itemsToRemove := []string{
+		e.sstDir,
+		e.dlqDir,
+		filepath.Join(e.opts.DataDir, "wal"),
+		filepath.Join(e.opts.DataDir, CURRENT_FILE_NAME),
+		filepath.Join(e.opts.DataDir, "CHECKPOINT"),
+		filepath.Join(e.opts.DataDir, "string_mapping.log"),
+		filepath.Join(e.opts.DataDir, "series_mapping.log"),
+		filepath.Join(e.opts.DataDir, "series.log"),
+		filepath.Join(e.opts.DataDir, "deleted_series.json"),
+		filepath.Join(e.opts.DataDir, "range_tombstones.json"),
+		filepath.Join(e.opts.DataDir, "tag_index"), // The directory for the tag index
+	}
+
+	// Also remove any MANIFEST files.
+	files, err := filepath.Glob(filepath.Join(e.opts.DataDir, "MANIFEST*"))
+	if err != nil {
+		return fmt.Errorf("failed to glob for manifest files to wipe: %w", err)
+	}
+	itemsToRemove = append(itemsToRemove, files...)
+
+	var firstErr error
+	for _, itemPath := range itemsToRemove {
+		if err := os.RemoveAll(itemPath); err != nil {
+			// Log the error but continue trying to remove other items.
+			e.logger.Warn("Failed to remove item during data wipe.", "path", itemPath, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+
+	// Re-create the essential directories after wiping.
+	if err := e.initializeDirectories(); err != nil {
+		return fmt.Errorf("failed to re-initialize directories after wipe: %w", err)
+	}
+
+	return firstErr
+}
+
+// CopyFile copies a file from src to dst.
+func CopyFile(src, dst string) error {
+	sourceFileStat, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("failed to stat source file %s for copying: %w", src, err)
+	}
+	if !sourceFileStat.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", src)
+	}
+
+	source, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file %s for copying: %w", src, err)
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file %s for copying: %w", dst, err)
+	}
+	defer destination.Close()
+
+	_, err = io.Copy(destination, source)
+	if err != nil {
+		return fmt.Errorf("failed to copy data from %s to %s: %w", src, dst, err)
+	}
+	return nil
+}
+
 // initializeMetrics sets up the engine's metrics instance.
 func (e *storageEngine) initializeMetrics() {
 	if e.metrics == nil {
@@ -1042,34 +1116,4 @@ func (e *storageEngine) Metrics() (*EngineMetrics, error) {
 
 func (e *storageEngine) GetFileManage() internalFileManage {
 	return e.internalFile
-}
-
-// CopyFile copies a file from src to dst.
-// This is an exported version used by non-test code like snapshot restore.
-func CopyFile(src, dst string) error {
-	sourceFileStat, err := os.Stat(src)
-	if err != nil {
-		return fmt.Errorf("failed to stat source file %s for copying: %w", src, err)
-	}
-	if !sourceFileStat.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", src)
-	}
-
-	source, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("failed to open source file %s for copying: %w", src, err)
-	}
-	defer source.Close()
-
-	destination, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file %s for copying: %w", dst, err)
-	}
-	defer destination.Close()
-
-	_, err = io.Copy(destination, source)
-	if err != nil {
-		return fmt.Errorf("failed to copy data from %s to %s: %w", src, dst, err)
-	}
-	return nil
 }
