@@ -1377,7 +1377,7 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.wal.On("ActiveSegmentIndex").Return(uint64(1)).Once()
-		provider.On("GetSequenceNumber").Return(uint64(150))
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For new manifest
 		helper.InterceptLinkOrCopyFile = func(src, dst string) error {
 			if strings.Contains(src, "2.sst") {
 				return expectedErr
@@ -1415,6 +1415,7 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 
 		// Mock calls for the incremental snapshot
 		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For new manifest
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
@@ -1454,6 +1455,7 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 
 		// Mock calls for the incremental snapshot
 		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For new manifest
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
