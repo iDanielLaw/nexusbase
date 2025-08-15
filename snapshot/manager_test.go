@@ -224,7 +224,8 @@ func (m *mockWAL) Close() error                              { return m.Called()
 func (m *mockWAL) Path() string                              { return m.Called().String(0) }
 func (m *mockWAL) SetTestingOnlyInjectCloseError(err error)  { m.Called(err) }
 func (m *mockWAL) ActiveSegmentIndex() uint64 {
-	return uint64(m.Called().Int(0))
+	args := m.Called()
+	return args.Get(0).(uint64)
 }
 func (m *mockWAL) Rotate() error { return m.Called().Error(0) }
 
@@ -538,7 +539,7 @@ func TestManager_CreateFull(t *testing.T) {
 	provider.On("GetDeletedSeries").Return(provider.deletedSeries)
 	provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
 	provider.tagIndexManager.On("CreateSnapshot", filepath.Join(snapshotDir, "index")).Return(nil)
-	provider.wal.On("ActiveSegmentIndex").Return(1)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(1))
 	provider.wal.On("Path").Return(provider.walDir)
 	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
@@ -628,7 +629,7 @@ func TestManager_CreateFull_FlushError(t *testing.T) {
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	// FlushMemtableToL0 will be called and should return our simulated error.
-	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 	provider.On("FlushMemtableToL0", mem1, mock.Anything).Return(expectedFlushError)
@@ -668,7 +669,7 @@ func TestManager_CreateFull_TagIndexSnapshotError(t *testing.T) {
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 
-	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 	// The call to CreateSnapshot on the tag index manager should fail.
@@ -709,7 +710,7 @@ func TestManager_CreateFull_SSTableCopyError(t *testing.T) {
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
-	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
@@ -758,7 +759,7 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil) // Add expectation for this call
-		provider.wal.On("ActiveSegmentIndex").Return(0)
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 
@@ -796,7 +797,7 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil) // Add expectation for this call
-		provider.wal.On("ActiveSegmentIndex").Return(0)
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 
@@ -844,7 +845,7 @@ func TestManager_CreateFull_CopyAuxiliaryFileError(t *testing.T) {
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-		provider.wal.On("ActiveSegmentIndex").Return(0)
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
 
@@ -893,7 +894,7 @@ func TestManager_CreateFull_WALCopyError(t *testing.T) {
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-		provider.wal.On("ActiveSegmentIndex").Return(1)
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(1))
 		provider.stringStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
 		provider.wal.On("Path").Return(provider.walDir)
 		provider.seriesIDStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
@@ -965,7 +966,7 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 	provider.stringStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
 	provider.wal.On("Path").Return(provider.walDir)
 	provider.seriesIDStore.On("GetLogFilePath").Return("") // Return empty string to simulate no file
@@ -1028,7 +1029,7 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 	provider.wal.On("Path").Return(provider.walDir)
 	provider.wal.On("Path").Return(provider.walDir)
 	provider.stringStore.On("GetLogFilePath").Return("")
@@ -1142,13 +1143,13 @@ func TestManager_CreateIncremental(t *testing.T) {
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
 		provider.tagIndexManager.On("CreateSnapshot", filepath.Join(parentSnapshotDir, "index")).Return(nil).Once()
-		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(1)).Once()
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path).Once()
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path).Once()
 		provider.wal.On("Path").Return(provider.walDir).Once()
 
 		// Mocks for CreateIncremental call
-		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent check
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent check
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For new manifest
 		provider.On("GetDeletedSeries").Return(map[string]uint64{"new_deleted": 140}).Once()
@@ -1156,7 +1157,7 @@ func TestManager_CreateIncremental(t *testing.T) {
 		provider.tagIndexManager.On("CreateSnapshot", mock.MatchedBy(func(path string) bool {
 			return strings.HasSuffix(path, "index") && strings.Contains(path, "_incr")
 		})).Return(nil).Once()
-		provider.wal.On("ActiveSegmentIndex").Return(2).Once() // New WAL segment
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(2)).Once() // New WAL segment
 		provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path).Once()
 		provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path).Once()
 		provider.wal.On("Path").Return(provider.walDir).Once()
@@ -1243,7 +1244,7 @@ func TestManager_CreateIncremental(t *testing.T) {
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-		provider.wal.On("ActiveSegmentIndex").Return(1)
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(1))
 		provider.stringStore.On("GetLogFilePath").Return("")
 		provider.seriesIDStore.On("GetLogFilePath").Return("")
 		provider.wal.On("Path").Return(provider.walDir)
@@ -1335,7 +1336,7 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		expectedErr := fmt.Errorf("simulated flush error")
 
 		// Mock calls for the incremental snapshot
-		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return([]*memtable.Memtable{memToFlush}, nil).Once()
 		provider.On("FlushMemtableToL0", memToFlush, mock.Anything).Return(expectedErr).Once()
 
@@ -1373,9 +1374,9 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		expectedErr := fmt.Errorf("simulated copy error")
 
 		// Mock calls for the incremental snapshot
-		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
-		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(1)).Once()
 		provider.On("GetSequenceNumber").Return(uint64(150))
 		helper.InterceptLinkOrCopyFile = func(src, dst string) error {
 			if strings.Contains(src, "2.sst") {
@@ -1413,12 +1414,12 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		expectedErr := fmt.Errorf("simulated tag index error")
 
 		// Mock calls for the incremental snapshot
-		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(expectedErr).Once()
-		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(1)).Once()
 		provider.stringStore.On("GetLogFilePath").Return("").Once()
 		provider.seriesIDStore.On("GetLogFilePath").Return("").Once()
 		provider.wal.On("Path").Return(provider.walDir).Once()
@@ -1452,12 +1453,12 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		expectedErr := fmt.Errorf("simulated write manifest error")
 
 		// Mock calls for the incremental snapshot
-		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
 		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil).Once()
-		provider.wal.On("ActiveSegmentIndex").Return(1).Once()
+		provider.wal.On("ActiveSegmentIndex").Return(uint64(1)).Once()
 		provider.stringStore.On("GetLogFilePath").Return("").Once()
 		provider.seriesIDStore.On("GetLogFilePath").Return("").Once()
 		provider.wal.On("Path").Return(provider.walDir).Once()
@@ -1497,7 +1498,7 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		// Prepare for incremental
 		expectedErr := fmt.Errorf("simulated mkdir error")
 
-		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For findAndValidateParent
+		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
 		// Mock the directory creation to fail
 		helper.InterceptMkdirAll = func(path string, perm os.FileMode) error {
 			// Fail only when creating the new snapshot directory
@@ -1675,18 +1676,19 @@ func TestManager_CreateFull_WriteCurrentFileError(t *testing.T) {
 	provider.levelsManager.AddTableToLevel(0, sst1)
 
 	// Set up mock expectations for all calls that happen before writing the CURRENT file.
-	provider.On("GetMemtablesForFlush").Return()
+	provider.On("GetMemtablesForFlush").Return(nil, nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
 	provider.stringStore.On("GetLogFilePath").Return("")
 	provider.seriesIDStore.On("GetLogFilePath").Return("")
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
+	provider.wal.On("Path").Return(provider.walDir)
 
 	// 2. Simulate the error condition
 	expectedErr := fmt.Errorf("simulated write CURRENT error")
 	helper.InterceptWriteFile = func(name string, data []byte, perm os.FileMode) error {
-		provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 		if strings.HasSuffix(name, CURRENT_FILE_NAME) {
 			return expectedErr
 		}
@@ -2261,8 +2263,9 @@ func TestCreateFull_AuxiliaryFileNotExist(t *testing.T) {
 	provider.On("GetMemtablesForFlush").Return()
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
+	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
-	provider.wal.On("ActiveSegmentIndex").Return(0)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
 	provider.wal.On("Path").Return(provider.walDir)
 
 	// 2. Execution
