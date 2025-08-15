@@ -45,7 +45,6 @@ func (b *Block) Find(keyToFind []byte) ([]byte, core.EntryType, uint64, error) {
 	if len(b.data) < 4 { // Must have at least num_restart_points (uint32)
 		return nil, 0, 0, ErrNotFound
 	}
-
 	// 1. Read the trailer to get restart points
 	numRestartPointsOffset := len(b.data) - 4
 	numRestartPoints := binary.LittleEndian.Uint32(b.data[numRestartPointsOffset:])
@@ -71,18 +70,24 @@ func (b *Block) Find(keyToFind []byte) ([]byte, core.EntryType, uint64, error) {
 	// We want to find the largest restart point whose key is <= keyToFind.
 	// This means we are looking for the rightmost restart point to start our scan from.
 	var searchStartOffset uint32
-	// sort.Search finds the first index i where the predicate is true.
-	// The predicate checks if the key at restart point `i` is >= keyToFind.
+	// `sort.Search` is used to find the first restart point whose key is >= keyToFind.
+	// This is the "insertion point" for keyToFind in the sorted list of restart point keys.
 	searchIndex := sort.Search(int(numRestartPoints), func(i int) bool {
 		offset := binary.LittleEndian.Uint32(b.data[restartPointsStartOffset+(i*4):])
 		// Create a temporary iterator to read just the first key at this restart point.
 		tempIter := NewBlockIterator(entriesData[offset:])
 		if tempIter.Next() {
+			// The predicate is true if the key at the restart point is >= the key we're looking for.
 			return bytes.Compare(tempIter.Key(), keyToFind) >= 0
 		}
 		return false // Should not happen in a valid block
 	})
 
+	// After sort.Search, `searchIndex` is the index of the first restart point with a key >= keyToFind.
+	// This means the block that could contain `keyToFind` must be the one starting at the *previous*
+	// restart point (`searchIndex - 1`).
+	// If `searchIndex` is 0, it means `keyToFind` is smaller than or equal to the first restart point's key,
+	// so we must start our scan from the very beginning of the block (offset 0).
 	if searchIndex > 0 {
 		// The correct restart point to start scanning from is the one *before* the one found by sort.Search,
 		// as that one is the first with a key >= keyToFind.
@@ -96,6 +101,21 @@ func (b *Block) Find(keyToFind []byte) ([]byte, core.EntryType, uint64, error) {
 	// 3. Linear scan from the found restart point.
 	blockIter := NewBlockIterator(entriesData[searchStartOffset:])
 	return findLinearScan(blockIter, keyToFind)
+}
+
+// getEntriesData is a helper to extract the slice of block data that contains
+// only the key-value entries, excluding the trailer.
+func (b *Block) getEntriesData() []byte {
+	if len(b.data) < 4 {
+		return nil
+	}
+	numRestartPointsOffset := len(b.data) - 4
+	numRestartPoints := binary.LittleEndian.Uint32(b.data[numRestartPointsOffset:])
+	trailerSize := (int(numRestartPoints) * 4) + 4
+	if len(b.data) < trailerSize {
+		return nil // Corrupted block
+	}
+	return b.data[:len(b.data)-trailerSize]
 }
 
 // findLinearScan performs a linear scan for a key from a given iterator's current position.

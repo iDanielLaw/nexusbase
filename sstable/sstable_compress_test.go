@@ -68,6 +68,12 @@ type testSetup struct {
 	snappySST  *SSTable
 	snappyPath string
 	snappySize int64
+	lz4SST     *SSTable
+	lz4Path    string
+	lz4Size    int64
+	zstdSST    *SSTable
+	zstdPath   string
+	zstdSize   int64
 	noneSST    *SSTable
 	nonePath   string
 	noneSize   int64
@@ -83,6 +89,8 @@ func setupCompressionTest(t *testing.T) *testSetup {
 
 	snappyCompressor := &compressors.SnappyCompressor{}
 	noCompressor := &compressors.NoCompressionCompressor{}
+	lz4Compressor := &compressors.LZ4Compressor{}
+	zstdCompressor := compressors.NewZstdCompressor()
 
 	sstSnappy, snappyPath, snappySize := writeTestSSTable(t, tempDir, entries, fileID, snappyCompressor, testBlockSize)
 	t.Cleanup(func() {
@@ -92,6 +100,24 @@ func setupCompressionTest(t *testing.T) *testSetup {
 		os.Remove(snappyPath)
 	})
 	t.Logf("SSTable with Snappy compression created: %s, Size: %d bytes, MinKey: %s, MaxKey: %s", snappyPath, snappySize, string(sstSnappy.MinKey()), string(sstSnappy.MaxKey()))
+
+	sstLz4, lz4Path, lz4Size := writeTestSSTable(t, tempDir, entries, fileID+2, lz4Compressor, testBlockSize)
+	t.Cleanup(func() {
+		if sstLz4 != nil {
+			sstLz4.Close()
+		}
+		os.Remove(lz4Path)
+	})
+	t.Logf("SSTable with LZ4 compression created: %s, Size: %d bytes", lz4Path, lz4Size)
+
+	sstZstd, zstdPath, zstdSize := writeTestSSTable(t, tempDir, entries, fileID+3, zstdCompressor, testBlockSize)
+	t.Cleanup(func() {
+		if sstZstd != nil {
+			sstZstd.Close()
+		}
+		os.Remove(zstdPath)
+	})
+	t.Logf("SSTable with ZSTD compression created: %s, Size: %d bytes", zstdPath, zstdSize)
 
 	sstNone, nonePath, noneSize := writeTestSSTable(t, tempDir, entries, fileID+1, noCompressor, testBlockSize)
 	t.Cleanup(func() {
@@ -111,6 +137,12 @@ func setupCompressionTest(t *testing.T) *testSetup {
 		snappySST:  sstSnappy,
 		snappyPath: snappyPath,
 		snappySize: snappySize,
+		lz4SST:     sstLz4,
+		lz4Path:    lz4Path,
+		lz4Size:    lz4Size,
+		zstdSST:    sstZstd,
+		zstdPath:   zstdPath,
+		zstdSize:   zstdSize,
 		noneSST:    sstNone,
 		nonePath:   nonePath,
 		noneSize:   noneSize,
@@ -170,6 +202,8 @@ func TestSSTable_Compression_WriteAndRead(t *testing.T) {
 		name string
 		sst  *SSTable
 	}{
+		{"LZ4Compressed", setup.lz4SST},
+		{"ZSTDCompressed", setup.zstdSST},
 		{"SnappyCompressed", setup.snappySST},
 		{"NoCompression", setup.noneSST},
 	}
@@ -322,6 +356,8 @@ func TestSSTable_Compression_GetEdgeCases(t *testing.T) {
 		name string
 		sst  *SSTable
 	}{
+		{"LZ4Compressed", setup.lz4SST},
+		{"ZSTDCompressed", setup.zstdSST},
 		{"SnappyCompressed", setup.snappySST},
 		{"NoCompression", setup.noneSST},
 	}
@@ -402,6 +438,8 @@ func TestSSTable_Compression_IteratorEdgeCases(t *testing.T) {
 		name string
 		sst  *SSTable
 	}{
+		{"LZ4Compressed", setup.lz4SST},
+		{"ZSTDCompressed", setup.zstdSST},
 		{"SnappyCompressed", setup.snappySST},
 		{"NoCompression", setup.noneSST},
 	}

@@ -106,6 +106,46 @@ func TestBlockIterator(t *testing.T) {
 		assert.True(t, reflect.DeepEqual(entries, actualEntries), "Iterated entries should match original entries")
 	})
 
+	t.Run("CorruptedData", func(t *testing.T) {
+		// Create a valid entry first
+		var validEntryBuf bytes.Buffer
+		entry := testEntry{Key: []byte("apple"), Value: []byte("red"), EntryType: core.EntryTypePutEvent, PointID: 1}
+		sharedPrefixLen := 0
+		unsharedKey := entry.Key[sharedPrefixLen:]
+		varintBuf := make([]byte, binary.MaxVarintLen64)
+		n := binary.PutUvarint(varintBuf, uint64(sharedPrefixLen))
+		validEntryBuf.Write(varintBuf[:n])
+		n = binary.PutUvarint(varintBuf, uint64(len(unsharedKey)))
+		validEntryBuf.Write(varintBuf[:n])
+		n = binary.PutUvarint(varintBuf, uint64(len(entry.Value)))
+		validEntryBuf.Write(varintBuf[:n])
+		validEntryBuf.WriteByte(byte(entry.EntryType))
+		n = binary.PutUvarint(varintBuf, entry.PointID)
+		validEntryBuf.Write(varintBuf[:n])
+		validEntryBuf.Write(unsharedKey)
+		validEntryBuf.Write(entry.Value)
+		validEntryBytes := validEntryBuf.Bytes()
+
+		t.Run("TruncatedInHeader", func(t *testing.T) {
+			// Truncate in the middle of a varint
+			corruptedData := validEntryBytes[:2]
+			iter := NewBlockIterator(corruptedData)
+			assert.False(t, iter.Next())
+			require.Error(t, iter.Error())
+			assert.Contains(t, iter.Error().Error(), "failed to read")
+		})
+
+		t.Run("TruncatedInValue", func(t *testing.T) {
+			// Truncate in the middle of the value data
+			corruptedData := validEntryBytes[:len(validEntryBytes)-1]
+			iter := NewBlockIterator(corruptedData)
+			assert.False(t, iter.Next())
+			require.Error(t, iter.Error())
+			assert.Contains(t, iter.Error().Error(), "failed to read value")
+		})
+
+	})
+
 	t.Run("EmptyBlock", func(t *testing.T) {
 		iter := NewBlockIterator([]byte{})
 		assert.False(t, iter.Next(), "Next() on empty block should return false")
@@ -217,4 +257,45 @@ func TestBlock_Find_WithRestartPoints(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBlock_Find_Corrupted(t *testing.T) {
+	t.Run("BlockTooSmallForTrailer", func(t *testing.T) {
+		// A block must be at least 4 bytes to hold the num_restart_points trailer.
+		corruptedData := []byte{1, 2, 3}
+		block := NewBlock(corruptedData)
+		_, _, _, err := block.Find([]byte("any"))
+		// The current implementation returns ErrNotFound in this case, which is acceptable.
+		assert.ErrorIs(t, err, ErrNotFound, "Find on a block too small for a trailer should fail")
+	})
+
+	t.Run("InvalidTrailerSize", func(t *testing.T) {
+		// Create data where num_restart_points is impossibly large.
+		// This will make `trailerSize` larger than `len(b.data)`.
+		var buf bytes.Buffer
+		buf.Write([]byte("some_entry_data"))
+		// Write a huge number for num_restart_points
+		binary.Write(&buf, binary.LittleEndian, uint32(1000))
+		corruptedData := buf.Bytes()
+
+		block := NewBlock(corruptedData)
+		_, _, _, err := block.Find([]byte("any"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrCorrupted, "Error should be ErrCorrupted")
+		assert.Contains(t, err.Error(), "smaller than calculated trailer size")
+	})
+
+	t.Run("CorruptedBlockIteratorError", func(t *testing.T) {
+		// Create block data that is valid in structure but will cause the block iterator to fail.
+		// We create a block with a malformed varint (0x80) as its entry data,
+		// followed by a valid trailer indicating 0 restart points.
+		corruptedData := []byte{
+			0x80,       // Malformed varint as entry data
+			0, 0, 0, 0, // Trailer: 0 restart points
+		}
+		block := NewBlock(corruptedData)
+		_, _, _, err := block.Find([]byte("any"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "block find: iterator error", "Error should propagate from the block iterator")
+	})
 }

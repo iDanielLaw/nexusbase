@@ -5,7 +5,6 @@ package sstable
 
 import (
 	"bytes"
-	"encoding/binary"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/iterator"
@@ -36,7 +35,6 @@ type sstableIterator struct {
 	// State for iteration
 	currentKey       []byte
 	currentValue     []byte
-	currentBlock     *bytes.Buffer // The buffer for the current decompressed block.
 	currentEntryType core.EntryType
 	currentPointID   uint64
 	err              error // Stores any error encountered
@@ -111,13 +109,6 @@ func (it *sstableIterator) loadBlockAtIndex(blockIdx int) bool {
 		return false
 	}
 
-	// Return the old buffer (if any) to the pool before getting a new one.
-	// This is the key to fixing the memory leak.
-	if it.currentBlock != nil {
-		core.PutBuffer(it.currentBlock)
-		it.currentBlock = nil
-	}
-
 	// Load the new block. readBlock now returns a *bytes.Buffer from the pool.
 	it.sstable.mu.RLock()
 	blockMeta := it.sstable.index.entries[blockIdx]
@@ -127,20 +118,14 @@ func (it *sstableIterator) loadBlockAtIndex(blockIdx int) bool {
 	if err != nil {
 		it.err = err
 		it.eof = true
-		// Ensure we don't leak the buffer if readBlock succeeded but something else failed.
-		if newBlock != nil {
-			core.PutBuffer(newBlock)
-		}
 		return false
 	}
 
-	fullBlockData := newBlock.Bytes()
-	numRestartPointsOffset := len(fullBlockData) - 4
-	numRestartPoints := binary.LittleEndian.Uint32(fullBlockData[numRestartPointsOffset:])
-	trailerSize := (int(numRestartPoints) * 4) + 4
-	entriesData := fullBlockData[:len(fullBlockData)-trailerSize]
+	// The trailer is now handled internally by the Block object.
+	// We just need to get the raw entry data from it.
+	// Note: newBlock.data is the decompressed block data.
+	entriesData := newBlock.getEntriesData()
 
-	it.currentBlock = newBlock
 	it.currentIndexEntry = blockIdx
 
 	if it.order == core.Ascending {
@@ -249,11 +234,6 @@ func (it *sstableIterator) Error() error {
 
 // Close releases any resources held by the iterator (e.g., file handle if not shared).
 func (it *sstableIterator) Close() error {
-	// Return the last used block buffer to the pool.
-	if it.currentBlock != nil {
-		core.PutBuffer(it.currentBlock)
-		it.currentBlock = nil
-	}
 	// No specific resources to close for the iterator itself if SSTable manages the file.
 	it.blockIter = nil // Help GC
 	return nil

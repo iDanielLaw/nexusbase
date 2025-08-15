@@ -62,7 +62,7 @@ type LoadSSTableOptions struct {
 // It reads the footer, deserializes the index and Bloom filter,
 // and populates the SSTable metadata.
 // Corresponds to FR4.6.
-func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
+func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	var span trace.Span
 	if opts.Tracer != nil {
 		// Assuming context.Background() for internal operations not tied to a specific request context
@@ -79,15 +79,21 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// FR6.1: Consider using a FileOpener interface for testability. For now, direct os.Open.
 	file, err := sys.Open(opts.FilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open sstable file %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to open sstable file %s: %w", opts.FilePath, err)
 	}
+	// Use defer with a named error return to ensure the file is closed on any error path.
+	defer func() {
+		if err != nil {
+			file.Close()
+		}
+	}()
 
 	// Read header bytes first to isolate file I/O from binary parsing.
 	// This helps debug issues where binary.Read might behave unexpectedly on a file handle.
 	headerSize := binary.Size(core.FileHeader{})
 	if headerSize <= 0 {
 		// This would be a programming error in core.FileHeader definition.
-		return nil, fmt.Errorf("invalid FileHeader size: %d", headerSize)
+		return nil, fmt.Errorf("invalid FileHeader size: %d", headerSize) // Early return for programming error
 	}
 	headerBytes := make([]byte, headerSize)
 	if _, err := io.ReadFull(file, headerBytes); err != nil {
@@ -98,26 +104,23 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// Now parse the header from the in-memory byte slice.
 	var header core.FileHeader
 	if err := binary.Read(bytes.NewReader(headerBytes), binary.LittleEndian, &header); err != nil {
-		return nil, fmt.Errorf("failed to parse sstable header from bytes: %w", err)
+		return nil, fmt.Errorf("failed to parse sstable header from bytes: %w", err) // Return err directly
 	}
 
 	if header.Magic != core.SSTableMagic {
-		file.Close()
 		return nil, fmt.Errorf("invalid sstable magic number in %s. Got: %x, Want: %x", opts.FilePath, header.Magic, core.SSTableMagic)
 	}
 	if header.Version != core.CurrentVersion {
-		file.Close()
 		return nil, fmt.Errorf("unsupported sstable version in %s. Got: %d, Want: %d", opts.FilePath, header.Version, core.CurrentVersion)
 	}
 
 	stat, err := file.Stat()
 	if err != nil {
-		file.Close()
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to stat sstable file %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to stat sstable file %s: %w", opts.FilePath, err)
 	}
 	fileSize := stat.Size()
 
@@ -128,21 +131,18 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 			span.RecordError(ErrCorrupted)
 			span.SetStatus(codes.Error, ErrCorrupted.Error())
 		}
-		file.Close()
-		return nil, fmt.Errorf("sstable file %s is too small to be valid (size: %d, min: %d): %w", opts.FilePath, fileSize, minValidSize, ErrCorrupted) // FR7.2
+		return nil, fmt.Errorf("sstable file %s is too small to be valid (size: %d, min: %d): %w", opts.FilePath, fileSize, minValidSize, ErrCorrupted)
 	}
 
 	// Read the fixed part of the footer (excluding magic string)
 	footerFixedBytes := make([]byte, FooterFixedComponentSize)
 	// Read from position: fileSize - FooterSize up to fileSize - MagicStringLen
-	_, err = file.ReadAt(footerFixedBytes, fileSize-int64(FooterSize))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(footerFixedBytes, fileSize-int64(FooterSize)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read footer fixed components from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read footer fixed components from %s: %w", opts.FilePath, err)
 	}
 
 	footerReader := bytes.NewReader(footerFixedBytes)
@@ -162,43 +162,37 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 
 	// Read and verify Magic String (FR4.1, FR7.2)
 	magicBytes := make([]byte, MagicStringLen)
-	_, err = file.ReadAt(magicBytes, fileSize-int64(MagicStringLen))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(magicBytes, fileSize-int64(MagicStringLen)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read magic string from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read magic string from %s: %w", opts.FilePath, err)
 	}
 	if string(magicBytes) != MagicString {
-		file.Close()
 		if span != nil {
 			span.RecordError(ErrCorrupted)
 			span.SetStatus(codes.Error, ErrCorrupted.Error())
 		}
-		return nil, fmt.Errorf("invalid magic string in sstable file %s: got %s, want %s: %w", opts.FilePath, string(magicBytes), MagicString, ErrCorrupted) // FR7.2
+		return nil, fmt.Errorf("invalid magic string in sstable file %s: got %s, want %s: %w", opts.FilePath, string(magicBytes), MagicString, ErrCorrupted)
 	}
 
 	// Read and deserialize Bloom Filter (FR4.3)
 	bloomFilterData := make([]byte, bloomFilterLen)
-	_, err = file.ReadAt(bloomFilterData, int64(bloomFilterOffset))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(bloomFilterData, int64(bloomFilterOffset)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read bloom filter data from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read bloom filter data from %s: %w", opts.FilePath, err)
 	}
-	filter, err := DeserializeBloomFilter(bloomFilterData) // Use sstable.DeserializeBloomFilter
-	if err != nil {
-		file.Close()
+	var filter filter.Filter
+	if filter, err = DeserializeBloomFilter(bloomFilterData); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to deserialize filter from %s: %w", opts.FilePath, err) // FR7.2 (corruption)
+		return nil, fmt.Errorf("failed to deserialize filter from %s: %w", opts.FilePath, err)
 	}
 
 	// Read and deserialize Index (FR4.2)
@@ -207,7 +201,6 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// So, the checksum is at indexOffset - core.ChecksumSize.
 	checksumOffset := int64(indexOffset) - int64(core.ChecksumSize)
 	if checksumOffset < 0 {
-		file.Close()
 		if span != nil {
 			span.RecordError(ErrCorrupted)
 			span.SetStatus(codes.Error, ErrCorrupted.Error())
@@ -216,9 +209,7 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	}
 
 	checksumBytes := make([]byte, core.ChecksumSize)
-	_, err = file.ReadAt(checksumBytes, checksumOffset)
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(checksumBytes, checksumOffset); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -228,36 +219,31 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	indexChecksum := binary.LittleEndian.Uint32(checksumBytes)
 
 	actualIndexData := make([]byte, indexLen)
-	_, err = file.ReadAt(actualIndexData, int64(indexOffset))
-	if err != nil {
-		file.Close()
+	if _, err = file.ReadAt(actualIndexData, int64(indexOffset)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to read index data from %s: %w", opts.FilePath, err) // FR7.1
+		return nil, fmt.Errorf("failed to read index data from %s: %w", opts.FilePath, err)
 	}
 
-	idx, err := DeserializeIndex(actualIndexData, indexChecksum, opts.Tracer, opts.Logger)
-	if err != nil {
-		file.Close()
+	var idx *Index
+	if idx, err = DeserializeIndex(actualIndexData, indexChecksum, opts.Tracer, opts.Logger); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
-		return nil, fmt.Errorf("failed to deserialize index from %s: %w", opts.FilePath, err) // FR7.2 (corruption)
+		return nil, fmt.Errorf("failed to deserialize index from %s: %w", opts.FilePath, err)
 	}
 
 	// FR4.4: Read minKey and maxKey directly from their sections using offsets from the footer
 	minKey := make([]byte, minKeyLen)
 	if _, err := file.ReadAt(minKey, int64(minKeyOffset)); err != nil {
-		file.Close()
 		return nil, fmt.Errorf("failed to read minKey data from %s: %w", opts.FilePath, err)
 	}
 
 	maxKey := make([]byte, maxKeyLen)
 	if _, err := file.ReadAt(maxKey, int64(maxKeyOffset)); err != nil {
-		file.Close()
 		return nil, fmt.Errorf("failed to read maxKey data from %s: %w", opts.FilePath, err)
 	}
 
@@ -265,7 +251,7 @@ func LoadSSTable(opts LoadSSTableOptions) (*SSTable, error) {
 	// This is effectively the offset of the first metadata block (e.g., index block).
 	actualDataEndOffset := int64(indexOffset)
 
-	sst := &SSTable{
+	sst = &SSTable{
 		file:          file,
 		filePath:      opts.FilePath,
 		id:            opts.ID,
@@ -319,15 +305,13 @@ func (s *SSTable) Get(key []byte) (value []byte, entryType core.EntryType, err e
 	}
 
 	// FR4.8: Read block (through cache)
-	blockData, err := s.readBlock(blockMeta.BlockOffset, blockMeta.BlockLength, nil) // Pass nil semaphore for single Get operations
+	block, err := s.readBlock(blockMeta.BlockOffset, blockMeta.BlockLength, nil) // Pass nil semaphore for single Get operations
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read block for key %s: %w", string(key), err)
 	}
-	defer core.PutBuffer(blockData) // Return buffer to pool when function exits
-	// The cache now returns the raw decompressed bytes.
-	// The block itself is ephemeral and created on-demand.
+	// The readBlock function now returns a *Block and manages its own buffers.
+	// We don't need to put anything back into a pool here.
 
-	block := NewBlock(blockData.Bytes())
 	// Find in block now returns value, entryType, seqNum, error
 	valResult, typeResultFromBlock, _, errResultFromBlock := block.Find(key) // We ignore seqNum for Get's return signature for now
 
@@ -349,8 +333,8 @@ func (s *SSTable) Contains(key []byte) bool {
 }
 
 // readBlock reads a data block from the SSTable, utilizing the block cache.
-func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*bytes.Buffer, error) {
-	// Acquire a semaphore permit if provided. This limits concurrency.
+func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Block, error) { //nolint:revive
+	// Acquire a semaphore permit if provided. This limits concurrency for block reads. //nolint:revive
 	if sem != nil {
 		sem <- struct{}{}
 		defer func() {
@@ -359,10 +343,10 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*by
 	}
 
 	var span trace.Span
-	// This method is internal and assumes the caller holds the necessary lock.
 	if s.file == nil {
 		return nil, ErrClosed
 	}
+	// This method is internal and assumes the caller holds the necessary lock.
 	if s.tracer != nil {
 		_, span = s.tracer.Start(context.Background(), "SSTable.readBlock")
 		span.SetAttributes(attribute.Int64("sstable.block_offset", offset), attribute.Int64("sstable.block_length", int64(length)))
@@ -370,18 +354,17 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*by
 	}
 
 	// --- Cache Path ---
+	// 1. Check Block Cache
 	if s.blockCache != nil {
 		cacheKey := fmt.Sprintf("%d-%d", s.id, offset)
 		if cachedVal, found := s.blockCache.Get(cacheKey); found {
 			if span != nil {
 				span.SetAttributes(attribute.Bool("cache.hit", true))
 			}
-			// The cache stores []byte. We need to return a *bytes.Buffer.
 			if data, ok := cachedVal.([]byte); ok {
-				// Get a buffer from the pool and write the cached data into it.
-				buf := core.BufferPool.Get()
-				buf.Write(data)
-				return buf, nil
+				// Create a new block from the cached (and already decompressed) data.
+				// The block itself is ephemeral and not returned to any pool.
+				return NewBlock(data), nil
 			}
 			return nil, fmt.Errorf("invalid type in block cache for key %s", cacheKey)
 		}
@@ -393,65 +376,93 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*by
 	}
 
 	// --- Direct Read / Cache Miss Path ---
-	// This logic is now used for both cache misses and when the cache is disabled.
-	const compressionFlagSize = 1
-	const checksumSize = 4
-	const minBlockHeaderSize = compressionFlagSize + checksumSize // Renamed for clarity
-	if length < minBlockHeaderSize {
-		return nil, fmt.Errorf("block length %d is too small to include compression flag and checksum (offset: %d): %w", length, offset, ErrCorrupted)
-	}
-
-	fullBlockDataOnDisk := make([]byte, length)
-	_, err := s.file.ReadAt(fullBlockDataOnDisk, offset)
+	// 2. Read and Verify Raw Block from Disk
+	compressedPayload, compressionType, err := s.readAndVerifyRawBlock(offset, length)
 	if err != nil {
+		if span != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "read_raw_block_failed")
+		}
 		return nil, err
 	}
 
-	compressionTypeByte := fullBlockDataOnDisk[0]
-	storedChecksum := binary.LittleEndian.Uint32(fullBlockDataOnDisk[compressionFlagSize : compressionFlagSize+checksumSize])
-	dataOnDisk := fullBlockDataOnDisk[minBlockHeaderSize:]
-
-	calculatedChecksum := crc32.ChecksumIEEE(dataOnDisk)
-	if storedChecksum != calculatedChecksum {
-		return nil, fmt.Errorf("checksum mismatch for block at offset %d: %w", offset, ErrCorrupted)
-	}
-
-	// Get a buffer from the pool to decompress into.
-	// This buffer will be returned to the caller, who is responsible for putting it back.
-	decompressionBuffer := core.BufferPool.Get()
-
-	decompressor, errDecompressor := GetCompressor(core.CompressionType(compressionTypeByte))
-	if errDecompressor != nil {
-		core.BufferPool.Put(decompressionBuffer) // Return buffer on error
-		return nil, fmt.Errorf("failed to get decompressor for block at offset %d: %w", offset, errDecompressor)
-	}
-
-	decompressReader, err := decompressor.Decompress(dataOnDisk)
+	// 3. Decompress Block
+	decompressedBytes, err := s.decompressBlock(compressedPayload, compressionType, offset)
 	if err != nil {
-		core.BufferPool.Put(decompressionBuffer) // Return buffer on error
-		return nil, fmt.Errorf("failed to decompress block at offset %d: %w", offset, err)
-	}
-	defer decompressReader.Close()
-
-	if _, err := io.Copy(decompressionBuffer, decompressReader); err != nil {
-		core.BufferPool.Put(decompressionBuffer) // Return buffer on error
-		return nil, fmt.Errorf("failed to copy decompressed data to buffer: %w", err)
+		if span != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "decompress_block_failed")
+		}
+		return nil, err
 	}
 
-	// If caching is enabled, put a copy of the decompressed data into the cache.
+	// 4. Update Cache
 	if s.blockCache != nil {
 		cacheKey := fmt.Sprintf("%d-%d", s.id, offset)
-		// Create a copy for the cache. The original buffer is returned to the caller.
-		dataToCache := make([]byte, decompressionBuffer.Len())
-		copy(dataToCache, decompressionBuffer.Bytes())
+		// Create a copy for the cache because the slice's backing array might be reused.
+		dataToCache := make([]byte, len(decompressedBytes))
+		copy(dataToCache, decompressedBytes)
 		s.blockCache.Put(cacheKey, dataToCache)
 		if span != nil {
 			span.SetAttributes(attribute.Int("cache.put_block_size", len(dataToCache)))
 		}
 	}
 
-	// Return the original buffer from the pool to the caller.
-	return decompressionBuffer, nil
+	return NewBlock(decompressedBytes), nil
+}
+
+// readAndVerifyRawBlock reads a raw block from disk and verifies its checksum.
+// It returns the compressed data payload and its compression type.
+func (s *SSTable) readAndVerifyRawBlock(offset int64, length uint32) ([]byte, core.CompressionType, error) {
+	const compressionFlagSize = 1
+	const checksumSize = 4
+	const minBlockHeaderSize = compressionFlagSize + checksumSize
+
+	if length < minBlockHeaderSize {
+		return nil, 0, fmt.Errorf("block length %d is too small to include compression flag and checksum (offset: %d): %w", length, offset, ErrCorrupted)
+	}
+
+	readBuffer := make([]byte, length)
+	if _, err := s.file.ReadAt(readBuffer, offset); err != nil {
+		return nil, 0, err
+	}
+
+	compressionTypeByte := readBuffer[0]
+	storedChecksum := binary.LittleEndian.Uint32(readBuffer[compressionFlagSize : compressionFlagSize+checksumSize])
+	compressedPayload := readBuffer[minBlockHeaderSize:]
+
+	calculatedChecksum := crc32.ChecksumIEEE(compressedPayload)
+	if storedChecksum != calculatedChecksum {
+		return nil, 0, fmt.Errorf("checksum mismatch for block at offset %d: %w", offset, ErrCorrupted)
+	}
+
+	return compressedPayload, core.CompressionType(compressionTypeByte), nil
+}
+
+// decompressBlock takes compressed block data and returns the decompressed bytes.
+func (s *SSTable) decompressBlock(data []byte, compressionType core.CompressionType, offset int64) ([]byte, error) {
+	decompressionBuffer := core.BufferPool.Get()
+	defer core.BufferPool.Put(decompressionBuffer)
+
+	decompressor, err := GetCompressor(compressionType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get decompressor for block at offset %d: %w", offset, err)
+	}
+
+	decompressReader, err := decompressor.Decompress(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress block at offset %d: %w", offset, err)
+	}
+	defer decompressReader.Close()
+
+	if _, err := io.Copy(decompressionBuffer, decompressReader); err != nil {
+		return nil, fmt.Errorf("failed to copy decompressed data to buffer: %w", err)
+	}
+
+	// Return a copy because the buffer will be reset and reused by the pool.
+	decompressedCopy := make([]byte, len(decompressionBuffer.Bytes()))
+	copy(decompressedCopy, decompressionBuffer.Bytes())
+	return decompressedCopy, nil
 }
 
 // NewIterator creates an iterator for scanning entries within the SSTable.
@@ -568,14 +579,14 @@ func (s *SSTable) VerifyIntegrity(deepCheck bool) []error {
 		// 4. Verify index entries' FirstKey against actual block data (Deep Check)
 		if deepCheck {
 			// This can be resource-intensive as it involves reading blocks.
-			for i, indexEntry := range s.index.entries { // Pass nil semaphore for integrity checks
-				blockData, err := s.readBlock(indexEntry.BlockOffset, indexEntry.BlockLength, nil) // Uses cache if available
+			for i, indexEntry := range s.index.entries {
+				block, err := s.readBlock(indexEntry.BlockOffset, indexEntry.BlockLength, nil) // Uses cache if available
 				if err != nil {
 					errs = append(errs, fmt.Errorf("SSTable ID %d: Failed to read block for index entry %d (offset %d): %w",
 						s.id, i, indexEntry.BlockOffset, err))
 					continue
 				}
-				blockIter := NewBlockIterator(blockData.Bytes())
+				blockIter := NewBlockIterator(block.getEntriesData())
 				if blockIter.Next() {
 					actualFirstKeyInBlock := blockIter.Key()
 					if !bytes.Equal(indexEntry.FirstKey, actualFirstKeyInBlock) {
@@ -590,7 +601,6 @@ func (s *SSTable) VerifyIntegrity(deepCheck bool) []error {
 					// If writer ensures blocks are non-empty if indexed, this is an error.
 					errs = append(errs, fmt.Errorf("SSTable ID %d: Index entry %d points to an empty or unreadable block", s.id, i))
 				}
-				core.PutBuffer(blockData) // Return buffer to pool at the end of the loop
 			}
 		}
 

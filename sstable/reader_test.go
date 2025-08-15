@@ -3,6 +3,7 @@ package sstable
 import (
 	"bytes"
 	"encoding/binary"
+	"hash/crc32"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -56,6 +57,46 @@ func createAndCorruptSSTable(t *testing.T, corruptionFunc func(data []byte) []by
 }
 
 func TestLoadSSTable_ErrorPaths(t *testing.T) {
+	t.Run("CorruptedMagicNumber", func(t *testing.T) {
+		corruptedPath := createAndCorruptSSTable(t, func(data []byte) []byte {
+			// The FileHeader struct layout is: Magic (4 bytes), ...
+			// Corrupt the magic number.
+			if len(data) > 4 {
+				copy(data[0:4], []byte("BAD!"))
+			}
+			return data
+		})
+
+		_, err := LoadSSTable(LoadSSTableOptions{FilePath: corruptedPath, ID: 1, Logger: slog.Default()})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid sstable magic number", "Error should indicate an invalid magic number")
+	})
+
+	t.Run("CorruptedBloomFilterDeserialization", func(t *testing.T) {
+		corruptedPath := createAndCorruptSSTable(t, func(data []byte) []byte {
+			// Find bloom filter offset and length from footer
+			footerReader := bytes.NewReader(data[len(data)-FooterSize:])
+			var indexOffset, bloomFilterOffset uint64
+			var indexLen, bloomFilterLen uint32
+			binary.Read(footerReader, binary.LittleEndian, &indexOffset)
+			binary.Read(footerReader, binary.LittleEndian, &indexLen)
+			binary.Read(footerReader, binary.LittleEndian, &bloomFilterOffset)
+			binary.Read(footerReader, binary.LittleEndian, &bloomFilterLen)
+
+			// Corrupt the bloom filter data itself by flipping some bits.
+			// This should cause the size check inside DeserializeBloomFilter to fail.
+			// For example, we can corrupt the numBits metadata inside the bloom filter data.
+			if bloomFilterLen > 1 {
+				data[bloomFilterOffset+1]++ // Corrupt the serialized numBits
+			}
+			return data
+		})
+
+		_, err := LoadSSTable(LoadSSTableOptions{FilePath: corruptedPath, ID: 1, Logger: slog.Default()})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to deserialize filter", "Error should indicate bloom filter deserialization failure")
+	})
+
 	t.Run("InvalidHeaderVersion", func(t *testing.T) {
 		corruptedPath := createAndCorruptSSTable(t, func(data []byte) []byte {
 			// The FileHeader struct layout is: Magic (4 bytes), Version (1 byte), ...
@@ -109,6 +150,64 @@ func TestLoadSSTable_CorruptedIndexChecksum(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCorrupted, "Error should be ErrCorrupted for checksum mismatch")
 	assert.Contains(t, err.Error(), "index checksum mismatch", "Error message should indicate index checksum mismatch")
+}
+
+func TestSSTable_readBlock_DecompressionError(t *testing.T) {
+	tempDir := t.TempDir()
+	entries := []testEntry{
+		{Key: []byte("key1"), Value: []byte("value1"), EntryType: core.EntryTypePutEvent, PointID: 1},
+	}
+	fileID := uint64(99)
+
+	// 1. Create a valid SSTable with Snappy compression
+	writerOpts := core.SSTableWriterOptions{
+		DataDir:                      tempDir,
+		ID:                           fileID,
+		BloomFilterFalsePositiveRate: 0.01,
+		Compressor:                   &compressors.SnappyCompressor{},
+		Logger:                       slog.Default(),
+	}
+	writer, err := NewSSTableWriter(writerOpts)
+	require.NoError(t, err)
+	require.NoError(t, writer.Add(entries[0].Key, entries[0].Value, entries[0].EntryType, entries[0].PointID))
+	require.NoError(t, writer.Finish())
+	validPath := writer.FilePath()
+
+	// 2. Load it to get block metadata
+	sst, err := LoadSSTable(LoadSSTableOptions{FilePath: validPath, ID: fileID, Logger: slog.Default()})
+	require.NoError(t, err)
+	blockMeta := sst.index.GetEntries()[0]
+	sst.Close()
+
+	// 3. Corrupt the compressed data but fix the checksum
+	fileData, err := os.ReadFile(validPath)
+	require.NoError(t, err)
+
+	// Block layout: [compression_flag (1)] [checksum (4)] [compressed_data (N)]
+	dataStartOffset := int(blockMeta.BlockOffset) + 1 + 4
+	dataEndOffset := int(blockMeta.BlockOffset) + int(blockMeta.BlockLength)
+	compressedData := fileData[dataStartOffset:dataEndOffset]
+
+	// Corrupt the compressed data
+	if len(compressedData) > 0 {
+		compressedData[0]++ // Flip a bit
+	}
+
+	// Recalculate checksum for the corrupted data
+	newChecksum := crc32.ChecksumIEEE(compressedData)
+	binary.LittleEndian.PutUint32(fileData[int(blockMeta.BlockOffset)+1:dataStartOffset], newChecksum)
+
+	// 4. Write back and try to read
+	require.NoError(t, os.WriteFile(validPath, fileData, 0644))
+
+	corruptedSST, err := LoadSSTable(LoadSSTableOptions{FilePath: validPath, ID: fileID, Logger: slog.Default()})
+	require.NoError(t, err) // Load should succeed
+	defer corruptedSST.Close()
+
+	_, _, err = corruptedSST.Get([]byte("key1"))
+	require.Error(t, err, "Get should fail due to decompression error")
+	assert.Contains(t, err.Error(), "failed to decompress block", "Error message should indicate decompression failure")
+	assert.Contains(t, err.Error(), "corrupt input", "Error message should indicate corrupt snappy input")
 }
 
 func TestSSTable_readBlock_ErrorPaths(t *testing.T) {
@@ -235,6 +334,63 @@ func TestSSTable_VerifyIntegrity(t *testing.T) {
 		}
 		assert.True(t, foundExpectedError, "Expected to find 'MinKey does not match first key in index' error")
 	})
+}
+
+func TestSSTable_VerifyIntegrity_BloomFilterFalseNegative(t *testing.T) {
+	// 1. Create a valid SSTable with some keys
+	tempDir := t.TempDir()
+	entries := []testEntry{
+		{Key: []byte("key-exists"), Value: []byte("v1"), EntryType: core.EntryTypePutEvent, PointID: 1},
+	}
+	writerOpts := core.SSTableWriterOptions{
+		DataDir:                      tempDir,
+		ID:                           1,
+		BloomFilterFalsePositiveRate: 0.01,
+		Compressor:                   &compressors.NoCompressionCompressor{},
+		Logger:                       slog.Default(),
+	}
+	writer, err := NewSSTableWriter(writerOpts)
+	require.NoError(t, err)
+	require.NoError(t, writer.Add(entries[0].Key, entries[0].Value, entries[0].EntryType, entries[0].PointID))
+	require.NoError(t, writer.Finish())
+	validPath := writer.FilePath()
+	defer os.Remove(validPath)
+
+	// 2. Read the valid data, corrupt it in memory, and write it back.
+	validData, err := os.ReadFile(validPath)
+	require.NoError(t, err)
+
+	// Corrupt the bloom filter by zeroing out its bit array.
+	footerReader := bytes.NewReader(validData[len(validData)-FooterSize:])
+	var indexOffset, bloomFilterOffset uint64
+	var indexLen, bloomFilterLen uint32
+	binary.Read(footerReader, binary.LittleEndian, &indexOffset)
+	binary.Read(footerReader, binary.LittleEndian, &indexLen)
+	binary.Read(footerReader, binary.LittleEndian, &bloomFilterOffset)
+	binary.Read(footerReader, binary.LittleEndian, &bloomFilterLen)
+
+	bloomFilterData := validData[bloomFilterOffset : int(bloomFilterOffset)+int(bloomFilterLen)]
+	// The bloom filter data itself starts after its metadata (numBits, numHashes).
+	// Zeroing out the bit array guarantees a false negative.
+	if len(bloomFilterData) > 12 {
+		for i := 12; i < len(bloomFilterData); i++ {
+			bloomFilterData[i] = 0
+		}
+	}
+	require.NoError(t, os.WriteFile(validPath, validData, 0644))
+
+	// 3. Load the corrupted table and verify integrity
+	corruptedSST, err := LoadSSTable(LoadSSTableOptions{FilePath: validPath, ID: 1, Logger: slog.Default()})
+	require.NoError(t, err)
+	defer corruptedSST.Close()
+
+	// The bloom filter should now give a false negative for "key-exists"
+	require.False(t, corruptedSST.Contains([]byte("key-exists")), "Corrupted bloom filter should not contain the key")
+
+	// VerifyIntegrity with deep check should detect this
+	errs := corruptedSST.VerifyIntegrity(true)
+	require.NotEmpty(t, errs, "VerifyIntegrity should find a false negative error")
+	assert.Contains(t, errs[0].Error(), "Bloom filter returned false negative", "Error should be about bloom filter false negative")
 }
 
 func TestSSTable_Get_BloomFilterFalsePositive(t *testing.T) {

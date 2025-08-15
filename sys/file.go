@@ -51,6 +51,7 @@ type OpenHandler func(name string) (FileInterface, error)
 type OpenFileHandler func(name string, flag int, perm os.FileMode) (FileInterface, error)
 type WriteFileHandler func(name string, data []byte, perm os.FileMode) error
 type GCFileHandler func() error
+type RemoveHandler func(name string) error
 
 func init() {
 	debugMode.Store(false)
@@ -116,3 +117,6 @@ var WriteFile WriteFileHandler = (func(name string, data []byte, perm os.FileMod
 	return file.WriteFile(name, data, perm)
 })
 
+var Remove RemoveHandler = (func(name string) error {
+	return os.Remove(name)
+})
