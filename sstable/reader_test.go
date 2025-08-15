@@ -86,6 +86,31 @@ func TestLoadSSTable_ErrorPaths(t *testing.T) {
 	})
 }
 
+func TestLoadSSTable_CorruptedIndexChecksum(t *testing.T) {
+	corruptedPath := createAndCorruptSSTable(t, func(data []byte) []byte {
+		// 1. Find index offset from footer
+		footerReader := bytes.NewReader(data[len(data)-FooterSize:])
+		var indexOffset uint64
+		err := binary.Read(footerReader, binary.LittleEndian, &indexOffset)
+		require.NoError(t, err)
+
+		// 2. Find checksum location (right before the index data)
+		checksumOffset := int64(indexOffset) - int64(core.ChecksumSize)
+		require.GreaterOrEqual(t, checksumOffset, int64(0), "Checksum offset should be non-negative")
+		require.Less(t, checksumOffset, int64(len(data)), "Checksum offset should be within file bounds")
+
+		// 3. Corrupt the checksum by incrementing the first byte
+		data[checksumOffset]++
+
+		return data
+	})
+
+	_, err := LoadSSTable(LoadSSTableOptions{FilePath: corruptedPath, ID: 1, Logger: slog.Default()})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCorrupted, "Error should be ErrCorrupted for checksum mismatch")
+	assert.Contains(t, err.Error(), "index checksum mismatch", "Error message should indicate index checksum mismatch")
+}
+
 func TestSSTable_readBlock_ErrorPaths(t *testing.T) {
 	t.Run("BlockLengthTooSmall", func(t *testing.T) {
 		// Create a valid SSTable. Add BloomFilterFalsePositiveRate to prevent error in NewSSTableWriter.
@@ -192,6 +217,23 @@ func TestSSTable_VerifyIntegrity(t *testing.T) {
 			}
 		}
 		assert.True(t, foundExpectedError, "Expected to find 'Index not sorted correctly' error in the list of errors")
+	})
+
+	t.Run("MinKeyMismatchWithIndex", func(t *testing.T) {
+		sst := getBaseSSTForIntegrityTest()
+		sst.minKey = []byte("a") // "a" is not equal to the first index key "b"
+
+		errs := sst.VerifyIntegrity(false)
+		require.NotEmpty(t, errs, "Expected at least one integrity error")
+
+		var foundExpectedError bool
+		for _, e := range errs {
+			if strings.Contains(e.Error(), "does not match first key in index") {
+				foundExpectedError = true
+				break
+			}
+		}
+		assert.True(t, foundExpectedError, "Expected to find 'MinKey does not match first key in index' error")
 	})
 }
 
