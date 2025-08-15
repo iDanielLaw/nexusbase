@@ -333,8 +333,8 @@ func (s *SSTable) Contains(key []byte) bool {
 }
 
 // readBlock reads a data block from the SSTable, utilizing the block cache.
-func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Block, error) {
-	// Acquire a semaphore permit if provided. This limits concurrency for block reads.
+func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Block, error) { //nolint:revive
+	// Acquire a semaphore permit if provided. This limits concurrency for block reads. //nolint:revive
 	if sem != nil {
 		sem <- struct{}{}
 		defer func() {
@@ -343,10 +343,10 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Bl
 	}
 
 	var span trace.Span
-	// This method is internal and assumes the caller holds the necessary lock.
 	if s.file == nil {
 		return nil, ErrClosed
 	}
+	// This method is internal and assumes the caller holds the necessary lock.
 	if s.tracer != nil {
 		_, span = s.tracer.Start(context.Background(), "SSTable.readBlock")
 		span.SetAttributes(attribute.Int64("sstable.block_offset", offset), attribute.Int64("sstable.block_length", int64(length)))
@@ -354,6 +354,7 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Bl
 	}
 
 	// --- Cache Path ---
+	// 1. Check Block Cache
 	if s.blockCache != nil {
 		cacheKey := fmt.Sprintf("%d-%d", s.id, offset)
 		if cachedVal, found := s.blockCache.Get(cacheKey); found {
@@ -375,39 +376,80 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Bl
 	}
 
 	// --- Direct Read / Cache Miss Path ---
-	// This logic is now used for both cache misses and when the cache is disabled.
-	const compressionFlagSize = 1
-	const checksumSize = 4
-	const minBlockHeaderSize = compressionFlagSize + checksumSize // Renamed for clarity
-	if length < minBlockHeaderSize {
-		return nil, fmt.Errorf("block length %d is too small to include compression flag and checksum (offset: %d): %w", length, offset, ErrCorrupted)
-	}
-
-	fullBlockDataOnDisk := make([]byte, length)
-	_, err := s.file.ReadAt(fullBlockDataOnDisk, offset)
+	// 2. Read and Verify Raw Block from Disk
+	compressedPayload, compressionType, err := s.readAndVerifyRawBlock(offset, length)
 	if err != nil {
+		if span != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "read_raw_block_failed")
+		}
 		return nil, err
 	}
 
-	compressionTypeByte := fullBlockDataOnDisk[0]
-	storedChecksum := binary.LittleEndian.Uint32(fullBlockDataOnDisk[compressionFlagSize : compressionFlagSize+checksumSize])
-	dataOnDisk := fullBlockDataOnDisk[minBlockHeaderSize:]
-
-	calculatedChecksum := crc32.ChecksumIEEE(dataOnDisk)
-	if storedChecksum != calculatedChecksum {
-		return nil, fmt.Errorf("checksum mismatch for block at offset %d: %w", offset, ErrCorrupted)
+	// 3. Decompress Block
+	decompressedBytes, err := s.decompressBlock(compressedPayload, compressionType, offset)
+	if err != nil {
+		if span != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "decompress_block_failed")
+		}
+		return nil, err
 	}
 
-	// Get a buffer from the pool to decompress into. We will return it to the pool in this function.
+	// 4. Update Cache
+	if s.blockCache != nil {
+		cacheKey := fmt.Sprintf("%d-%d", s.id, offset)
+		// Create a copy for the cache because the slice's backing array might be reused.
+		dataToCache := make([]byte, len(decompressedBytes))
+		copy(dataToCache, decompressedBytes)
+		s.blockCache.Put(cacheKey, dataToCache)
+		if span != nil {
+			span.SetAttributes(attribute.Int("cache.put_block_size", len(dataToCache)))
+		}
+	}
+
+	return NewBlock(decompressedBytes), nil
+}
+
+// readAndVerifyRawBlock reads a raw block from disk and verifies its checksum.
+// It returns the compressed data payload and its compression type.
+func (s *SSTable) readAndVerifyRawBlock(offset int64, length uint32) ([]byte, core.CompressionType, error) {
+	const compressionFlagSize = 1
+	const checksumSize = 4
+	const minBlockHeaderSize = compressionFlagSize + checksumSize
+
+	if length < minBlockHeaderSize {
+		return nil, 0, fmt.Errorf("block length %d is too small to include compression flag and checksum (offset: %d): %w", length, offset, ErrCorrupted)
+	}
+
+	readBuffer := make([]byte, length)
+	if _, err := s.file.ReadAt(readBuffer, offset); err != nil {
+		return nil, 0, err
+	}
+
+	compressionTypeByte := readBuffer[0]
+	storedChecksum := binary.LittleEndian.Uint32(readBuffer[compressionFlagSize : compressionFlagSize+checksumSize])
+	compressedPayload := readBuffer[minBlockHeaderSize:]
+
+	calculatedChecksum := crc32.ChecksumIEEE(compressedPayload)
+	if storedChecksum != calculatedChecksum {
+		return nil, 0, fmt.Errorf("checksum mismatch for block at offset %d: %w", offset, ErrCorrupted)
+	}
+
+	return compressedPayload, core.CompressionType(compressionTypeByte), nil
+}
+
+// decompressBlock takes compressed block data and returns the decompressed bytes.
+func (s *SSTable) decompressBlock(data []byte, compressionType core.CompressionType, offset int64) ([]byte, error) {
 	decompressionBuffer := core.BufferPool.Get()
 	defer core.BufferPool.Put(decompressionBuffer)
 
-	decompressor, errDecompressor := GetCompressor(core.CompressionType(compressionTypeByte))
-	if errDecompressor != nil {
-		return nil, fmt.Errorf("failed to get decompressor for block at offset %d: %w", offset, errDecompressor)
+	decompressor, err := GetCompressor(compressionType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get decompressor for block at offset %d: %w", offset, err)
 	}
 
-	decompressReader, err := decompressor.Decompress(dataOnDisk)
+	decompressReader, err := decompressor.Decompress(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress block at offset %d: %w", offset, err)
 	}
@@ -417,20 +459,10 @@ func (s *SSTable) readBlock(offset int64, length uint32, sem chan struct{}) (*Bl
 		return nil, fmt.Errorf("failed to copy decompressed data to buffer: %w", err)
 	}
 
-	decompressedBytes := decompressionBuffer.Bytes()
-	// If caching is enabled, put a copy of the decompressed data into the cache.
-	if s.blockCache != nil {
-		cacheKey := fmt.Sprintf("%d-%d", s.id, offset)
-		dataToCache := make([]byte, len(decompressedBytes))
-		copy(dataToCache, decompressedBytes)
-		s.blockCache.Put(cacheKey, dataToCache)
-		if span != nil {
-			span.SetAttributes(attribute.Int("cache.put_block_size", len(dataToCache)))
-		}
-	}
-
-	// Return the original buffer from the pool to the caller.
-	return NewBlock(decompressedBytes), nil
+	// Return a copy because the buffer will be reset and reused by the pool.
+	decompressedCopy := make([]byte, len(decompressionBuffer.Bytes()))
+	copy(decompressedCopy, decompressionBuffer.Bytes())
+	return decompressedCopy, nil
 }
 
 // NewIterator creates an iterator for scanning entries within the SSTable.

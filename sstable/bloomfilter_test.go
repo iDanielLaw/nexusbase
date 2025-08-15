@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
-	"time"
 )
 
 func TestNewBloomFilter_ValidParameters(t *testing.T) {
@@ -143,8 +142,9 @@ func TestBloomFilter_Serialization(t *testing.T) {
 
 func TestBloomFilter_FalsePositiveRate(t *testing.T) {
 	// This test is probabilistic and might fail occasionally.
-	// Set a seed for reproducibility in tests, but in real scenarios, it's random.
-	rand.Seed(time.Now().UnixNano())
+	// As of Go 1.20, the recommended way is to create a local random source
+	// for reproducible tests. We use a fixed seed here.
+	r := rand.New(rand.NewSource(12345))
 
 	numElements := uint64(1000)
 	targetFPR := 0.01 // 1%
@@ -166,7 +166,7 @@ func TestBloomFilter_FalsePositiveRate(t *testing.T) {
 	// Generate non-existent keys and count false positives
 	falsePositives := 0
 	for i := 0; i < testKeysCount; i++ {
-		nonExistentKey := []byte(fmt.Sprintf("non_existent_key_%d_%d", i, rand.Intn(1000000)))
+		nonExistentKey := []byte(fmt.Sprintf("non_existent_key_%d_%d", i, r.Intn(1000000)))
 		// Ensure the key is truly not among known keys (highly unlikely for random strings)
 		isKnown := false
 		for _, k := range knownKeys {
