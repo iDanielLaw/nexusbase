@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -153,10 +154,6 @@ func (w *WAL) Append(entry core.WALEntry) error {
 
 // AppendBatch writes a slice of WAL entries as a single, atomic record.
 func (w *WAL) AppendBatch(entries []core.WALEntry) error {
-	if len(entries) == 0 {
-		return nil
-	}
-
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -164,8 +161,11 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 		return w.testingOnlyInjectAppendError // ถ้ามี error ถูก inject ให้คืนค่านั้นไปเลย
 	}
 
+	if len(entries) == 0 {
+		return nil
+	}
+
 	var batchPayload bytes.Buffer
-	// Always write as a batch record for format consistency.
 	if err := batchPayload.WriteByte(byte(core.EntryTypePutBatch)); err != nil {
 		return fmt.Errorf("failed to write batch entry type: %w", err)
 	}
@@ -177,7 +177,6 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 			return fmt.Errorf("failed to encode entry %d for batch: %w", i, err)
 		}
 	}
-
 	payloadBytes := batchPayload.Bytes()
 	newRecordSize := int64(len(payloadBytes) + 8) // +4 for length, +4 for checksum
 
@@ -349,37 +348,22 @@ func (w *WAL) rotateLocked() error {
 
 // encodeEntryData serializes a single WALEntry's data part into a writer.
 func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
-	// Explicitly write the EntryType as a single byte.
-	if wb, ok := w.(io.ByteWriter); ok {
-		if err := wb.WriteByte(byte(entry.EntryType)); err != nil {
-			return fmt.Errorf("failed to write entry type byte: %w", err)
-		}
-	} else {
-		// Fallback for writers that don't implement ByteWriter
-		if _, err := w.Write([]byte{byte(entry.EntryType)}); err != nil {
-			return fmt.Errorf("failed to write entry type byte: %w", err)
-		}
+	// Write fixed-size fields first.
+	if err := binary.Write(w, binary.LittleEndian, entry.EntryType); err != nil {
+		return fmt.Errorf("failed to write entry type: %w", err)
 	}
 	if err := binary.Write(w, binary.LittleEndian, entry.SeqNum); err != nil {
-		return err
+		return fmt.Errorf("failed to write sequence number: %w", err)
 	}
 
-	keyLenBuf := make([]byte, binary.MaxVarintLen32)
-	keyLenBytes := binary.PutUvarint(keyLenBuf, uint64(len(entry.Key)))
-	if _, err := w.Write(keyLenBuf[:keyLenBytes]); err != nil {
-		return err
+	// Write variable-size fields with length prefixes.
+	if err := writeUvarintPrefixed(w, entry.Key); err != nil {
+		return fmt.Errorf("failed to write key: %w", err)
 	}
-	if _, err := w.Write(entry.Key); err != nil {
-		return err
+	if err := writeUvarintPrefixed(w, entry.Value); err != nil {
+		return fmt.Errorf("failed to write value: %w", err)
 	}
-
-	valLenBuf := make([]byte, binary.MaxVarintLen32)
-	valLenBytes := binary.PutUvarint(valLenBuf, uint64(len(entry.Value)))
-	if _, err := w.Write(valLenBuf[:valLenBytes]); err != nil {
-		return err
-	}
-	_, err := w.Write(entry.Value)
-	return err
+	return nil
 }
 
 // decodeEntryData deserializes a single WALEntry's data part from a reader.
@@ -387,45 +371,28 @@ func decodeEntryData(r io.Reader) (*core.WALEntry, error) {
 	entry := &core.WALEntry{}
 
 	// Explicitly read the EntryType as a single byte.
-	var typeByte byte
-	if rb, ok := r.(io.ByteReader); ok {
-		var err error
-		typeByte, err = rb.ReadByte()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read entry type: %w", err)
-		}
-	} else {
-		typeBuf := make([]byte, 1)
-		if _, err := io.ReadFull(r, typeBuf); err != nil {
-			return nil, fmt.Errorf("failed to read entry type: %w", err)
-		}
-		typeByte = typeBuf[0]
+	byteReader, ok := r.(io.ByteReader)
+	if !ok {
+		// Wrap the reader if it doesn't implement io.ByteReader, which is needed for ReadUvarint.
+		byteReader = bufio.NewReader(r)
 	}
-	entry.EntryType = core.EntryType(typeByte)
+
+	if err := binary.Read(r, binary.LittleEndian, &entry.EntryType); err != nil {
+		return nil, fmt.Errorf("failed to read entry type: %w", err)
+	}
 	if err := binary.Read(r, binary.LittleEndian, &entry.SeqNum); err != nil {
 		return nil, fmt.Errorf("failed to read sequence number: %w", err)
 	}
 
-	keyLen, err := binary.ReadUvarint(r.(io.ByteReader))
+
+	var err error
+	entry.Key, err = readUvarintPrefixed(byteReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read key length: %w", err)
-	}
-	entry.Key = make([]byte, keyLen)
-	if _, err := io.ReadFull(r, entry.Key); err != nil {
 		return nil, fmt.Errorf("failed to read key: %w", err)
 	}
-
-	valLen, err := binary.ReadUvarint(r.(io.ByteReader))
+	entry.Value, err = readUvarintPrefixed(byteReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read value length: %w", err)
-	}
-	// Allocate even for zero-length to distinguish from a non-existent value field,
-	// ensuring that an empty value is represented as []byte{} rather than nil.
-	entry.Value = make([]byte, valLen)
-	if valLen > 0 {
-		if _, err := io.ReadFull(r, entry.Value); err != nil {
-			return nil, fmt.Errorf("failed to read value: %w", err)
-		}
+		return nil, fmt.Errorf("failed to read value: %w", err)
 	}
 
 	return entry, nil
@@ -483,28 +450,13 @@ func recoverFromSegment(filePath string, logger *slog.Logger) ([]core.WALEntry, 
 			return entries, err
 		}
 
-		payloadReader := bytes.NewReader(recordData)
-		var entryTypeByte byte
-		entryTypeByte, err = payloadReader.ReadByte()
+		// The entire record is a batch. Decode it.
+		batchEntries, err := decodeBatchRecord(recordData)
+		if len(batchEntries) > 0 {
+			entries = append(entries, batchEntries...)
+		}
 		if err != nil {
-			return entries, fmt.Errorf("error reading entry type from WAL record: %w", err)
-		}
-		entryType := core.EntryType(entryTypeByte)
-
-		if entryType != core.EntryTypePutBatch {
-			return entries, fmt.Errorf("unexpected WAL record type: got %d, want %d (EntryTypePutBatch)", entryType, core.EntryTypePutBatch)
-		}
-
-		var numEntries uint32
-		if err := binary.Read(payloadReader, binary.LittleEndian, &numEntries); err != nil {
-			return entries, fmt.Errorf("error reading batch entry count: %w", err)
-		}
-		for i := 0; i < int(numEntries); i++ {
-			entry, err := decodeEntryData(payloadReader)
-			if err != nil {
-				return entries, fmt.Errorf("error decoding entry %d in batch: %w", i, err)
-			}
-			entries = append(entries, *entry)
+			return entries, fmt.Errorf("failed to decode batch record from segment: %w", err) // Return entries collected so far, along with the error
 		}
 	}
 }
@@ -541,4 +493,64 @@ func (w *WAL) openForAppend() error {
 	}
 	w.activeSegment = seg
 	return nil
+}
+
+// writeUvarintPrefixed writes a uvarint length prefix followed by the data slice.
+func writeUvarintPrefixed(w io.Writer, data []byte) error {
+	buf := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(buf, uint64(len(data)))
+	if _, err := w.Write(buf[:n]); err != nil {
+		return err
+	}
+	if len(data) > 0 {
+		if _, err := w.Write(data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readUvarintPrefixed reads a uvarint length prefix and then the data slice.
+func readUvarintPrefixed(r io.ByteReader) ([]byte, error) {
+	length, err := binary.ReadUvarint(r)
+	if err != nil {
+		return nil, err
+	}
+	if length > 0 {
+		data := make([]byte, length)
+		// The reader might not be an io.Reader, so we need to cast it.
+		if _, err := io.ReadFull(r.(io.Reader), data); err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
+	return nil, nil
+}
+
+// decodeBatchRecord decodes a byte slice that represents a batch of WAL entries.
+func decodeBatchRecord(recordData []byte) ([]core.WALEntry, error) {
+	reader := bytes.NewReader(recordData)
+	var entryTypeByte byte
+	entryTypeByte, err := reader.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("error reading entry type from WAL record: %w", err)
+	}
+	if core.EntryType(entryTypeByte) != core.EntryTypePutBatch {
+		return nil, fmt.Errorf("unexpected WAL record type: got %d, want %d (EntryTypePutBatch)", entryTypeByte, core.EntryTypePutBatch)
+	}
+
+	var numEntries uint32
+	if err := binary.Read(reader, binary.LittleEndian, &numEntries); err != nil {
+		return nil, fmt.Errorf("error reading batch entry count: %w", err)
+	}
+
+	entries := make([]core.WALEntry, 0, numEntries)
+	for i := 0; i < int(numEntries); i++ {
+		entry, err := decodeEntryData(reader)
+		if err != nil {
+			return entries, fmt.Errorf("error decoding entry %d in batch: %w", i+1, err)
+		}
+		entries = append(entries, *entry)
+	}
+	return entries, nil
 }

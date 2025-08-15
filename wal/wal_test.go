@@ -328,11 +328,11 @@ func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
 
 	// 4. Verify the outcome.
 	require.Error(t, err, "Recovery should fail due to corruption inside the batch")
-	assert.Contains(t, err.Error(), "error decoding entry 1 in batch", "Error message should point to the corrupted entry")
+	assert.Contains(t, err.Error(), "error decoding entry 2 in batch", "Error message should point to the corrupted entry")
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF, "Underlying error should be unexpected EOF due to truncation")
 
 	// We should have recovered the entries that came before the corruption.
-	require.Len(t, recoveredEntries, 1, "Should have recovered the first valid entry")
+	require.Len(t, recoveredEntries, 1, "Should have recovered the first valid entry from the corrupted batch")
 	assert.Equal(t, entry1.Key, recoveredEntries[0].Key)
 	assert.Equal(t, entry1.SeqNum, recoveredEntries[0].SeqNum)
 }
