@@ -127,3 +127,103 @@ func TestEngine_RestoreFromSnapshot_NoOverwrite(t *testing.T) {
 	require.NoError(t, getErr, "Original data in destination should be untouched after failed restore")
 	assert.Equal(t, 2.0, HelperFieldValueValidateFloat64(t, val, "value"))
 }
+
+func TestEngine_RestoreFromSnapshot_ErrorHandling(t *testing.T) {
+	ctx := context.Background()
+
+	// --- Helper to create a minimal valid snapshot for corruption tests ---
+	createValidSnapshot := func(t *testing.T) (snapshotPath string, cleanup func()) {
+		t.Helper()
+		sourceDir := t.TempDir()
+		sourceOpts := getBaseOptsForFlushTest(t)
+		sourceOpts.DataDir = sourceDir
+		sourceEngine, err := NewStorageEngine(sourceOpts)
+		require.NoError(t, err)
+		err = sourceEngine.Start()
+		require.NoError(t, err)
+
+		// Put one point to make the snapshot non-trivial
+		require.NoError(t, sourceEngine.Put(ctx, HelperDataPoint(t, "metric.a", nil, 1, map[string]interface{}{"value": 1.0})))
+
+		path, err := sourceEngine.CreateSnapshot(ctx)
+		require.NoError(t, err)
+		require.NoError(t, sourceEngine.Close())
+
+		return path, func() { os.RemoveAll(sourceDir) }
+	}
+
+	// setupDestEngine is a helper to create a fresh destination engine for each sub-test.
+	setupDestEngine := func(t *testing.T) (*storageEngine, func()) {
+		t.Helper()
+		destDir := t.TempDir()
+		destOpts := getBaseOptsForFlushTest(t)
+		destOpts.DataDir = destDir
+		destEngine, err := NewStorageEngine(destOpts)
+		require.NoError(t, err)
+		err = destEngine.Start()
+		require.NoError(t, err)
+		return destEngine.(*storageEngine), func() { destEngine.Close() }
+	}
+
+	t.Run("SnapshotPathDoesNotExist", func(t *testing.T) {
+		destEngine, cleanup := setupDestEngine(t)
+		defer cleanup()
+
+		nonExistentPath := filepath.Join(t.TempDir(), "non-existent-snapshot")
+		err := destEngine.RestoreFromSnapshot(ctx, nonExistentPath, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path does not exist")
+	})
+
+	t.Run("SnapshotPathIsAFile", func(t *testing.T) {
+		destEngine, cleanup := setupDestEngine(t)
+		defer cleanup()
+
+		snapshotPath, cleanup := createValidSnapshot(t)
+		defer cleanup()
+
+		// Replace the snapshot directory with a file of the same name
+		require.NoError(t, os.RemoveAll(snapshotPath))
+		require.NoError(t, os.WriteFile(snapshotPath, []byte("i am a file"), 0644))
+
+		err := destEngine.RestoreFromSnapshot(ctx, snapshotPath, true)
+		require.Error(t, err)
+		// The error comes from snapshot.readManifestFromDir trying to read a file inside the "directory"
+		assert.Contains(t, err.Error(), "failed to read CURRENT file")
+	})
+
+	t.Run("SnapshotMissingCurrentFile", func(t *testing.T) {
+		destEngine, cleanup := setupDestEngine(t)
+		defer cleanup()
+
+		snapshotPath, cleanup := createValidSnapshot(t)
+		defer cleanup()
+
+		// Delete the CURRENT file
+		require.NoError(t, os.Remove(filepath.Join(snapshotPath, "CURRENT")))
+
+		err := destEngine.RestoreFromSnapshot(ctx, snapshotPath, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to read CURRENT file")
+	})
+
+	t.Run("SnapshotManifestIsCorrupted", func(t *testing.T) {
+		destEngine, cleanup := setupDestEngine(t)
+		defer cleanup()
+
+		snapshotPath, cleanup := createValidSnapshot(t)
+		defer cleanup()
+
+		// Find the real manifest file and corrupt it
+		currentBytes, err := os.ReadFile(filepath.Join(snapshotPath, "CURRENT"))
+		require.NoError(t, err)
+		manifestFileName := string(currentBytes)
+		manifestPath := filepath.Join(snapshotPath, manifestFileName)
+
+		require.NoError(t, os.WriteFile(manifestPath, []byte("this is not a valid manifest"), 0644))
+
+		err = destEngine.RestoreFromSnapshot(ctx, snapshotPath, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid binary manifest magic number")
+	})
+}
