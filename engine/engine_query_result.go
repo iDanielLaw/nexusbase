@@ -156,10 +156,7 @@ func (it *QueryResultIterator) At() (*core.QueryResultItem, error) {
 		}
 	} else {
 		// Raw data point or event
-		// entryType := it.underlying.EntryType()
-		// _, _, entryType, _ := it.underlying.At()
-		curRaw, _ := it.underlying.At()
-		entryType := curRaw.EntryType
+		entryType := cur.EntryType
 
 		if entryType == core.EntryTypePutEvent {
 			result.IsEvent = true

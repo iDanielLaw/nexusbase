@@ -3,6 +3,7 @@ package iterator
 import (
 	"bytes"
 	"container/heap"
+	"fmt"
 
 	"github.com/INLOpen/nexusbase/core"
 )
@@ -15,10 +16,14 @@ func (h minHeap) Len() int { return len(h) }
 
 func (h minHeap) Less(i, j int) bool {
 	// Compare keys first
-	// keyI, _, _, pointIDI := h[i].At()
-	// keyJ, _, _, pointIDJ := h[j].At()
-	curA, _ := h[i].At()
-	curB, _ := h[j].At()
+	curA, errA := h[i].At()
+	if errA != nil {
+		panic(fmt.Sprintf("iterator in heap has error: %v", errA))
+	}
+	curB, errB := h[j].At()
+	if errB != nil {
+		panic(fmt.Sprintf("iterator in heap has error: %v", errB))
+	}
 	keyI, _, _, pointIDI := curA.Key, curA.Value, curA.EntryType, curA.SeqNum
 	keyJ, _, _, pointIDJ := curB.Key, curB.Value, curB.EntryType, curB.SeqNum
 	keyCmp := bytes.Compare(keyI, keyJ)
@@ -70,8 +75,11 @@ func (h *minHeap) Key() []byte {
 	if h.Len() == 0 {
 		return nil
 	}
-	cur, _ := (*h)[0].At()
-	return cur.Key
+	cur, err := (*h)[0].At()
+	if err != nil {
+		panic(fmt.Sprintf("iterator at top of heap has error: %v", err))
+	}
+	return cur.Value
 }
 
 // Value returns the value of the iterator at the top of the heap.
@@ -79,8 +87,11 @@ func (h *minHeap) Value() []byte {
 	if h.Len() == 0 {
 		return nil
 	}
-	cur, _ := (*h)[0].At()
-	return cur.Value
+	cur, err := (*h)[0].At()
+	if err != nil {
+		panic(fmt.Sprintf("iterator at top of heap has error: %v", err))
+	}
+	return cur.Key
 }
 
 // Next advances the iterator at the top of the heap to its next element.

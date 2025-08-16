@@ -324,7 +324,8 @@ func verifySSTableContent(t *testing.T, tables []*sstable.SSTable, expectedData 
 	actualData := make(map[string]string)
 	for mergedIter.Next() {
 		// keyBytes, valueBytes, entryType, _ := mergedIter.At()
-		cur, _ := mergedIter.At()
+		cur, err := mergedIter.At()
+		require.NoError(t, err)
 		keyBytes, valueBytes, entryType, _ := cur.Key, cur.Value, cur.EntryType, cur.SeqNum
 
 		if entryType == core.EntryTypePutEvent {

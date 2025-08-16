@@ -127,7 +127,11 @@ func (it *TimeFilterIterator) Next() bool {
 
 	for it.underlying.Next() {
 		// key, value, entryType, seqNum := it.underlying.At()
-		cur, _ := it.underlying.At()
+		cur, err := it.underlying.At()
+		if err != nil {
+			it.valid = false
+			return false
+		}
 		key, value, entryType, seqNum := cur.Key, cur.Value, cur.EntryType, cur.SeqNum
 
 		if len(key) < 8 {

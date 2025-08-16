@@ -159,7 +159,11 @@ func (it *MultiFieldAggregatingIterator) Next() bool {
 	it.done = true
 
 	for it.underlying.Next() {
-		cur, _ := it.underlying.At()
+		cur, err := it.underlying.At()
+		if err != nil {
+			it.err = err
+			return false
+		}
 		valueBytes := cur.Value
 
 		if len(valueBytes) == 0 {

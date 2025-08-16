@@ -441,9 +441,11 @@ func (it *MultiFieldDownsamplingIterator) peekNextPoint() ([]byte, []byte, bool)
 		return it.peekedKey, it.peekedValue, true
 	}
 	if it.underlying.Next() {
-		// key, value, _, _ := it.underlying.At()
-		cur, _ := it.underlying.At()
-
+		cur, err := it.underlying.At()
+		if err != nil {
+			it.err = err
+			return nil, nil, false
+		}
 		it.peekedKey = cur.Key
 		it.peekedValue = cur.Value
 		it.peeked = true

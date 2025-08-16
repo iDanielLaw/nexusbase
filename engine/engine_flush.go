@@ -183,7 +183,10 @@ func (e *storageEngine) moveToDLQ(mem *memtable.Memtable) error {
 	iter := mem.NewIterator(nil, nil, core.Ascending)
 	defer iter.Close()
 	for iter.Next() {
-		cur, _ := iter.At()
+		cur, err := iter.At()
+		if err != nil {
+			return fmt.Errorf("error iterating memtable for DLQ: %w", err)
+		}
 		key := cur.Key
 		value := cur.Value
 		entryType := cur.EntryType

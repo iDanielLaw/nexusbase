@@ -43,9 +43,11 @@ func (it *SkippingRangeDeletedIterator) Next() bool {
 		return false
 	}
 	for it.underlying.Next() {
-		// dataPointKey, _, _, dataPointSeqNum := it.underlying.At()
-		cur, _ := it.underlying.At()
-
+		cur, err := it.underlying.At()
+		if err != nil {
+			it.err = err
+			return false
+		}
 		// Extract series identifier from the data point key
 
 		seriesKeyBytes, extractErr := it.extractSeriesKeyFunc(cur.Key)

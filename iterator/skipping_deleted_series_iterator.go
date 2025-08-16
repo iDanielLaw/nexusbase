@@ -38,7 +38,10 @@ func (it *SkippingDeletedSeriesIterator) Next() bool {
 		return false
 	}
 	for it.underlying.Next() {
-		cur, _ := it.underlying.At()
+		cur, err := it.underlying.At()
+		if err != nil {
+			return false
+		}
 
 		// Extract series identifier from the data point key
 		// This seriesKeyBytes is metric_name<NULL>tags_string
