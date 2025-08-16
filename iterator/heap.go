@@ -79,7 +79,7 @@ func (h *minHeap) Key() []byte {
 	if err != nil {
 		panic(fmt.Sprintf("iterator at top of heap has error: %v", err))
 	}
-	return cur.Value
+	return cur.Key
 }
 
 // Value returns the value of the iterator at the top of the heap.
@@ -91,7 +91,7 @@ func (h *minHeap) Value() []byte {
 	if err != nil {
 		panic(fmt.Sprintf("iterator at top of heap has error: %v", err))
 	}
-	return cur.Key
+	return cur.Value
 }
 
 // Next advances the iterator at the top of the heap to its next element.

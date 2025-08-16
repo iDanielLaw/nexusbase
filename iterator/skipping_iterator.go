@@ -33,7 +33,10 @@ func (it *SkippingIterator) Next() bool {
 		}
 		// Check if the first item's key is the one we need to skip.
 		// key, _, _, _ := it.underlying.At()
-		cur, _ := it.underlying.At()
+		cur, err := it.underlying.At()
+		if err != nil {
+			return false
+		}
 		if bytes.Equal(cur.Key, it.skipKey) {
 			// It matches, so advance the underlying iterator one more time to skip it.
 			return it.underlying.Next()
