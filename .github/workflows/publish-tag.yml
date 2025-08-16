@@ -1,28 +1,29 @@
 name: Publish Tag
 
 on:
-  workflow_run:
-    # Trigger after the main Linux build completes.
-    # We will check the Windows build status inside the job.
-    workflows: ["Go Building & Testing"]
-    types:
-      - completed
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Type of version (major, minor or patch)'
+        required: true
+        type: choice
+        default: 'patch'
+        options:
+          - 'major'
+          - 'minor'
+          - 'patch'
 
 jobs:
   publish:
     name: Create and Publish Tag
-    # Run this job only if the triggering workflow (Linux build) was successful
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    environment: "tag-release"
     permissions:
       # Needed to create and push a tag
       contents: write
       # Needed by wait-on-check-action to query workflow statuses
       actions: read
       checks: read
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

@@ -996,10 +996,34 @@ func (r *restorer) cleanupTempDir() {
 // and copies all necessary, unique files to the temporary restore directory, creating a
 // consolidated full manifest at the end.
 func (r *restorer) restoreChainToTempDir() error {
-	// --- Step 1: Collect all unique files and build a consolidated manifest model ---
+	// Step 1: Walk the chain and collect file info and a consolidated manifest model.
+	filesToCopy, consolidatedManifest, err := r.walkAndCollectChainData()
+	if err != nil {
+		return err
+	}
+
+	// Step 2: Copy all the collected files to the temporary directory.
+	for relPath, srcPath := range filesToCopy {
+		destPath := filepath.Join(r.tempRestoreDir, relPath)
+		if err := r.wrapper.CopyFile(srcPath, destPath); err != nil {
+			return fmt.Errorf("failed to copy chained file from %s to %s: %w", srcPath, destPath, err)
+		}
+	}
+
+	// Step 3: Write the new consolidated manifest and CURRENT file.
+	_, err = r.writeConsolidatedManifestAndCurrent(consolidatedManifest)
+	return err
+}
+
+// walkAndCollectChainData walks the snapshot chain backwards from the starting snapshot.
+// It collects a de-duplicated list of files to copy (newest wins) and constructs
+// a model for the final, consolidated manifest.
+func (r *restorer) walkAndCollectChainData() (map[string]string, *core.SnapshotManifest, error) {
 	filesToCopy := make(map[string]string) // Map of relative dest path -> absolute source path
-	allSSTables := make(map[uint64]core.SSTableMetadata)
-	allLevels := make(map[int]map[uint64]core.SSTableMetadata) // level -> tableID -> metadata
+	// Use a map to collect unique tables, keyed by table ID.
+	uniqueSSTables := make(map[uint64]core.SSTableMetadata)
+	// We also need to remember which level each table belongs to.
+	tableToLevelMap := make(map[uint64]int)
 	var finalManifest *core.SnapshotManifest
 
 	snapshotBaseDir := filepath.Dir(r.snapshotDir)
@@ -1008,7 +1032,7 @@ func (r *restorer) restoreChainToTempDir() error {
 	for currentSnapshotPath != "" {
 		manifest, _, err := readManifestFromDir(currentSnapshotPath, r.wrapper)
 		if err != nil {
-			return fmt.Errorf("failed to read manifest from %s during restore chain walk: %w", currentSnapshotPath, err)
+			return nil, nil, fmt.Errorf("failed to read manifest from %s during restore chain walk: %w", currentSnapshotPath, err)
 		}
 
 		// The latest manifest determines the final state (seq num, WAL, etc.)
@@ -1018,13 +1042,12 @@ func (r *restorer) restoreChainToTempDir() error {
 
 		// Collect unique SSTables, walking backwards.
 		for _, level := range manifest.Levels {
-			if _, ok := allLevels[level.LevelNumber]; !ok {
-				allLevels[level.LevelNumber] = make(map[uint64]core.SSTableMetadata)
-			}
 			for _, table := range level.Tables {
-				if _, ok := allSSTables[table.ID]; !ok {
-					allSSTables[table.ID] = table
-					allLevels[level.LevelNumber][table.ID] = table
+				// Since we walk backwards from newest to oldest, the first time we see a table ID,
+				// it's the one we want.
+				if _, exists := uniqueSSTables[table.ID]; !exists {
+					uniqueSSTables[table.ID] = table
+					tableToLevelMap[table.ID] = level.LevelNumber
 				}
 			}
 		}
@@ -1058,7 +1081,7 @@ func (r *restorer) restoreChainToTempDir() error {
 			return nil
 		})
 		if walkErr != nil {
-			return fmt.Errorf("failed to walk dir %s during restore: %w", currentSnapshotPath, walkErr)
+			return nil, nil, fmt.Errorf("failed to walk dir %s during restore: %w", currentSnapshotPath, walkErr)
 		}
 
 		// Move to the parent
@@ -1072,24 +1095,16 @@ func (r *restorer) restoreChainToTempDir() error {
 
 		parentPath := filepath.Join(snapshotBaseDir, manifest.ParentID)
 		if _, statErr := r.wrapper.Stat(parentPath); os.IsNotExist(statErr) {
-			return fmt.Errorf("parent snapshot %s not found for %s", manifest.ParentID, filepath.Base(currentSnapshotPath))
+			return nil, nil, fmt.Errorf("parent snapshot %s not found for %s", manifest.ParentID, filepath.Base(currentSnapshotPath))
 		}
 		currentSnapshotPath = parentPath
 	}
 
-	// --- Step 2: Copy all the collected files to the temporary directory ---
-	for relPath, srcPath := range filesToCopy {
-		destPath := filepath.Join(r.tempRestoreDir, relPath)
-		if err := r.wrapper.CopyFile(srcPath, destPath); err != nil {
-			return fmt.Errorf("failed to copy chained file from %s to %s: %w", srcPath, destPath, err)
-		}
-	}
-
-	// --- Step 3: Create and write the new consolidated manifest ---
 	if finalManifest == nil {
-		return fmt.Errorf("no manifest found in snapshot chain")
+		return nil, nil, fmt.Errorf("no manifest found in snapshot chain")
 	}
 
+	// Now, build the consolidated manifest model from the collected data.
 	consolidatedManifest := &core.SnapshotManifest{
 		Type:                core.SnapshotTypeFull, // The restored state is a full snapshot
 		CreatedAt:           finalManifest.CreatedAt,
@@ -1105,27 +1120,27 @@ func (r *restorer) restoreChainToTempDir() error {
 		Levels:              make([]core.SnapshotLevelManifest, 0),
 	}
 
-	// Reconstruct the levels from the collected tables
+	// Reconstruct the levels from the collected unique tables
+	levels := make(map[int][]core.SSTableMetadata)
+	for tableID, tableMeta := range uniqueSSTables {
+		levelNum := tableToLevelMap[tableID]
+		levels[levelNum] = append(levels[levelNum], tableMeta)
+	}
+
 	var levelNumbers []int
-	for levelNum := range allLevels {
+	for levelNum := range levels {
 		levelNumbers = append(levelNumbers, levelNum)
 	}
 	sort.Ints(levelNumbers)
 
 	for _, levelNum := range levelNumbers {
-		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0)}
-		for _, table := range allLevels[levelNum] {
-			levelManifest.Tables = append(levelManifest.Tables, table)
-		}
+		tablesInLevel := levels[levelNum]
 		// Sort tables within the level by ID for deterministic output
-		sort.Slice(levelManifest.Tables, func(i, j int) bool {
-			return levelManifest.Tables[i].ID < levelManifest.Tables[j].ID
-		})
-		consolidatedManifest.Levels = append(consolidatedManifest.Levels, levelManifest)
+		sort.Slice(tablesInLevel, func(i, j int) bool { return tablesInLevel[i].ID < tablesInLevel[j].ID })
+		consolidatedManifest.Levels = append(consolidatedManifest.Levels, core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: tablesInLevel})
 	}
 
-	_, err := r.writeConsolidatedManifestAndCurrent(consolidatedManifest)
-	return err
+	return filesToCopy, consolidatedManifest, nil
 }
 
 // writeConsolidatedManifestAndCurrent finalizes a restore by writing the manifest and CURRENT file.
