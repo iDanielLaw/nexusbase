@@ -252,6 +252,10 @@ func writePointItems(w io.Writer, points []QueryResultLine, flag PointItemFlag) 
 
 		// Handle different value types based on flags
 		if flag&PointItemFlagIsAggregated != 0 {
+			// Write WindowStartTime for aggregated points
+			if err := binary.Write(w, binary.BigEndian, point.WindowStartTime); err != nil {
+				return err
+			}
 			if err := writeAggregatedValues(w, point.AggregatedValues); err != nil {
 				return err
 			}
@@ -529,11 +533,16 @@ func readPointItems(r io.Reader, flag PointItemFlag) ([]QueryResultLine, error) 
 		}
 
 		if flag&PointItemFlagIsAggregated != 0 {
+			item.IsAggregated = true
+			if err := binary.Read(r, binary.BigEndian, &item.WindowStartTime); err != nil {
+				return nil, fmt.Errorf("failed to read window start time for item %d: %w", i, err)
+			}
 			item.AggregatedValues, err = readAggregatedValues(r)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read aggregated values for item %d: %w", i, err)
 			}
 		} else {
+			item.IsAggregated = false
 			field, err := readFields(r)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read fields for item %d: %w", i, err)
