@@ -256,3 +256,61 @@ func TestExecutor_E2E_RemovePoint(t *testing.T) {
 	_, err = eng.Get(ctx, dp3.Metric, dp3.Tags, 300)
 	require.NoError(t, err, "Data point at t=300 should still exist")
 }
+
+func TestExecutor_E2E_RemoveRange(t *testing.T) {
+	ctx := context.Background()
+
+	// --- Phase 1: Setup engine and ingest data ---
+	dataDir := t.TempDir()
+	opts := getBaseOptsForE2ETest(t)
+	opts.DataDir = dataDir
+
+	eng, err := engine.NewStorageEngine(opts)
+	require.NoError(t, err)
+	err = eng.Start()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// Data points for the same series at different timestamps
+	metric := "e2e.remove.range"
+	tags := map[string]string{"host": "d"}
+	dp1 := HelperDataPoint(t, metric, tags, 100, map[string]interface{}{"value": 10.0}) // Before range
+	dp2 := HelperDataPoint(t, metric, tags, 200, map[string]interface{}{"value": 20.0}) // Start of range (inclusive)
+	dp3 := HelperDataPoint(t, metric, tags, 300, map[string]interface{}{"value": 30.0}) // Inside range
+	dp4 := HelperDataPoint(t, metric, tags, 400, map[string]interface{}{"value": 40.0}) // End of range (inclusive)
+	dp5 := HelperDataPoint(t, metric, tags, 500, map[string]interface{}{"value": 50.0}) // After range
+
+	require.NoError(t, eng.Put(ctx, dp1))
+	require.NoError(t, eng.Put(ctx, dp2))
+	require.NoError(t, eng.Put(ctx, dp3))
+	require.NoError(t, eng.Put(ctx, dp4))
+	require.NoError(t, eng.Put(ctx, dp5))
+
+	// --- Phase 2: Verify initial state ---
+	_, err = eng.Get(ctx, metric, tags, 300)
+	require.NoError(t, err, "Data point at t=300 should exist before removal")
+
+	// --- Phase 3: Execute REMOVE FROM ... FROM ... TO ... command ---
+	executor := NewExecutor(eng, &utils.SystemClock{})
+	removeQuery := `REMOVE FROM "e2e.remove.range" TAGGED (host="d") FROM 200 TO 400`
+	removeCmd, err := Parse(removeQuery)
+	require.NoError(t, err)
+
+	result, err := executor.Execute(ctx, removeCmd)
+	require.NoError(t, err)
+
+	res, ok := result.(ManipulateResponse)
+	require.True(t, ok, "Result should be a ManipulateResponse")
+	assert.Equal(t, ResponseOK, res.Status)
+	assert.Equal(t, uint64(1), res.RowsAffected)
+
+	// --- Phase 4: Verify final state ---
+	_, err = eng.Get(ctx, metric, tags, 100)
+	require.NoError(t, err, "Data point at t=100 should still exist")
+	_, err = eng.Get(ctx, metric, tags, 200)
+	assert.ErrorIs(t, err, sstable.ErrNotFound, "Data point at t=200 should be gone after removal")
+	_, err = eng.Get(ctx, metric, tags, 400)
+	assert.ErrorIs(t, err, sstable.ErrNotFound, "Data point at t=400 should be gone after removal")
+	_, err = eng.Get(ctx, metric, tags, 500)
+	require.NoError(t, err, "Data point at t=500 should still exist")
+}
