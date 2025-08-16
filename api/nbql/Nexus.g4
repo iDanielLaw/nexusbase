@@ -3,9 +3,13 @@ grammar Nexus;
 // --- Parser Rules ---
 
 // Entry point: a single statement ending with EOF
-statement: (pushStatement | queryStatement | removeStatement | showStatement | flushStatement) ';'? EOF;
+statement: (pushStatement | queryStatement | removeStatement | showStatement | flushStatement | snapshotStatement | restoreStatement) ';'? EOF;
 
 // --- Command Structures ---
+
+snapshotStatement: K_SNAPSHOT;
+
+restoreStatement: K_RESTORE K_FROM STRING_LITERAL (K_WITH K_OVERWRITE)?;
 
 pushStatement: K_PUSH metric_name (K_TIME timestamp)? (K_TAGGED tag_list)? K_SET field_list;
 
@@ -71,6 +75,9 @@ literal_value:
 
 // --- Lexer Rules (Tokens) ---
 
+K_OVERWRITE: O V E R W R I T E;
+K_RESTORE: R E S T O R E;
+K_SNAPSHOT: S N A P S H O T;
 K_PUSH: P U S H;
 K_QUERY: Q U E R Y;
 K_REMOVE: R E M O V E;

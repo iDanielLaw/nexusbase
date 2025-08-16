@@ -101,6 +101,19 @@ type FlushStatement struct {
 
 func (s *FlushStatement) isCommand() {}
 
+// SnapshotStatement represents a SNAPSHOT command in NBQL.
+type SnapshotStatement struct{}
+
+func (s *SnapshotStatement) isCommand() {}
+
+// RestoreStatement represents a RESTORE command in NBQL.
+type RestoreStatement struct {
+	Path      string
+	Overwrite bool
+}
+
+func (s *RestoreStatement) isCommand() {}
+
 // AggregationSpec is the AST representation of an aggregation function call.
 type AggregationSpec struct {
 	Function string

@@ -39,9 +39,44 @@ func (e *Executor) Execute(ctx context.Context, cmd Command) (interface{}, error
 		return e.executeShow(ctx, c)
 	case *FlushStatement:
 		return e.executeFlush(ctx, c)
+	case *SnapshotStatement:
+		return e.executeSnapshot(ctx, c)
+	case *RestoreStatement:
+		return e.executeRestore(ctx, c)
 	default:
 		return "", fmt.Errorf("unknown or unsupported command type: %T", c)
 	}
+}
+
+// executeSnapshot handles the SNAPSHOT command.
+func (e *Executor) executeSnapshot(ctx context.Context, cmd *SnapshotStatement) (interface{}, error) {
+	// Note: The StorageEngineInterface needs to be updated with a CreateSnapshot method.
+	// e.g., CreateSnapshot(ctx context.Context) (snapshotPath string, err error)
+	snapshotPath, err := e.engine.CreateSnapshot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
+	// Return a structured response with the path to the created snapshot.
+	return map[string]interface{}{
+		"status":  "OK",
+		"message": fmt.Sprintf("Snapshot created successfully at: %s", snapshotPath),
+		"path":    snapshotPath,
+	}, nil
+}
+
+// executeRestore handles the RESTORE command.
+func (e *Executor) executeRestore(ctx context.Context, cmd *RestoreStatement) (interface{}, error) {
+	// Note: The StorageEngineInterface needs to be updated with a RestoreFromSnapshot method.
+	// e.g., RestoreFromSnapshot(ctx context.Context, path string, overwrite bool) error
+	err := e.engine.RestoreFromSnapshot(ctx, cmd.Path, cmd.Overwrite)
+	if err != nil {
+		// For restore, we return a standard ManipulateResponse even on error,
+		// but the error field will be populated.
+		return nil, fmt.Errorf("failed to restore from snapshot '%s': %w", cmd.Path, err)
+	}
+
+	return ManipulateResponse{Status: ResponseOK, RowsAffected: 1}, nil
 }
 
 // executePush handles the PUSH command.
@@ -221,30 +256,27 @@ func (e *Executor) executeFlush(ctx context.Context, cmd *FlushStatement) (inter
 	}
 }
 
-// executeQuery handles the QUERY command.
-func (e *Executor) executeQuery(ctx context.Context, cmd *QueryStatement) (interface{}, error) {
-	// Translate AST-level AggregationSpecs to core-level AggregationSpecs
-	_, iter, err := e.QueryStream(ctx, cmd)
-	if err != nil {
-		return nil, err
-	}
-	defer iter.Close()
-
+// processQueryIterator drains the query iterator, collects results, and finds the last key for pagination.
+func processQueryIterator(iter core.QueryResultIteratorInterface) ([]QueryResultLine, []byte, error) {
 	var results []QueryResultLine
 	var lastKey []byte
+
 	for iter.Next() {
 		// Get the raw key for the cursor *before* decoding the item.
+		// This is crucial for pagination as the raw key is the source of truth for the cursor.
 		rawKey, _, _, _ := iter.UnderlyingAt()
 		if rawKey != nil {
+			// This copy is important because the underlying buffer might be reused by the iterator.
 			lastKey = make([]byte, len(rawKey))
 			copy(lastKey, rawKey)
 		}
 
 		item, err := iter.At()
 		if err != nil {
-			return nil, fmt.Errorf("error retrieving query result item: %w", err)
+			return nil, nil, fmt.Errorf("error retrieving query result item: %w", err)
 		}
 
+		// Convert core.QueryResultItem to nbql.QueryResultLine
 		resultLine := QueryResultLine{
 			Metric:           item.Metric,
 			Tags:             item.Tags,
@@ -252,20 +284,36 @@ func (e *Executor) executeQuery(ctx context.Context, cmd *QueryStatement) (inter
 			IsAggregated:     item.IsAggregated,
 			WindowStartTime:  item.WindowStartTime,
 			AggregatedValues: item.AggregatedValues,
-		}
-		if item.Fields != nil {
-			resultLine.Fields = item.Fields
+			Fields:           item.Fields,
 		}
 
 		results = append(results, resultLine)
-
+		iter.Put(item) // Return the item to the pool for reuse
 	}
 
 	if err := iter.Error(); err != nil {
-		return "", fmt.Errorf("query iterator failed: %w", err)
+		return nil, nil, fmt.Errorf("query iterator failed: %w", err)
 	}
 
-	// --- Construct Structured Response ---
+	return results, lastKey, nil
+}
+
+// executeQuery handles the QUERY command.
+func (e *Executor) executeQuery(ctx context.Context, cmd *QueryStatement) (interface{}, error) {
+	// 1. Get the iterator stream from the engine.
+	_, iter, err := e.QueryStream(ctx, cmd)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	// 2. Process the iterator to get results and the last key for pagination.
+	results, lastKey, err := processQueryIterator(iter)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Construct the final response.
 	response := QueryResponse{
 		Results: results,
 	}
@@ -276,7 +324,11 @@ func (e *Executor) executeQuery(ctx context.Context, cmd *QueryStatement) (inter
 		response.NextCursor = base64.StdEncoding.EncodeToString(lastKey)
 	}
 
-	// Marshal the structured response to JSON.
+	// 4. Marshal the structured response to JSON.
 	jsonResponse, err := json.Marshal(response)
-	return string(jsonResponse), err
+	if err != nil {
+		// This would be an internal server error.
+		return nil, fmt.Errorf("failed to marshal query response to JSON: %w", err)
+	}
+	return string(jsonResponse), nil
 }

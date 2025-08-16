@@ -328,4 +328,40 @@ func TestParser(t *testing.T) {
 		run(t, "flush disk", `FLUSH DISK;`, false, &FlushStatement{Type: FlushDisk})
 		run(t, "flush default", `FLUSH;`, false, &FlushStatement{Type: FlushAll}) // Default is ALL
 	})
+
+	// --- SNAPSHOT Statement Tests ---
+	t.Run("SNAPSHOT", func(t *testing.T) {
+		run(t, "simple snapshot",
+			`SNAPSHOT;`,
+			false,
+			&SnapshotStatement{},
+		)
+		run(t, "snapshot without semicolon",
+			`SNAPSHOT`,
+			false,
+			&SnapshotStatement{},
+		)
+	})
+
+	// --- RESTORE Statement Tests ---
+	t.Run("RESTORE", func(t *testing.T) {
+		run(t, "restore from path",
+			`RESTORE FROM '/path/to/snapshot.nbb'`,
+			false,
+			&RestoreStatement{
+				Path:      "/path/to/snapshot.nbb",
+				Overwrite: false,
+			},
+		)
+		run(t, "restore with overwrite",
+			`RESTORE FROM 'D:\backups\snapshot.nbb' WITH OVERWRITE;`,
+			false,
+			&RestoreStatement{
+				Path:      `D:\backups\snapshot.nbb`,
+				Overwrite: true,
+			},
+		)
+		run(t, "malformed restore missing from", `RESTORE '/path/to/snapshot.nbb'`, true, nil)
+		run(t, "malformed restore missing path", `RESTORE FROM WITH OVERWRITE`, true, nil)
+	})
 }

@@ -90,8 +90,14 @@ func (m *MockStorageEngine) TriggerCompaction() {
 	m.Called()
 }
 
-func (m *MockStorageEngine) CreateSnapshot(snapshotDir string) error {
-	args := m.Called(snapshotDir)
+func (m *MockStorageEngine) CreateSnapshot(ctx context.Context) (string, error) {
+	args := m.Called(ctx)
+	return args.String(0), args.Error(1)
+}
+
+// RestoreFromSnapshot is a mock method.
+func (m *MockStorageEngine) RestoreFromSnapshot(ctx context.Context, path string, overwrite bool) error {
+	args := m.Called(ctx, path, overwrite)
 	return args.Error(0)
 }
 

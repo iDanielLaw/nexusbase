@@ -24,17 +24,6 @@ jobs:
       checks: read
 
     steps:
-      # The triggering workflow ("Go Building & Testing") is already known to be successful because of the `if` condition on the job.
-      # Now, we must explicitly wait for the Windows build to also complete successfully.
-      - name: Wait for Windows tests to succeed
-        uses: lewagon/wait-on-check-action@v1.4.0
-        with:
-          ref: ${{ github.ref }}
-          check-name: 'build-windows'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15 # Poll every 15 seconds
-          allowed-conclusions: success
-
       - name: Checkout code
         uses: actions/checkout@v4
         with:

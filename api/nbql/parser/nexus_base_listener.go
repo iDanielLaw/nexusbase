@@ -26,6 +26,18 @@ func (s *BaseNexusListener) EnterStatement(ctx *StatementContext) {}
 // ExitStatement is called when production statement is exited.
 func (s *BaseNexusListener) ExitStatement(ctx *StatementContext) {}
 
+// EnterSnapshotStatement is called when production snapshotStatement is entered.
+func (s *BaseNexusListener) EnterSnapshotStatement(ctx *SnapshotStatementContext) {}
+
+// ExitSnapshotStatement is called when production snapshotStatement is exited.
+func (s *BaseNexusListener) ExitSnapshotStatement(ctx *SnapshotStatementContext) {}
+
+// EnterRestoreStatement is called when production restoreStatement is entered.
+func (s *BaseNexusListener) EnterRestoreStatement(ctx *RestoreStatementContext) {}
+
+// ExitRestoreStatement is called when production restoreStatement is exited.
+func (s *BaseNexusListener) ExitRestoreStatement(ctx *RestoreStatementContext) {}
+
 // EnterPushStatement is called when production pushStatement is entered.
 func (s *BaseNexusListener) EnterPushStatement(ctx *PushStatementContext) {}
 

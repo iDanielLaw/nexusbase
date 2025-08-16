@@ -16,6 +16,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/internal"
+	"github.com/INLOpen/nexusbase/utils"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -90,31 +91,18 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 
 	p.GetLogger().Info("Starting to create full snapshot.", "snapshot_dir", snapshotDir)
 
-	// 2. Acquire lock to get a consistent view of memtables and other state.
+	// The caller (engine.CreateSnapshot) is responsible for flushing data and acquiring the lock.
+	// This manager assumes it's being called with a consistent, locked view of the engine state.
 
-	// 3. Synchronously flush all collected memtables to L0.
-	p.Lock()
-	memtablesToFlush, _ := p.GetMemtablesForFlush()
-	p.Unlock()
-	if len(memtablesToFlush) > 0 {
-		p.GetLogger().Info("Snapshot: Flushing all in-memory data.", "memtable_count", len(memtablesToFlush))
-		for _, mem := range memtablesToFlush {
-			if flushErr := p.FlushMemtableToL0(mem, ctx); flushErr != nil {
-				return fmt.Errorf("failed to flush memtable (size: %d) during snapshot creation: %w", mem.Size(), flushErr)
-			}
-		}
-	}
-
-	// Re-acquire lock to get final state after flush
-	p.Lock()
+	// 2. Get the final, consistent state.
 	currentSeqNum := p.GetSequenceNumber()
 
-	// 4. Get the final, consistent list of SSTables AFTER the synchronous flush.
+	// 3. Get the list of SSTables. The provider's implementation of this method
+	// should handle its own locking to return a consistent view.
 	levelStates, unlockFunc := p.GetLevelsManager().GetSSTablesForRead()
-	p.Unlock() // Unlock after getting both sequence number and table states
 	defer unlockFunc()
 
-	// Get the latest WAL segment index *after* any potential flushes.
+	// 4. Get the latest WAL segment index.
 	wal := p.GetWAL()
 	lastWALIndex := wal.ActiveSegmentIndex()
 
@@ -128,7 +116,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	manifest.CreatedAt = p.GetClock().Now()
 	manifest.LastWALSegmentIndex = lastWALIndex
 
-	// Copy SSTables
+	// 5. Copy SSTables
 	for levelNum, levelState := range levelStates {
 		tablesInLevel := levelState.GetTables()
 		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0, len(tablesInLevel))}
@@ -171,6 +159,28 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 
 	p.GetLogger().Info("Snapshot created successfully.", "snapshot_dir", snapshotDir)
 	return nil
+}
+
+// RestoreFrom restores the database state from a given snapshot directory.
+// It constructs the necessary options from the engine provider and delegates
+// the core logic to the RestoreFromFull function.
+func (m *manager) RestoreFrom(ctx context.Context, snapshotPath string) error {
+	p := m.provider
+	_, span := p.GetTracer().Start(ctx, "SnapshotManager.RestoreFrom")
+	defer span.End()
+
+	// The engine is expected to be shut down by the caller (e.g., engine.RestoreFromSnapshot)
+	// before this method is called. We are only responsible for the file system operations.
+
+	opts := RestoreOptions{
+		DataDir: p.GetDataDir(),
+		Logger:  p.GetLogger(),
+		wrapper: m.wrapper, // Pass along the internal helper
+	}
+
+	// Delegate to the existing restore logic.
+	// The restoreFromFullFunc variable allows mocking for tests.
+	return restoreFromFullFunc(opts, snapshotPath)
 }
 
 // incrementalCreator holds the state for a single incremental snapshot creation.
@@ -532,11 +542,8 @@ func (c *auxiliaryCopier) run() error {
 
 // saveJSONState saves state like deleted series and range tombstones to JSON files.
 func (c *auxiliaryCopier) saveJSONState() error {
-	p := c.m.provider
-	p.Lock()
-	deletedSeriesToSave := p.GetDeletedSeries()
-	rangeTombstonesToSave := p.GetRangeTombstones()
-	p.Unlock()
+	deletedSeriesToSave := c.m.provider.GetDeletedSeries()
+	rangeTombstonesToSave := c.m.provider.GetRangeTombstones()
 
 	if len(deletedSeriesToSave) > 0 {
 		c.manifest.DeletedSeriesFile = "deleted_series.json"
@@ -651,9 +658,129 @@ func (m *manager) Validate(snapshotDir string) error {
 	}
 }
 
+// pruneContext holds the state and helper maps for a single prune operation.
+type pruneContext struct {
+	infos          []Info
+	infoMap        map[string]Info
+	childrenMap    map[string][]string // parentID -> []childID
+	fullRoots      []Info
+	allSnapshotIDs map[string]struct{}
+}
+
+// newPruneContext builds the context required for pruning decisions.
+func newPruneContext(infos []Info) *pruneContext {
+	pc := &pruneContext{
+		infos:          infos,
+		infoMap:        make(map[string]Info, len(infos)),
+		childrenMap:    make(map[string][]string),
+		allSnapshotIDs: make(map[string]struct{}, len(infos)),
+	}
+
+	for _, info := range infos {
+		pc.infoMap[info.ID] = info
+		pc.allSnapshotIDs[info.ID] = struct{}{}
+		if info.Type == core.SnapshotTypeFull {
+			pc.fullRoots = append(pc.fullRoots, info)
+		}
+		if info.ParentID != "" {
+			pc.childrenMap[info.ParentID] = append(pc.childrenMap[info.ParentID], info.ID)
+		}
+	}
+	return pc
+}
+
+// findBrokenSnapshots identifies all snapshots that are part of a broken chain (orphans).
+func (pc *pruneContext) findBrokenSnapshots() map[string]struct{} {
+	idsToPrune := make(map[string]struct{})
+	validIDs := make(map[string]struct{})
+
+	// Traverse from all full snapshots to find all validly chained snapshots.
+	for _, root := range pc.fullRoots {
+		queue := []string{root.ID}
+		for len(queue) > 0 {
+			currentID := queue[0]
+			queue = queue[1:]
+
+			if _, visited := validIDs[currentID]; visited {
+				continue // Already processed this part of a (potentially merged) chain.
+			}
+			validIDs[currentID] = struct{}{}
+
+			if children, ok := pc.childrenMap[currentID]; ok {
+				queue = append(queue, children...)
+			}
+		}
+	}
+
+	// Any snapshot not in validIDs is part of a broken chain.
+	for id := range pc.allSnapshotIDs {
+		if _, isValid := validIDs[id]; !isValid {
+			idsToPrune[id] = struct{}{}
+		}
+	}
+	return idsToPrune
+}
+
+// findPolicySnapshots identifies snapshots to prune based on KeepN and PruneOlderThan policies.
+func (pc *pruneContext) findPolicySnapshots(opts PruneOptions, clock utils.Clock, idsToIgnore map[string]struct{}) map[string]struct{} {
+	idsToPrune := make(map[string]struct{})
+
+	// Filter out roots that are already marked for pruning (i.e., broken).
+	var validRoots []Info
+	for _, root := range pc.fullRoots {
+		if _, isBroken := idsToIgnore[root.ID]; !isBroken {
+			validRoots = append(validRoots, root)
+		}
+	}
+
+	// Sort valid roots by creation time, newest first.
+	sort.Slice(validRoots, func(i, j int) bool {
+		return validRoots[i].CreatedAt.After(validRoots[j].CreatedAt)
+	})
+
+	now := clock.Now()
+	chainAgeCache := make(map[string]time.Time)
+
+	// Helper to find the newest timestamp in a chain, with caching.
+	findNewestTime := func(rootID string) time.Time {
+		if t, ok := chainAgeCache[rootID]; ok {
+			return t
+		}
+		t := findNewestTimeInChain(rootID, pc.infoMap, pc.childrenMap)
+		chainAgeCache[rootID] = t
+		return t
+	}
+
+	var rootsToPrune []Info
+	for i, root := range validRoots {
+		// Rule 1: Keep if protected by the KeepN policy.
+		if opts.KeepN > 0 && i < opts.KeepN {
+			continue
+		}
+
+		// Rule 2: Keep if not old enough.
+		if opts.PruneOlderThan > 0 {
+			newestTime := findNewestTime(root.ID)
+			if now.Sub(newestTime) <= opts.PruneOlderThan {
+				continue
+			}
+		}
+
+		// If we reach here, the chain is not protected and should be pruned.
+		rootsToPrune = append(rootsToPrune, root)
+	}
+
+	// Collect all snapshots from the chains that need to be pruned.
+	for _, root := range rootsToPrune {
+		pc.collectChainIDs(root.ID, idsToPrune)
+	}
+
+	return idsToPrune
+}
+
 // Prune deletes old snapshots based on the provided policy.
 // It returns a list of the snapshot IDs that were deleted.
-func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts PruneOptions) (deletedIDs []string, err error) {
+func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts PruneOptions) ([]string, error) {
 	p := m.provider
 	_, span := p.GetTracer().Start(ctx, "SnapshotManager.Prune")
 	defer span.End()
@@ -663,146 +790,65 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 		attribute.Bool("snapshot.prune.prune_broken", opts.PruneBroken),
 	)
 
+	if opts.KeepN < 0 {
+		return nil, fmt.Errorf("PruneOptions.KeepN cannot be negative")
+	}
+	if opts.KeepN <= 0 && opts.PruneOlderThan <= 0 && !opts.PruneBroken {
+		p.GetLogger().Info("Pruning skipped: no policies defined.")
+		return []string{}, nil
+	}
+
 	// 1. List all snapshots
 	infos, err := m.ListSnapshots(snapshotsBaseDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list snapshots for pruning: %w", err)
 	}
-
 	if len(infos) == 0 {
 		p.GetLogger().Info("Pruning skipped: no snapshots found.")
 		return []string{}, nil
 	}
+	pruneCtx := newPruneContext(infos)
 
-	// 2. Build data structures for easy traversal
-	infoMap := make(map[string]Info, len(infos))
-	allSnapshotIDs := make(map[string]struct{}, len(infos))
-	childrenMap := make(map[string][]string) // parentID -> []childID
-	var fullSnapshotRoots []Info
-
-	for _, info := range infos {
-		infoMap[info.ID] = info
-		if info.Type == core.SnapshotTypeFull {
-			fullSnapshotRoots = append(fullSnapshotRoots, info)
-		}
-		allSnapshotIDs[info.ID] = struct{}{}
-		if info.ParentID != "" {
-			childrenMap[info.ParentID] = append(childrenMap[info.ParentID], info.ID)
-		}
-	}
-
-	// 3. Identify chains to prune based on policies
-	if opts.KeepN < 0 {
-		return nil, fmt.Errorf("PruneOptions.KeepN cannot be negative")
-	}
-	if opts.KeepN <= 0 && opts.PruneOlderThan <= 0 && !opts.PruneBroken {
-		p.GetLogger().Info("Pruning skipped: no policies defined (KeepN and PruneOlderThan are not set).")
-		return []string{}, nil
-	}
-
-	allIDsToPruneSet := make(map[string]struct{})
+	// 2. Identify all snapshots to prune based on policies
+	allIDsToPrune := make(map[string]struct{})
 
 	// Policy: Prune broken chains first, if requested.
 	if opts.PruneBroken {
-		validIDs := make(map[string]struct{})
-		// Traverse from all full snapshots to find all validly chained snapshots.
-		for _, root := range fullSnapshotRoots {
-			queue := []string{root.ID}
-			for len(queue) > 0 {
-				currentID := queue[0]
-				queue = queue[1:]
-
-				if _, visited := validIDs[currentID]; visited {
-					continue // Already processed this part of a (potentially merged) chain.
-				}
-				validIDs[currentID] = struct{}{}
-
-				if children, ok := childrenMap[currentID]; ok {
-					queue = append(queue, children...)
-				}
-			}
-		}
-
-		// Any snapshot not in validIDs is part of a broken chain.
-		for id := range allSnapshotIDs {
-			if _, isValid := validIDs[id]; !isValid {
-				allIDsToPruneSet[id] = struct{}{}
-			}
+		brokenIDs := pruneCtx.findBrokenSnapshots()
+		for id := range brokenIDs {
+			allIDsToPrune[id] = struct{}{}
 		}
 	}
 
-	// Filter out roots that are part of broken chains.
-	var validFullSnapshotRoots []Info
-	for _, root := range fullSnapshotRoots {
-		if _, isBroken := allIDsToPruneSet[root.ID]; !isBroken {
-			validFullSnapshotRoots = append(validFullSnapshotRoots, root)
-		}
-	}
-
-	// Sort the remaining valid full snapshots by creation time, newest first, to evaluate them for pruning.
-	sort.Slice(validFullSnapshotRoots, func(i, j int) bool {
-		return validFullSnapshotRoots[i].CreatedAt.After(validFullSnapshotRoots[j].CreatedAt)
-	})
-
-	var chainsToPrune []Info
-	// Only apply KeepN and PruneOlderThan policies if at least one is active.
+	// Policy: Prune based on KeepN and PruneOlderThan
 	if opts.KeepN > 0 || opts.PruneOlderThan > 0 {
-		now := m.provider.GetClock().Now()
-		chainAgeCache := make(map[string]time.Time)
-		findNewestTime := func(rootID string) time.Time {
-			if t, ok := chainAgeCache[rootID]; ok {
-				return t
-			}
-			t := findNewestTimeInChain(rootID, infoMap, childrenMap)
-			chainAgeCache[rootID] = t
-			return t
-		}
-
-		for i, root := range validFullSnapshotRoots {
-			// Determine if this chain should be kept based on the policies.
-			keep := false
-
-			// Rule 1: Keep if protected by the KeepN policy.
-			if opts.KeepN > 0 && i < opts.KeepN {
-				keep = true
-			}
-
-			// Rule 2: Keep if not old enough, but only if it's not already kept by KeepN.
-			if !keep && opts.PruneOlderThan > 0 {
-				newestTime := findNewestTime(root.ID)
-				if now.Sub(newestTime) <= opts.PruneOlderThan {
-					keep = true
-				}
-			}
-
-			if !keep {
-				chainsToPrune = append(chainsToPrune, root)
-			}
+		policyIDs := pruneCtx.findPolicySnapshots(opts, p.GetClock(), allIDsToPrune)
+		for id := range policyIDs {
+			allIDsToPrune[id] = struct{}{}
 		}
 	}
 
-	// 4. Collect all snapshot IDs from the policy-based pruning.
-	for _, root := range chainsToPrune {
-		// Use a queue for a breadth-first traversal to collect all descendants
-		queue := []string{root.ID}
-		for len(queue) > 0 {
-			currentID := queue[0]
-			queue = queue[1:]
-			allIDsToPruneSet[currentID] = struct{}{}
-			if children, ok := childrenMap[currentID]; ok {
-				queue = append(queue, children...)
-			}
+	// 3. Delete the identified snapshot directories
+	return m.deleteSnapshots(snapshotsBaseDir, allIDsToPrune)
+}
+
+// collectChainIDs adds all snapshot IDs in a chain, starting from rootID, to the given set.
+func (pc *pruneContext) collectChainIDs(rootID string, ids map[string]struct{}) {
+	queue := []string{rootID}
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+		ids[currentID] = struct{}{}
+		if children, ok := pc.childrenMap[currentID]; ok {
+			queue = append(queue, children...)
 		}
 	}
+}
 
-	var allIDsToPrune []string
-	for id := range allIDsToPruneSet {
-		allIDsToPrune = append(allIDsToPrune, id)
-	}
-
-	// 5. Delete the snapshot directories
-	var firstErr error
-	for _, id := range allIDsToPrune {
+// deleteSnapshots performs the file system deletion of the given snapshot IDs.
+func (m *manager) deleteSnapshots(snapshotsBaseDir string, idsToDelete map[string]struct{}) (deletedIDs []string, firstErr error) {
+	p := m.provider
+	for id := range idsToDelete {
 		snapshotDir := filepath.Join(snapshotsBaseDir, id)
 		p.GetLogger().Info("Pruning snapshot directory.", "id", id, "path", snapshotDir)
 		if err := m.wrapper.RemoveAll(snapshotDir); err != nil {

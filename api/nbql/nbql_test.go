@@ -226,11 +226,13 @@ func TestQueryResponse_EncodeDecode(t *testing.T) {
 				Flags:  PointItemFlagIsAggregated,
 				Results: []QueryResultLine{
 					{
-						Timestamp: 1672531000,
+						Timestamp:       1672531000,
+						IsAggregated:    true,
+						WindowStartTime: 1672530000,
 						AggregatedValues: map[string]float64{
 							"count_value": 10,
 							"sum_value":   50,
-							"avg_value":   5,
+							"avg_value":   5.0,
 						},
 					},
 				},
@@ -253,6 +255,113 @@ func TestQueryResponse_EncodeDecode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPushsRequest_EncodeDecode(t *testing.T) {
+	testCases := []struct {
+		name    string
+		request PushsRequest
+	}{
+		{
+			name: "request with multiple items",
+			request: PushsRequest{
+				Items: []PushItem{
+					{
+						Metric:    "cpu",
+						Tags:      map[string]string{"host": "a"},
+						Timestamp: 100,
+						Fields:    mustNewFieldValues(t, map[string]interface{}{"v": 1.0}),
+					},
+					{
+						Metric:    "mem",
+						Tags:      map[string]string{"host": "b"},
+						Timestamp: 200,
+						Fields:    mustNewFieldValues(t, map[string]interface{}{"v": 2.0}),
+					},
+				},
+			},
+		},
+		{
+			name: "request with no items",
+			request: PushsRequest{
+				Items: []PushItem{},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+
+			// Encode
+			err := EncodePushsRequest(&buf, tc.request)
+			require.NoError(t, err)
+
+			// Decode
+			decodedRequest, err := DecodePushsRequest(&buf)
+			require.NoError(t, err)
+
+			// Compare
+			// Use require.Equal for better diffs on failure
+			require.Equal(t, tc.request, decodedRequest)
+		})
+	}
+}
+
+func TestQueryEndResponse_EncodeDecode(t *testing.T) {
+	testCases := []struct {
+		name     string
+		response QueryEndResponse
+	}{
+		{
+			name: "simple end response",
+			response: QueryEndResponse{
+				Status:    ResponseDataEnd,
+				TotalRows: 1234,
+				Message:   "Query completed successfully",
+			},
+		},
+		{
+			name: "end response with empty message",
+			response: QueryEndResponse{
+				Status:    ResponseDataEnd,
+				TotalRows: 0,
+				Message:   "",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+
+			err := EncodeQueryEndResponse(&buf, tc.response)
+			require.NoError(t, err)
+
+			decoded, err := DecodeQueryEndResponse(&buf)
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.response, decoded)
+		})
+	}
+}
+
+func TestErrorMessage_EncodeDecode(t *testing.T) {
+	orig := &ErrorMessage{
+		Code:    404,
+		Message: "metric not found",
+	}
+	var buf bytes.Buffer
+	err := EncodeErrorMessage(&buf, orig)
+	require.NoError(t, err)
+
+	decodedErr := DecodeErrorMessage(&buf)
+	require.Error(t, decodedErr)
+
+	msg, ok := decodedErr.(*ErrorMessage)
+	require.True(t, ok, "decoded error should be of type *ErrorMessage")
+	assert.Equal(t, orig.Code, msg.Code)
+	assert.Equal(t, orig.Message, msg.Message)
 }
 
 func TestManipulateResponse_EncodeDecode(t *testing.T) {

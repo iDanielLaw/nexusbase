@@ -1,4 +1,4 @@
-// Generated from d:/go/tsdb-prototype/api/nbql/Nexus.g4 by ANTLR 4.13.1
+// Generated from d:/go/nexusbase/api/nbql/Nexus.g4 by ANTLR 4.13.1
 
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ErrorNode;
@@ -52,6 +52,30 @@ public class NexusBaseListener implements NexusListener {
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
+	@Override public void enterTime_range(NexusParser.Time_rangeContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitTime_range(NexusParser.Time_rangeContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterQuery_clauses(NexusParser.Query_clausesContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitQuery_clauses(NexusParser.Query_clausesContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
 	@Override public void enterRemoveStatement(NexusParser.RemoveStatementContext ctx) { }
 	/**
 	 * {@inheritDoc}
@@ -71,6 +95,42 @@ public class NexusBaseListener implements NexusListener {
 	 * <p>The default implementation does nothing.</p>
 	 */
 	@Override public void exitShowStatement(NexusParser.ShowStatementContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterFlushStatement(NexusParser.FlushStatementContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitFlushStatement(NexusParser.FlushStatementContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterAggregation_spec_list(NexusParser.Aggregation_spec_listContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitAggregation_spec_list(NexusParser.Aggregation_spec_listContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterAggregation_spec(NexusParser.Aggregation_specContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitAggregation_spec(NexusParser.Aggregation_specContext ctx) { }
 	/**
 	 * {@inheritDoc}
 	 *
@@ -124,18 +184,6 @@ public class NexusBaseListener implements NexusListener {
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
-	@Override public void enterTag_key(NexusParser.Tag_keyContext ctx) { }
-	/**
-	 * {@inheritDoc}
-	 *
-	 * <p>The default implementation does nothing.</p>
-	 */
-	@Override public void exitTag_key(NexusParser.Tag_keyContext ctx) { }
-	/**
-	 * {@inheritDoc}
-	 *
-	 * <p>The default implementation does nothing.</p>
-	 */
 	@Override public void enterTag_value(NexusParser.Tag_valueContext ctx) { }
 	/**
 	 * {@inheritDoc}
@@ -172,25 +220,49 @@ public class NexusBaseListener implements NexusListener {
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
-	@Override public void enterFunction_list(NexusParser.Function_listContext ctx) { }
+	@Override public void enterTimestampLiteral(NexusParser.TimestampLiteralContext ctx) { }
 	/**
 	 * {@inheritDoc}
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
-	@Override public void exitFunction_list(NexusParser.Function_listContext ctx) { }
+	@Override public void exitTimestampLiteral(NexusParser.TimestampLiteralContext ctx) { }
 	/**
 	 * {@inheritDoc}
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
-	@Override public void enterTimestamp(NexusParser.TimestampContext ctx) { }
+	@Override public void enterTimestampNow(NexusParser.TimestampNowContext ctx) { }
 	/**
 	 * {@inheritDoc}
 	 *
 	 * <p>The default implementation does nothing.</p>
 	 */
-	@Override public void exitTimestamp(NexusParser.TimestampContext ctx) { }
+	@Override public void exitTimestampNow(NexusParser.TimestampNowContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterTimestampNowRelative(NexusParser.TimestampNowRelativeContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitTimestampNowRelative(NexusParser.TimestampNowRelativeContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void enterTimestampDateTime(NexusParser.TimestampDateTimeContext ctx) { }
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>The default implementation does nothing.</p>
+	 */
+	@Override public void exitTimestampDateTime(NexusParser.TimestampDateTimeContext ctx) { }
 	/**
 	 * {@inheritDoc}
 	 *

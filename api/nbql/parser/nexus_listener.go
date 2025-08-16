@@ -10,6 +10,12 @@ type NexusListener interface {
 	// EnterStatement is called when entering the statement production.
 	EnterStatement(c *StatementContext)
 
+	// EnterSnapshotStatement is called when entering the snapshotStatement production.
+	EnterSnapshotStatement(c *SnapshotStatementContext)
+
+	// EnterRestoreStatement is called when entering the restoreStatement production.
+	EnterRestoreStatement(c *RestoreStatementContext)
+
 	// EnterPushStatement is called when entering the pushStatement production.
 	EnterPushStatement(c *PushStatementContext)
 
@@ -81,6 +87,12 @@ type NexusListener interface {
 
 	// ExitStatement is called when exiting the statement production.
 	ExitStatement(c *StatementContext)
+
+	// ExitSnapshotStatement is called when exiting the snapshotStatement production.
+	ExitSnapshotStatement(c *SnapshotStatementContext)
+
+	// ExitRestoreStatement is called when exiting the restoreStatement production.
+	ExitRestoreStatement(c *RestoreStatementContext)
 
 	// ExitPushStatement is called when exiting the pushStatement production.
 	ExitPushStatement(c *PushStatementContext)
