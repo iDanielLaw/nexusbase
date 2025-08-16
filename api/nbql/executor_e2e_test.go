@@ -140,3 +140,119 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 	_, err = restartedEngine.Get(ctx, dp3.Metric, dp3.Tags, dp3.Timestamp)
 	assert.ErrorIs(t, err, sstable.ErrNotFound, "Original data from destination engine should be gone after restore")
 }
+
+func TestExecutor_E2E_RemoveSeries(t *testing.T) {
+	ctx := context.Background()
+
+	// --- Phase 1: Setup engine and ingest data ---
+	dataDir := t.TempDir()
+	opts := getBaseOptsForE2ETest(t)
+	opts.DataDir = dataDir
+
+	eng, err := engine.NewStorageEngine(opts)
+	require.NoError(t, err)
+	err = eng.Start()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// Data for the series to be removed
+	dp1 := HelperDataPoint(t, "e2e.remove", map[string]string{"host": "a", "dc": "us-east"}, 100, map[string]interface{}{"value": 10.0})
+	dp2 := HelperDataPoint(t, "e2e.remove", map[string]string{"host": "a", "dc": "us-east"}, 200, map[string]interface{}{"value": 20.0})
+
+	// Data for another series that should NOT be removed
+	dp3 := HelperDataPoint(t, "e2e.remove", map[string]string{"host": "b", "dc": "us-east"}, 300, map[string]interface{}{"value": 30.0})
+
+	require.NoError(t, eng.Put(ctx, dp1))
+	require.NoError(t, eng.Put(ctx, dp2))
+	require.NoError(t, eng.Put(ctx, dp3))
+
+	// --- Phase 2: Verify initial state ---
+	_, err = eng.Get(ctx, dp1.Metric, dp1.Tags, dp1.Timestamp)
+	require.NoError(t, err, "Data point 1 should exist before removal")
+	_, err = eng.Get(ctx, dp3.Metric, dp3.Tags, dp3.Timestamp)
+	require.NoError(t, err, "Data point 3 should exist before removal")
+
+	// --- Phase 3: Execute REMOVE SERIES command ---
+	executor := NewExecutor(eng, &utils.SystemClock{})
+	removeQuery := `REMOVE SERIES "e2e.remove" TAGGED (host="a", dc="us-east")`
+	removeCmd, err := Parse(removeQuery)
+	require.NoError(t, err)
+
+	result, err := executor.Execute(ctx, removeCmd)
+	require.NoError(t, err)
+
+	// Check the response
+	res, ok := result.(ManipulateResponse)
+	require.True(t, ok, "Result should be a ManipulateResponse")
+	assert.Equal(t, ResponseOK, res.Status)
+	assert.Equal(t, uint64(1), res.RowsAffected)
+
+	// --- Phase 4: Verify final state ---
+	// The removed series should be gone
+	_, err = eng.Get(ctx, dp1.Metric, dp1.Tags, dp1.Timestamp)
+	assert.ErrorIs(t, err, sstable.ErrNotFound, "Data point 1 should be gone after removal")
+	_, err = eng.Get(ctx, dp2.Metric, dp2.Tags, dp2.Timestamp)
+	assert.ErrorIs(t, err, sstable.ErrNotFound, "Data point 2 should be gone after removal")
+
+	// The other series should still exist
+	val3, err := eng.Get(ctx, dp3.Metric, dp3.Tags, dp3.Timestamp)
+	require.NoError(t, err, "Data point 3 should still exist after removal")
+	assert.Equal(t, 30.0, HelperFieldValueValidateFloat64(t, val3, "value"))
+}
+
+func TestExecutor_E2E_RemovePoint(t *testing.T) {
+	ctx := context.Background()
+
+	// --- Phase 1: Setup engine and ingest data ---
+	dataDir := t.TempDir()
+	opts := getBaseOptsForE2ETest(t)
+	opts.DataDir = dataDir
+
+	eng, err := engine.NewStorageEngine(opts)
+	require.NoError(t, err)
+	err = eng.Start()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// Data points for the same series at different timestamps
+	dp1 := HelperDataPoint(t, "e2e.remove.point", map[string]string{"host": "c"}, 100, map[string]interface{}{"value": 10.0})
+	dp2 := HelperDataPoint(t, "e2e.remove.point", map[string]string{"host": "c"}, 200, map[string]interface{}{"value": 20.0}) // This one will be removed
+	dp3 := HelperDataPoint(t, "e2e.remove.point", map[string]string{"host": "c"}, 300, map[string]interface{}{"value": 30.0})
+
+	require.NoError(t, eng.Put(ctx, dp1))
+	require.NoError(t, eng.Put(ctx, dp2))
+	require.NoError(t, eng.Put(ctx, dp3))
+
+	// --- Phase 2: Verify initial state ---
+	_, err = eng.Get(ctx, dp1.Metric, dp1.Tags, 100)
+	require.NoError(t, err, "Data point at t=100 should exist before removal")
+	_, err = eng.Get(ctx, dp2.Metric, dp2.Tags, 200)
+	require.NoError(t, err, "Data point at t=200 should exist before removal")
+
+	// --- Phase 3: Execute REMOVE FROM ... AT ... command ---
+	executor := NewExecutor(eng, &utils.SystemClock{})
+	removeQuery := `REMOVE FROM "e2e.remove.point" TAGGED (host="c") AT 200`
+	removeCmd, err := Parse(removeQuery)
+	require.NoError(t, err)
+
+	result, err := executor.Execute(ctx, removeCmd)
+	require.NoError(t, err)
+
+	res, ok := result.(ManipulateResponse)
+	require.True(t, ok, "Result should be a ManipulateResponse")
+	assert.Equal(t, ResponseOK, res.Status)
+	assert.Equal(t, uint64(1), res.RowsAffected)
+
+	// --- Phase 4: Verify final state ---
+	// The other points should still exist
+	_, err = eng.Get(ctx, dp1.Metric, dp1.Tags, 100)
+	require.NoError(t, err, "Data point at t=100 should still exist")
+
+	// The removed point should be gone
+	_, err = eng.Get(ctx, dp2.Metric, dp2.Tags, 200)
+	assert.ErrorIs(t, err, sstable.ErrNotFound, "Data point at t=200 should be gone after removal")
+
+	// The other point should still exist
+	_, err = eng.Get(ctx, dp3.Metric, dp3.Tags, 300)
+	require.NoError(t, err, "Data point at t=300 should still exist")
+}
