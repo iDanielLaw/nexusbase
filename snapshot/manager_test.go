@@ -534,8 +534,6 @@ func TestManager_CreateFull(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(provider.walDir, "000001.wal"), []byte("wal data 1"), 0644))
 
 	// ตั้งค่า mock expectations
-	provider.On("GetMemtablesForFlush").Return(provider.memtablesToFlush, nil)
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(provider.deletedSeries)
 	provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
 	provider.tagIndexManager.On("CreateSnapshot", filepath.Join(snapshotDir, "index")).Return(nil)
@@ -602,51 +600,8 @@ func TestManager_CreateFull(t *testing.T) {
 	provider.tagIndexManager.AssertCalled(t, "CreateSnapshot", filepath.Join(snapshotDir, "index"))
 	require.FileExists(t, filepath.Join(snapshotDir, "index", indexer.IndexManifestFileName))
 
-	// ตรวจสอบว่า memtables ถูก flush
-	provider.AssertCalled(t, "FlushMemtableToL0", mem1, mock.Anything)
-}
-
-func TestManager_CreateFull_FlushError(t *testing.T) {
-	// 1. Setup
-	tempDir := t.TempDir()
-	snapshotDir := filepath.Join(tempDir, "snapshot_flush_error")
-	dataDir := filepath.Join(tempDir, "data_flush_error")
-	require.NoError(t, os.MkdirAll(dataDir, 0755))
-
-	provider := newMockEngineProvider(t, dataDir)
-
-	// Create a memtable that needs flushing
-	mem1 := memtable.NewMemtable(1024, provider.clock)
-	mem1.Put([]byte("mem_key_1"), []byte("mem_val_1"), core.EntryTypePutEvent, 120)
-	provider.memtablesToFlush = []*memtable.Memtable{mem1}
-
-	// Define the expected error
-	expectedFlushError := fmt.Errorf("simulated flush error")
-
-	// Set up mock expectations
-	// GetMemtablesForFlush will be called to get the memtable.
-	provider.On("GetMemtablesForFlush").Return(provider.memtablesToFlush, nil)
-	provider.On("GetDeletedSeries").Return(nil)
-	provider.On("GetRangeTombstones").Return(nil)
-	// FlushMemtableToL0 will be called and should return our simulated error.
-	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
-	provider.stringStore.On("GetLogFilePath").Return(provider.stringStore.path)
-	provider.seriesIDStore.On("GetLogFilePath").Return(provider.seriesIDStore.path)
-	provider.On("FlushMemtableToL0", mem1, mock.Anything).Return(expectedFlushError)
-
-	// 2. Execution
-	manager := NewManager(provider)
-	err := manager.CreateFull(context.Background(), snapshotDir)
-
-	// 3. Verification
-	// The call should fail.
-	require.Error(t, err)
-	assert.ErrorIs(t, err, expectedFlushError, "The returned error should wrap the original flush error")
-	assert.Contains(t, err.Error(), "failed to flush memtable")
-
-	// The snapshot directory should have been cleaned up due to the defer block in CreateFull.
-	_, statErr := os.Stat(snapshotDir)
-	assert.True(t, os.IsNotExist(statErr), "Snapshot directory should be cleaned up on failure")
+	// The assertion for flushing memtables is removed because this responsibility
+	// has been moved to the engine layer, which calls the snapshot manager.
 }
 
 func TestManager_CreateFull_TagIndexSnapshotError(t *testing.T) {
@@ -663,8 +618,6 @@ func TestManager_CreateFull_TagIndexSnapshotError(t *testing.T) {
 
 	// Set up mock expectations.
 	// The flow will get past flushing memtables.
-	provider.On("GetMemtablesForFlush").Return(nil, nil)
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
@@ -705,8 +658,6 @@ func TestManager_CreateFull_SSTableCopyError(t *testing.T) {
 	provider.levelsManager.AddTableToLevel(0, sst1)
 
 	// Set up mock expectations for the parts that will be called before the error
-	provider.On("GetMemtablesForFlush").Return(nil, nil)
-	provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
@@ -753,8 +704,6 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider := newMockEngineProvider(t, dataDir)
 		provider.deletedSeries = map[string]uint64{"deleted_series_1": 100} // Ensure saveJSON is called
 
-		provider.On("GetMemtablesForFlush").Return(nil, nil)
-		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(provider.deletedSeries)
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
@@ -791,8 +740,6 @@ func TestManager_CreateFull_SaveJSONError(t *testing.T) {
 		provider := newMockEngineProvider(t, dataDir)
 		provider.rangeTombstones = map[string][]core.RangeTombstone{"rt1": {{MinTimestamp: 1, MaxTimestamp: 2}}} // Ensure saveJSON is called
 
-		provider.On("GetMemtablesForFlush").Return(nil, nil)
-		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(provider.rangeTombstones)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
@@ -839,8 +786,6 @@ func TestManager_CreateFull_CopyAuxiliaryFileError(t *testing.T) {
 		provider := newMockEngineProvider(t, dataDir)
 
 		// Set up mock expectations for calls that happen before the error
-		provider.On("GetMemtablesForFlush").Return(nil, nil)
-		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
@@ -888,8 +833,6 @@ func TestManager_CreateFull_WALCopyError(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(provider.walDir, "000001.wal"), []byte("wal data"), 0644))
 
 		// Set up mock expectations for calls that happen before the error
-		provider.On("GetMemtablesForFlush").Return(nil, nil)
-		provider.On("FlushMemtableToL0", mock.Anything, mock.Anything).Return(nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.On("GetSequenceNumber").Return(uint64(0)).Once()
@@ -961,7 +904,6 @@ func TestManager_CreateFull_WriteManifestError(t *testing.T) {
 	require.NoError(t, os.MkdirAll(provider.walDir, 0755))
 
 	// Set up mock expectations for all calls that happen before writing the manifest.
-	provider.On("GetMemtablesForFlush").Return(nil, nil)
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
@@ -1024,8 +966,6 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 	// Levels manager is already empty by default
 
 	// Set up mock expectations for an empty run
-	provider.On("GetMemtablesForFlush").Return(provider.memtablesToFlush, nil)
-	// FlushMemtableToL0 should not be called
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
@@ -1139,7 +1079,6 @@ func TestManager_CreateIncremental(t *testing.T) {
 
 		// Mocks for CreateFull call
 		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For CreateFull
-		provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
 		provider.On("GetDeletedSeries").Return(nil).Once()
 		provider.On("GetRangeTombstones").Return(nil).Once()
 		provider.tagIndexManager.On("CreateSnapshot", filepath.Join(parentSnapshotDir, "index")).Return(nil).Once()
@@ -1240,7 +1179,6 @@ func TestManager_CreateIncremental(t *testing.T) {
 		parentSnapshotDir := filepath.Join(snapshotsBaseDir, "parent")
 		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For CreateFull
 		provider.On("GetSequenceNumber").Return(uint64(100)).Once() // For CreateIncremental check
-		provider.On("GetMemtablesForFlush").Return(nil, nil)
 		provider.On("GetDeletedSeries").Return(nil)
 		provider.On("GetRangeTombstones").Return(nil)
 		provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
@@ -2262,7 +2200,6 @@ func TestCreateFull_AuxiliaryFileNotExist(t *testing.T) {
 	provider.seriesIDStore.On("GetLogFilePath").Return("")
 
 	// Set up other mock expectations for a successful run
-	provider.On("GetMemtablesForFlush").Return()
 	provider.On("GetDeletedSeries").Return(nil)
 	provider.On("GetRangeTombstones").Return(nil)
 	provider.On("GetSequenceNumber").Return(uint64(0)).Once()

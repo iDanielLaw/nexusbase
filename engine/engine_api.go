@@ -1717,18 +1717,20 @@ func (e *storageEngine) CreateSnapshot(ctx context.Context) (string, error) {
 
 	e.logger.Info("Starting snapshot creation process...")
 
-	// 1. Acquire a full write lock to pause all other operations.
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// 2. Flush all in-memory data to SSTables to ensure a consistent state on disk.
+	// 1. Flush all in-memory data to SSTables to ensure a consistent state on disk.
+	// This is a blocking call that ensures all pending writes are persisted.
 	e.logger.Info("Flushing all memtables for snapshot consistency...")
-	if err := e.flushRemainingMemtables(); err != nil {
+	if err := e.ForceFlush(ctx, true); err != nil {
 		e.logger.Error("Failed to flush memtables during snapshot creation.", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "memtable_flush_failed")
 		return "", fmt.Errorf("failed to flush memtables for snapshot: %w", err)
 	}
+
+	// 2. Now that the state is stable on disk, acquire a lock to prevent further
+	// changes while we read the state for the manifest.
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	// 3. Create a unique directory for the snapshot.
 	snapshotID := fmt.Sprintf("snapshot-%s", e.clock.Now().UTC().Format("20060102T150405Z"))
@@ -1775,13 +1777,12 @@ func (e *storageEngine) RestoreFromSnapshot(ctx context.Context, snapshotPath st
 	e.logger.Info("Starting restore from snapshot process...", "path", snapshotPath)
 
 	// 1. Validate snapshot directory
-	manifestPath := filepath.Join(snapshotPath, "MANIFEST")
-	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
-		e.logger.Error("Snapshot validation failed: MANIFEST file not found.", "path", snapshotPath)
-		span.SetStatus(codes.Error, "invalid_snapshot_no_manifest")
-		return fmt.Errorf("invalid snapshot directory: MANIFEST file not found in %s", snapshotPath)
+	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
+		e.logger.Error("Snapshot validation failed: directory does not exist.", "path", snapshotPath)
+		span.SetStatus(codes.Error, "invalid_snapshot_dir_not_exist")
+		return fmt.Errorf("invalid snapshot directory: path does not exist: %s", snapshotPath)
 	}
-
+	// The snapshot manager itself will validate the contents (e.g., CURRENT file).
 	// 2. Safety check for overwrite
 	if !overwrite {
 		if e.levelsManager.GetTotalTableCount() > 0 || e.mutableMemtable.Size() > 0 {

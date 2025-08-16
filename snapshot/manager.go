@@ -90,31 +90,18 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 
 	p.GetLogger().Info("Starting to create full snapshot.", "snapshot_dir", snapshotDir)
 
-	// 2. Acquire lock to get a consistent view of memtables and other state.
+	// The caller (engine.CreateSnapshot) is responsible for flushing data and acquiring the lock.
+	// This manager assumes it's being called with a consistent, locked view of the engine state.
 
-	// 3. Synchronously flush all collected memtables to L0.
-	p.Lock()
-	memtablesToFlush, _ := p.GetMemtablesForFlush()
-	p.Unlock()
-	if len(memtablesToFlush) > 0 {
-		p.GetLogger().Info("Snapshot: Flushing all in-memory data.", "memtable_count", len(memtablesToFlush))
-		for _, mem := range memtablesToFlush {
-			if flushErr := p.FlushMemtableToL0(mem, ctx); flushErr != nil {
-				return fmt.Errorf("failed to flush memtable (size: %d) during snapshot creation: %w", mem.Size(), flushErr)
-			}
-		}
-	}
-
-	// Re-acquire lock to get final state after flush
-	p.Lock()
+	// 2. Get the final, consistent state.
 	currentSeqNum := p.GetSequenceNumber()
 
-	// 4. Get the final, consistent list of SSTables AFTER the synchronous flush.
+	// 3. Get the list of SSTables. The provider's implementation of this method
+	// should handle its own locking to return a consistent view.
 	levelStates, unlockFunc := p.GetLevelsManager().GetSSTablesForRead()
-	p.Unlock() // Unlock after getting both sequence number and table states
 	defer unlockFunc()
 
-	// Get the latest WAL segment index *after* any potential flushes.
+	// 4. Get the latest WAL segment index.
 	wal := p.GetWAL()
 	lastWALIndex := wal.ActiveSegmentIndex()
 
@@ -128,7 +115,7 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	manifest.CreatedAt = p.GetClock().Now()
 	manifest.LastWALSegmentIndex = lastWALIndex
 
-	// Copy SSTables
+	// 5. Copy SSTables
 	for levelNum, levelState := range levelStates {
 		tablesInLevel := levelState.GetTables()
 		levelManifest := core.SnapshotLevelManifest{LevelNumber: levelNum, Tables: make([]core.SSTableMetadata, 0, len(tablesInLevel))}
@@ -554,11 +541,8 @@ func (c *auxiliaryCopier) run() error {
 
 // saveJSONState saves state like deleted series and range tombstones to JSON files.
 func (c *auxiliaryCopier) saveJSONState() error {
-	p := c.m.provider
-	p.Lock()
-	deletedSeriesToSave := p.GetDeletedSeries()
-	rangeTombstonesToSave := p.GetRangeTombstones()
-	p.Unlock()
+	deletedSeriesToSave := c.m.provider.GetDeletedSeries()
+	rangeTombstonesToSave := c.m.provider.GetRangeTombstones()
 
 	if len(deletedSeriesToSave) > 0 {
 		c.manifest.DeletedSeriesFile = "deleted_series.json"

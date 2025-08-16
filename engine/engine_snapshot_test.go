@@ -34,7 +34,7 @@ func TestEngine_SnapshotAndRestore(t *testing.T) {
 	snapshotPath, err := sourceEngine.CreateSnapshot(ctx)
 	require.NoError(t, err)
 	require.DirExists(t, snapshotPath)
-	require.FileExists(t, filepath.Join(snapshotPath, "MANIFEST"))
+	require.FileExists(t, filepath.Join(snapshotPath, "CURRENT"))
 
 	// Verify snapshot contents (simple check)
 	files, err := os.ReadDir(filepath.Join(snapshotPath, "sst"))
