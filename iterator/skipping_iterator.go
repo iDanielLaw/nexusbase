@@ -10,13 +10,13 @@ import (
 // This is the core mechanism for cursor-based pagination, ensuring the last item of the previous
 // page is not included in the current page.
 type SkippingIterator struct {
-	underlying core.Interface
+	underlying core.IteratorInterface[*core.IteratorNode]
 	skipKey    []byte
 	skipped    bool
 }
 
 // NewSkippingIterator creates a new iterator that wraps another and skips a specific key.
-func NewSkippingIterator(iter core.Interface, keyToSkip []byte) core.Interface {
+func NewSkippingIterator(iter core.IteratorInterface[*core.IteratorNode], keyToSkip []byte) core.IteratorInterface[*core.IteratorNode] {
 	return &SkippingIterator{
 		underlying: iter,
 		skipKey:    keyToSkip,
@@ -32,8 +32,9 @@ func (it *SkippingIterator) Next() bool {
 			return false // Underlying is empty or has an error.
 		}
 		// Check if the first item's key is the one we need to skip.
-		key, _, _, _ := it.underlying.At()
-		if bytes.Equal(key, it.skipKey) {
+		// key, _, _, _ := it.underlying.At()
+		cur, _ := it.underlying.At()
+		if bytes.Equal(cur.Key, it.skipKey) {
 			// It matches, so advance the underlying iterator one more time to skip it.
 			return it.underlying.Next()
 		}
@@ -43,6 +44,6 @@ func (it *SkippingIterator) Next() bool {
 	return it.underlying.Next()
 }
 
-func (it *SkippingIterator) At() ([]byte, []byte, core.EntryType, uint64) { return it.underlying.At() }
-func (it *SkippingIterator) Error() error                                 { return it.underlying.Error() }
-func (it *SkippingIterator) Close() error                                 { return it.underlying.Close() }
+func (it *SkippingIterator) At() (*core.IteratorNode, error) { return it.underlying.At() }
+func (it *SkippingIterator) Error() error                    { return it.underlying.Error() }
+func (it *SkippingIterator) Close() error                    { return it.underlying.Close() }

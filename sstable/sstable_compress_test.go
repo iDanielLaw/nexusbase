@@ -291,7 +291,13 @@ func TestSSTable_Compression_WriteAndRead(t *testing.T) {
 
 				var actualEntries []testEntry
 				for iter.Next() {
-					key, value, entryType, pointID := iter.At()
+					// key, value, entryType, pointID := iter.At()
+					cur, _ := iter.At()
+					key := cur.Key
+					value := cur.Value
+					entryType := cur.EntryType
+					pointID := cur.SeqNum
+
 					actualEntries = append(actualEntries, testEntry{
 						Key:       append([]byte(nil), key...),
 						Value:     append([]byte(nil), value...),
@@ -321,7 +327,13 @@ func TestSSTable_Compression_WriteAndRead(t *testing.T) {
 
 				var actualEntries []testEntry
 				for iter.Next() {
-					key, value, entryType, pointID := iter.At()
+					// key, value, entryType, pointID := iter.At()
+					cur, _ := iter.At()
+					key := cur.Key
+					value := cur.Value
+					entryType := cur.EntryType
+					pointID := cur.SeqNum
+
 					actualEntries = append(actualEntries, testEntry{
 						Key:       append([]byte(nil), key...),
 						Value:     append([]byte(nil), value...),
@@ -499,7 +511,7 @@ func TestSSTable_Compression_IteratorEdgeCases(t *testing.T) {
 }
 
 // testIteratorRange is a helper function to reduce code duplication for range scan tests.
-func testIteratorRange(t *testing.T, iter core.Interface, expectedEntries []testEntry) {
+func testIteratorRange(t *testing.T, iter core.IteratorInterface[*core.IteratorNode], expectedEntries []testEntry) {
 	t.Helper()
 
 	var actualEntries []testEntry
@@ -521,12 +533,13 @@ func testIteratorRange(t *testing.T, iter core.Interface, expectedEntries []test
 }
 
 // copyTestEntryFromIterator creates a deep copy of a testEntry from an iterator.
-func copyTestEntryFromIterator(it core.Interface) testEntry {
-	key, value, entryType, pointID := it.At()
+func copyTestEntryFromIterator(it core.IteratorInterface[*core.IteratorNode]) testEntry {
+	// key, value, entryType, pointID := it.At()
+	cur, _ := it.At()
 	return testEntry{
-		Key:       append([]byte(nil), key...),
-		Value:     append([]byte(nil), value...),
-		EntryType: entryType,
-		PointID:   pointID,
+		Key:       append([]byte(nil), cur.Key...),
+		Value:     append([]byte(nil), cur.Value...),
+		EntryType: cur.EntryType,
+		PointID:   cur.SeqNum,
 	}
 }

@@ -51,7 +51,7 @@ type sstableIterator struct {
 // NewSSTableIterator creates a new iterator for the given SSTable and key range.
 // This function is typically called by SSTable.NewIterator.
 // Corresponds to FR4.7.
-func NewSSTableIterator(s *SSTable, startKey, endKey []byte, sem chan struct{}, order core.SortOrder) (core.Interface, error) {
+func NewSSTableIterator(s *SSTable, startKey, endKey []byte, sem chan struct{}, order core.SortOrder) (core.IteratorInterface[*core.IteratorNode], error) {
 	// TODO (FR4.7, FR4.8): Implementation details:
 	it := &sstableIterator{
 		sstable:           s,
@@ -222,8 +222,14 @@ func (it *sstableIterator) Next() bool {
 	}
 }
 
-func (it *sstableIterator) At() ([]byte, []byte, core.EntryType, uint64) {
-	return it.currentKey, it.currentValue, it.currentEntryType, it.currentPointID
+func (it *sstableIterator) At() (*core.IteratorNode, error) {
+	// return it.currentKey, it.currentValue, it.currentEntryType, it.currentPointID
+	return &core.IteratorNode{
+		Key:       it.currentKey,
+		Value:     it.currentValue,
+		EntryType: it.currentEntryType,
+		SeqNum:    it.currentPointID,
+	}, it.err
 }
 
 // Error returns the last error encountered by the iterator.

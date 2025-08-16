@@ -298,7 +298,7 @@ func createDummySSTableWithTombstones(t *testing.T, eng StorageEngineInterface, 
 // entries with the expected data.
 func verifySSTableContent(t *testing.T, tables []*sstable.SSTable, expectedData map[string]string, eng StorageEngineInterface) {
 	t.Helper()
-	var iters []core.Interface
+	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, tbl := range tables { // Pass nil for semaphore in test verification
 		iter, err := tbl.NewIterator(nil, nil, nil, core.Ascending)
 		if err != nil {
@@ -323,7 +323,10 @@ func verifySSTableContent(t *testing.T, tables []*sstable.SSTable, expectedData 
 
 	actualData := make(map[string]string)
 	for mergedIter.Next() {
-		keyBytes, valueBytes, entryType, _ := mergedIter.At()
+		// keyBytes, valueBytes, entryType, _ := mergedIter.At()
+		cur, _ := mergedIter.At()
+		keyBytes, valueBytes, entryType, _ := cur.Key, cur.Value, cur.EntryType, cur.SeqNum
+
 		if entryType == core.EntryTypePutEvent {
 			decodedFields, err := core.DecodeFieldsFromBytes(valueBytes)
 			if err != nil {
@@ -1266,7 +1269,10 @@ func TestCompactionManager_RetentionPolicy(t *testing.T) {
 
 	var foundKeys []string
 	for iter.Next() {
-		key, _, _, _ := iter.At()
+		// key, _, _, _ := iter.At()
+		cur, _ := iter.At()
+		key := cur.Key
+
 		metricID, _, _ := core.DecodeSeriesKey(key[:len(key)-8])
 		metric, _ := concreteEngine.stringStore.GetString(metricID)
 		foundKeys = append(foundKeys, metric)

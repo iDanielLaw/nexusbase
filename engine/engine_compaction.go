@@ -662,7 +662,7 @@ func (cm *CompactionManager) writeCompactedEntry(
 	return nil
 }
 
-func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables []*sstable.SSTable) (core.Interface, error) {
+func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables []*sstable.SSTable) (core.IteratorInterface[*core.IteratorNode], error) {
 	_, span := cm.tracer.Start(ctx, "CompactionManager.createMergingIterator")
 	defer span.End()
 
@@ -670,7 +670,7 @@ func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables [
 		return iterator.NewEmptyIterator(), nil
 	}
 
-	var iters []core.Interface
+	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, table := range tables {
 		iter, err := table.NewIterator(nil, nil, cm.blockReadSemaphore, core.Ascending)
 		if err != nil {
@@ -698,7 +698,7 @@ func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables [
 
 func (cm *CompactionManager) processMergedEntries(
 	ctx context.Context,
-	mergedIter core.Interface,
+	mergedIter core.IteratorInterface[*core.IteratorNode],
 	retentionCutoffTime int64,
 	currentWriter *core.SSTableWriterInterface,
 	newSSTables *[]*sstable.SSTable,
@@ -709,7 +709,12 @@ func (cm *CompactionManager) processMergedEntries(
 
 	var totalBytesWritten int64 = 0
 	for mergedIter.Next() {
-		key, value, entryType, pointID := mergedIter.At()
+		// key, value, entryType, pointID := mergedIter.At()
+		cur, errCur := mergedIter.At()
+		if errCur != nil {
+			return 0, errCur
+		}
+		key, value, entryType, pointID := cur.Key, cur.Value, cur.EntryType, cur.SeqNum
 
 		// Retention policy check
 		if retentionCutoffTime > 0 && entryType == core.EntryTypePutEvent {

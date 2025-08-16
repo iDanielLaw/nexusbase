@@ -100,11 +100,16 @@ func setupIteratorTest(t *testing.T) (*SSTable, []testEntry) {
 }
 
 // collectIteratorResults drains an iterator and returns all its entries.
-func collectIteratorResults(t *testing.T, it core.Interface) []testEntry {
+func collectIteratorResults(t *testing.T, it core.IteratorInterface[*core.IteratorNode]) []testEntry {
 	t.Helper()
 	var results []testEntry
 	for it.Next() {
-		key, val, entryType, pointID := it.At()
+		// key, val, entryType, pointID := it.At()
+		cur, _ := it.At()
+		key := cur.Key
+		val := cur.Value
+		entryType := cur.EntryType
+		pointID := cur.SeqNum
 		results = append(results, testEntry{
 			Key:       append([]byte(nil), key...),
 			Value:     append([]byte(nil), val...),
@@ -274,7 +279,9 @@ func TestSSTableIterator_EdgeCases(t *testing.T) {
 
 		// The first result should be "d"
 		require.True(t, it.Next(), "Iterator should find the next key")
-		key, _, _, _ := it.At()
+		// key, _, _, _ := it.At()
+		cur, _ := it.At()
+		key := cur.Key
 		require.Equal(t, []byte("d"), key, "Iterator should start at the first key >= startKey")
 	})
 }

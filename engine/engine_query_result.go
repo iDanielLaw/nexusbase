@@ -8,13 +8,12 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 )
 
-var _ core.IteratorInterface[*core.QueryResultItem] = (*QueryResultIterator)(nil)
 var _ core.IteratorPoolInterface[*core.QueryResultItem] = (*QueryResultIterator)(nil)
 
 // QueryResultIterator is a specialized iterator returned by the engine's Query method.
 // It wraps the low-level iterator.Interface and provides methods to get fully decoded results.
 type QueryResultIterator struct {
-	underlying     core.Interface
+	underlying     core.IteratorInterface[*core.IteratorNode]
 	isFinalAgg     bool // True if the query was a final aggregation over a time range
 	queryReqInfo   *core.QueryParams
 	engine         *storageEngine // For metrics
@@ -46,7 +45,7 @@ func (it *QueryResultIterator) Error() error {
 }
 
 // UnderlyingAt exposes the raw key/value from the underlying iterator.
-func (it *QueryResultIterator) UnderlyingAt() ([]byte, []byte, core.EntryType, uint64) {
+func (it *QueryResultIterator) UnderlyingAt() (*core.IteratorNode, error) {
 	return it.underlying.At()
 }
 
@@ -81,7 +80,14 @@ func (it *QueryResultIterator) Put(item *core.QueryResultItem) {
 // It handles raw data, downsampled data, and final aggregation results,
 // and applies tag filtering.
 func (it *QueryResultIterator) At() (*core.QueryResultItem, error) {
-	key, value, _, _ := it.underlying.At()
+	// key, value, _, _ := it.underlying.At()
+	cur, err := it.underlying.At()
+	if err != nil {
+		return nil, err
+	}
+
+	key, value := cur.Key, cur.Value
+
 	// Store the raw key for cursor creation
 	it.lastRawKey = make([]byte, len(key))
 	copy(it.lastRawKey, key)
@@ -151,7 +157,10 @@ func (it *QueryResultIterator) At() (*core.QueryResultItem, error) {
 	} else {
 		// Raw data point or event
 		// entryType := it.underlying.EntryType()
-		_, _, entryType, _ := it.underlying.At()
+		// _, _, entryType, _ := it.underlying.At()
+		curRaw, _ := it.underlying.At()
+		entryType := curRaw.EntryType
+
 		if entryType == core.EntryTypePutEvent {
 			result.IsEvent = true
 			fields, decodeErr := core.DecodeFields(bytes.NewBuffer(value))

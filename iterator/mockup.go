@@ -28,7 +28,7 @@ type mockIterator struct {
 	err    error
 }
 
-var _ core.Interface = (*mockIterator)(nil)
+var _ core.IteratorInterface[*core.IteratorNode] = (*mockIterator)(nil)
 
 func (m *mockIterator) Next() bool {
 	// A mid-stream error is typically discovered upon trying to read the next item.
@@ -40,7 +40,7 @@ func (m *mockIterator) Next() bool {
 	return true
 }
 
-func (m *mockIterator) At() ([]byte, []byte, core.EntryType, uint64) {
+func (m *mockIterator) At() (*core.IteratorNode, error) {
 	if m.idx > 0 && m.idx <= len(m.points) {
 		p := m.points[m.idx-1]
 		key := makeKey(p)
@@ -48,9 +48,14 @@ func (m *mockIterator) At() ([]byte, []byte, core.EntryType, uint64) {
 		if p.eType != core.EntryTypeDelete {
 			value, _ = p.Fields.Encode()
 		}
-		return key, value, p.eType, p.seqNum
+		return &core.IteratorNode{
+			Key:       key,
+			Value:     value,
+			EntryType: p.eType,
+			SeqNum:    p.seqNum,
+		}, nil
 	}
-	return nil, nil, 0, 0
+	return nil, nil
 }
 
 func (m *mockIterator) Error() error {

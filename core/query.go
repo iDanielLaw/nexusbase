@@ -54,10 +54,10 @@ type QueryResultItem struct {
 
 // QueryResultIteratorInterface defines the iterator for query results.
 type QueryResultIteratorInterface interface {
-	Next() bool
-	At() (*QueryResultItem, error)
-	Error() error
-	Close() error
-	Put(item *QueryResultItem)
-	UnderlyingAt() ([]byte, []byte, EntryType, uint64) // Expose raw data for cursor creation
+	IteratorPoolInterface[*QueryResultItem]
+	UnderlyingAt() (*IteratorNode, error) // Expose raw data for cursor creation
+}
+
+func (it *QueryResultItem) TypeNode() string {
+	return "QUERYITERATOR"
 }

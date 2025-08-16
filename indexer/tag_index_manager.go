@@ -552,7 +552,7 @@ func (tim *TagIndexManager) mergeIndexSSTables(tables []*sstable.SSTable, delete
 		return nil, nil
 	}
 
-	var iters []core.Interface
+	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, table := range tables {
 		iter, err := table.NewIterator(nil, nil, tim.blockReadSemaphore, core.Ascending)
 		if err != nil {

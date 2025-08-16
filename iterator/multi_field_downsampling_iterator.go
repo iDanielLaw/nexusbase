@@ -91,7 +91,7 @@ func (a *downsampleAccumulator) Add(val core.PointValue) error {
 
 // MultiFieldDownsamplingIterator aggregates multiple fields over time windows.
 type MultiFieldDownsamplingIterator struct {
-	underlying core.Interface
+	underlying core.IteratorInterface[*core.IteratorNode]
 	specs      []core.AggregationSpec
 	interval   time.Duration
 
@@ -123,7 +123,7 @@ type MultiFieldDownsamplingIterator struct {
 }
 
 // NewMultiFieldDownsamplingIterator creates a new downsampling iterator.
-func NewMultiFieldDownsamplingIterator(iter core.Interface, specs []core.AggregationSpec, interval time.Duration, startTime, endTime int64, emitEmpty bool) (*MultiFieldDownsamplingIterator, error) {
+func NewMultiFieldDownsamplingIterator(iter core.IteratorInterface[*core.IteratorNode], specs []core.AggregationSpec, interval time.Duration, startTime, endTime int64, emitEmpty bool) (*MultiFieldDownsamplingIterator, error) {
 	if interval <= 0 {
 		return nil, fmt.Errorf("downsample interval must be positive")
 	}
@@ -229,9 +229,9 @@ func (it *MultiFieldDownsamplingIterator) Next() bool {
 }
 
 // At returns the current downsampled window's key and value.
-func (it *MultiFieldDownsamplingIterator) At() ([]byte, []byte, core.EntryType, uint64) {
+func (it *MultiFieldDownsamplingIterator) At() (*core.IteratorNode, error) {
 	it.hasNext = false
-	return it.currentKey, it.currentValue, core.EntryTypePutEvent, 0
+	return &core.IteratorNode{Key: it.currentKey, Value: it.currentValue, EntryType: core.EntryTypePutEvent}, it.err
 }
 
 func (it *MultiFieldDownsamplingIterator) Error() error {
@@ -441,11 +441,13 @@ func (it *MultiFieldDownsamplingIterator) peekNextPoint() ([]byte, []byte, bool)
 		return it.peekedKey, it.peekedValue, true
 	}
 	if it.underlying.Next() {
-		key, value, _, _ := it.underlying.At()
-		it.peekedKey = key
-		it.peekedValue = value
+		// key, value, _, _ := it.underlying.At()
+		cur, _ := it.underlying.At()
+
+		it.peekedKey = cur.Key
+		it.peekedValue = cur.Value
 		it.peeked = true
-		return key, value, true
+		return cur.Key, cur.Value, true
 	}
 	// If underlying.Next() is false, check for an error immediately.
 	if err := it.underlying.Error(); err != nil {

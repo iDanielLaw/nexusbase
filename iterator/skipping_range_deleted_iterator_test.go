@@ -54,7 +54,10 @@ func TestSkippingRangeDeletedIterator(t *testing.T) {
 
 	var actualKeys [][]byte
 	for skippingIter.Next() {
-		key, _, _, _ := skippingIter.At()
+		// key, _, _, _ := skippingIter.At()
+		cur, _ := skippingIter.At()
+		key := cur.Key
+
 		actualKeys = append(actualKeys, key)
 	}
 

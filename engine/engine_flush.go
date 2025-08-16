@@ -183,7 +183,12 @@ func (e *storageEngine) moveToDLQ(mem *memtable.Memtable) error {
 	iter := mem.NewIterator(nil, nil, core.Ascending)
 	defer iter.Close()
 	for iter.Next() {
-		key, value, entryType, seqNum := iter.At()
+		cur, _ := iter.At()
+		key := cur.Key
+		value := cur.Value
+		entryType := cur.EntryType
+		seqNum := cur.SeqNum
+
 		entry := struct { // Define struct locally for DLQ entry
 			Key       []byte
 			Value     []byte

@@ -85,7 +85,7 @@ func (e *storageEngine) getRoundingDuration(queryDuration time.Duration) time.Du
 // that are outside the specified exact time range.
 // It implements the low-level iterator.Interface.
 type TimeFilterIterator struct {
-	underlying     core.Interface // Changed from core.QueryResultIteratorInterface
+	underlying     core.IteratorInterface[*core.IteratorNode] // Changed from core.QueryResultIteratorInterface
 	exactStartTime int64
 	exactEndTime   int64
 
@@ -101,11 +101,11 @@ type TimeFilterIterator struct {
 	valBuf *bytes.Buffer
 }
 
-var _ core.Interface = (*TimeFilterIterator)(nil)
+var _ core.IteratorInterface[*core.IteratorNode] = (*TimeFilterIterator)(nil)
 
 // NewTimeFilterIterator creates a new TimeFilterIterator.
 // It now takes and returns an iterator.Interface.
-func NewTimeFilterIterator(iter core.Interface, startTime, endTime int64) core.Interface {
+func NewTimeFilterIterator(iter core.IteratorInterface[*core.IteratorNode], startTime, endTime int64) core.IteratorInterface[*core.IteratorNode] {
 	return &TimeFilterIterator{
 		underlying:     iter,
 		exactStartTime: startTime,
@@ -126,7 +126,10 @@ func (it *TimeFilterIterator) Next() bool {
 	}
 
 	for it.underlying.Next() {
-		key, value, entryType, seqNum := it.underlying.At()
+		// key, value, entryType, seqNum := it.underlying.At()
+		cur, _ := it.underlying.At()
+		key, value, entryType, seqNum := cur.Key, cur.Value, cur.EntryType, cur.SeqNum
+
 		if len(key) < 8 {
 			continue
 		}
@@ -158,11 +161,17 @@ func (it *TimeFilterIterator) Next() bool {
 
 // At returns the raw data from the underlying iterator.
 // It now matches the iterator.Interface signature.
-func (it *TimeFilterIterator) At() ([]byte, []byte, core.EntryType, uint64) {
+func (it *TimeFilterIterator) At() (*core.IteratorNode, error) {
 	if !it.valid {
-		return nil, nil, 0, 0
+		return &core.IteratorNode{}, fmt.Errorf("iterator not valid")
 	}
-	return it.key, it.value, it.entryType, it.seqNum
+	return &core.IteratorNode{
+		Key:       it.key,
+		Value:     it.value,
+		EntryType: it.entryType,
+		SeqNum:    it.seqNum,
+	}, nil
+	// return it.key, it.value, it.entryType, it.seqNum
 }
 
 // Error returns any error from the underlying iterator.
@@ -373,7 +382,7 @@ type rangeScanParams struct {
 }
 
 // rangeScan provides an iterator over a range of keys.
-func (e *storageEngine) rangeScan(ctx context.Context, params rangeScanParams) (core.Interface, error) {
+func (e *storageEngine) rangeScan(ctx context.Context, params rangeScanParams) (core.IteratorInterface[*core.IteratorNode], error) {
 	_, span := e.tracer.Start(ctx, "StorageEngine.RangeScan")
 	startTime := e.clock.Now()
 	defer func() {
@@ -392,7 +401,7 @@ func (e *storageEngine) rangeScan(ctx context.Context, params rangeScanParams) (
 		attribute.String("db.rangescan.end_key", string(params.EndKey)),
 	)
 
-	var iterators []core.Interface
+	var iterators []core.IteratorInterface[*core.IteratorNode]
 
 	e.mu.RLock()
 	if e.mutableMemtable != nil {
@@ -1137,7 +1146,7 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 	defer span.End()
 
 	// 1. Find all matching series keys (binary format).
-	var effectiveIter core.Interface
+	var effectiveIter core.IteratorInterface[*core.IteratorNode]
 	isFinalAgg := false
 
 	// Check if this is a multi-field aggregation query (and not a downsampling one)
@@ -1156,7 +1165,7 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 		span.SetAttributes(attribute.Int("query.matching_series_count", len(binarySeriesKeys)))
 
 		// 2. Create a rangeScan iterator for each matching series.
-		var iteratorsToMerge []core.Interface
+		var iteratorsToMerge []core.IteratorInterface[*core.IteratorNode]
 		for _, seriesKey := range binarySeriesKeys {
 			startKeyBytes := make([]byte, len(seriesKey)+8)
 			copy(startKeyBytes, seriesKey)
@@ -1237,7 +1246,7 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 		}
 		span.SetAttributes(attribute.Int("query.matching_series_count", len(binarySeriesKeys)))
 
-		var iteratorsToMerge []core.Interface
+		var iteratorsToMerge []core.IteratorInterface[*core.IteratorNode]
 		for _, seriesKey := range binarySeriesKeys {
 			startKeyBytes := make([]byte, len(seriesKey)+8)
 			copy(startKeyBytes, seriesKey)

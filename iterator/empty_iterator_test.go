@@ -12,7 +12,13 @@ func TestEmptyIterator(t *testing.T) {
 		t.Error("Expected Next() to be false, but got true")
 	}
 
-	key, value, entryType, seqNo := iter.At()
+	// key, value, entryType, seqNo := iter.At()
+	cur, _ := iter.At()
+	key := cur.Key
+	value := cur.Value
+	entryType := cur.EntryType
+	seqNo := cur.SeqNum
+
 	// All other methods should return nil or zero values
 	if key != nil {
 		t.Errorf("Expected Key() to be nil, got %v", key)
