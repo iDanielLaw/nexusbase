@@ -9,22 +9,12 @@ import (
 	"github.com/INLOpen/nexusbase/core" // For core.EntryType
 )
 
-// Interface defines a common interface for all iterators in the system.
-type Interface interface {
-	Next() bool
-	// At returns the current key, value, entry type, and sequence number.
-	// The returned slices are only valid until the next call to Next().
-	At() ([]byte, []byte, core.EntryType, uint64)
-	Error() error
-	Close() error
-}
-
 var ErrSkipPoint = errors.New("skip point")
 
 // mergingIteratorItem is an item in the min-heap for MergingIterator.
 type mergingIteratorItem struct {
-	iter      Interface // The underlying iterator
-	key       []byte    // Full internal key, copied for safety
+	iter      core.IteratorInterface[*core.IteratorNode] // The underlying iterator
+	key       []byte                                     // Full internal key, copied for safety
 	value     []byte
 	entryType core.EntryType // Changed to core.EntryType
 	seqNum    uint64
@@ -35,10 +25,10 @@ type mergingIteratorItem struct {
 	timestamp int64
 }
 
-var _ Interface = (*MergingIterator)(nil)
-var _ Interface = (*EmptyIterator)(nil)
-var _ Interface = (*MultiFieldAggregatingIterator)(nil)
-var _ Interface = (*MultiFieldDownsamplingIterator)(nil)
+var _ core.IteratorInterface[*core.IteratorNode] = (*MergingIterator)(nil)
+var _ core.IteratorInterface[*core.IteratorNode] = (*EmptyIterator)(nil)
+var _ core.IteratorInterface[*core.IteratorNode] = (*MultiFieldAggregatingIterator)(nil)
+var _ core.IteratorInterface[*core.IteratorNode] = (*MultiFieldDownsamplingIterator)(nil)
 
 // mergingIteratorHeap implements heap.Interface for mergingIteratorItem.
 type mergingIteratorHeap struct {
@@ -85,7 +75,7 @@ func (h *mergingIteratorHeap) Pop() interface{} {
 
 // MergingIterator combines multiple Iterators into a single sorted view.
 type MergingIterator struct {
-	iters    []Interface
+	iters    []core.IteratorInterface[*core.IteratorNode]
 	heap     *mergingIteratorHeap
 	startKey []byte
 	endKey   []byte
@@ -104,7 +94,7 @@ type MergingIterator struct {
 
 // NewMergingIterator creates a new MergingIterator.
 // iters should be a list of iterators that are already positioned (or will be by their first Next()).
-func NewMergingIterator(iters []Interface, startKey, endKey []byte) (Interface, error) {
+func NewMergingIterator(iters []core.IteratorInterface[*core.IteratorNode], startKey, endKey []byte) (core.IteratorInterface[*core.IteratorNode], error) {
 	// This constructor is being updated to receive checker functions.
 	// The actual constructor used in engine.go will need to pass these.
 	// For now, this signature is a placeholder.
@@ -115,7 +105,7 @@ func NewMergingIterator(iters []Interface, startKey, endKey []byte) (Interface, 
 
 // MergingIteratorParams holds all parameters for creating a NewMergingIteratorWithTombstones.
 type MergingIteratorParams struct {
-	Iters                []Interface
+	Iters                []core.IteratorInterface[*core.IteratorNode]
 	StartKey             []byte
 	EndKey               []byte
 	Order                core.SortOrder
@@ -126,7 +116,7 @@ type MergingIteratorParams struct {
 }
 
 // NewMergingIteratorWithTombstones creates a new MergingIterator that is aware of tombstones.
-func NewMergingIteratorWithTombstones(params MergingIteratorParams) (Interface, error) {
+func NewMergingIteratorWithTombstones(params MergingIteratorParams) (core.IteratorInterface[*core.IteratorNode], error) {
 	mi := &MergingIterator{
 		iters:                params.Iters,
 		startKey:             params.StartKey,
@@ -224,8 +214,13 @@ func (mi *MergingIterator) Next() bool {
 }
 
 // At returns the current key, value, entry type, and sequence number.
-func (mi *MergingIterator) At() ([]byte, []byte, core.EntryType, uint64) {
-	return mi.currentKey, mi.currentValue, mi.currentEntryType, mi.currentSeqNum
+func (mi *MergingIterator) At() (*core.IteratorNode, error) {
+	return &core.IteratorNode{
+		Key:       mi.currentKey,
+		Value:     mi.currentValue,
+		EntryType: mi.currentEntryType,
+		SeqNum:    mi.currentSeqNum,
+	}, nil
 }
 
 func (mi *MergingIterator) Error() error { return mi.err }
@@ -300,8 +295,12 @@ func (mi *MergingIterator) getNextCandidateFromHeap() (*mergingIteratorItem, err
 // newMergingIteratorItem creates a new item for the heap.
 // It copies the key and value from the underlying iterator to ensure they are safe
 // from buffer reuse, and it pre-parses the key components for performance.
-func newMergingIteratorItem(iter Interface, extractSeriesKeyFunc SeriesKeyExtractorFunc, decodeTsFunc func([]byte) (int64, error)) (*mergingIteratorItem, error) {
-	key, value, entryType, seqNum := iter.At()
+func newMergingIteratorItem(iter core.IteratorInterface[*core.IteratorNode], extractSeriesKeyFunc SeriesKeyExtractorFunc, decodeTsFunc func([]byte) (int64, error)) (*mergingIteratorItem, error) {
+	cur, err := iter.At()
+	if err != nil {
+		return nil, err
+	}
+	key, value, entryType, seqNum := cur.Key, cur.Value, cur.EntryType, cur.SeqNum
 
 	// Key and Value must be copied because the underlying iterator's buffer is reused on the next call to Next().
 	keyCopy := make([]byte, len(key))
@@ -335,7 +334,7 @@ func newMergingIteratorItem(iter Interface, extractSeriesKeyFunc SeriesKeyExtrac
 type EmptyIterator struct{}
 
 // NewEmptyIterator creates a new empty iterator.
-func NewEmptyIterator() Interface {
+func NewEmptyIterator() core.IteratorInterface[*core.IteratorNode] {
 	return &EmptyIterator{}
 }
 
@@ -345,8 +344,13 @@ func (it *EmptyIterator) Next() bool {
 }
 
 // At returns nil values.
-func (it *EmptyIterator) At() ([]byte, []byte, core.EntryType, uint64) {
-	return nil, nil, 0, 0
+func (it *EmptyIterator) At() (*core.IteratorNode, error) {
+	return &core.IteratorNode{
+		Key:       nil,
+		Value:     nil,
+		EntryType: 0,
+		SeqNum:    0,
+	}, nil
 }
 
 // Error always returns nil.

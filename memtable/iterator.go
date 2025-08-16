@@ -20,6 +20,8 @@ type MemtableIterator struct {
 	err      error
 }
 
+var _ core.IteratorInterface[*core.IteratorNode] = (*MemtableIterator)(nil)
+
 // skipToLatestVersionOfCurrentKeyDescending advances the iterator to the latest version
 // (highest PointID) of the key it is currently on. This is only used for descending iteration.
 func (it *MemtableIterator) skipToLatestVersionOfCurrentKeyDescending() {
@@ -172,11 +174,20 @@ func (it *MemtableIterator) pointID() uint64 {
 	return it.iter.Key().PointID
 }
 
-func (it *MemtableIterator) At() ([]byte, []byte, core.EntryType, uint64) {
-	if !it.valid {
+func (it *MemtableIterator) At() (*core.IteratorNode, error) {
+	/*if !it.valid {
 		return nil, nil, 0, 0
 	}
-	return it.key(), it.value(), it.entryType(), it.pointID()
+	return it.key(), it.value(), it.entryType(), it.pointID()*/
+	if !it.valid {
+		return &core.IteratorNode{}, nil
+	}
+	return &core.IteratorNode{
+		Key:       it.key(),
+		Value:     it.value(),
+		EntryType: it.entryType(),
+		SeqNum:    it.pointID(),
+	}, nil
 }
 
 // Error returns the error.

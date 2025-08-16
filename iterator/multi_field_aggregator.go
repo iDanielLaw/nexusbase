@@ -87,7 +87,7 @@ func (a *aggregateAccumulator) Add(val core.PointValue) error {
 // MultiFieldAggregatingIterator aggregates multiple fields from an underlying iterator.
 // It consumes the entire underlying iterator on the first call to Next() and produces a single result.
 type MultiFieldAggregatingIterator struct {
-	underlying        Interface
+	underlying        core.IteratorInterface[*core.IteratorNode]
 	specs             []core.AggregationSpec
 	fieldAccumulators map[string]*aggregateAccumulator
 	starAccumulator   *aggregateAccumulator // For count(*)
@@ -98,7 +98,7 @@ type MultiFieldAggregatingIterator struct {
 }
 
 // NewMultiFieldAggregatingIterator creates a new iterator that aggregates multiple fields.
-func NewMultiFieldAggregatingIterator(underlying Interface, specs []core.AggregationSpec, resultKey []byte) (*MultiFieldAggregatingIterator, error) {
+func NewMultiFieldAggregatingIterator(underlying core.IteratorInterface[*core.IteratorNode], specs []core.AggregationSpec, resultKey []byte) (*MultiFieldAggregatingIterator, error) {
 	if len(specs) == 0 {
 		return nil, fmt.Errorf("no aggregation specs provided")
 	}
@@ -159,7 +159,12 @@ func (it *MultiFieldAggregatingIterator) Next() bool {
 	it.done = true
 
 	for it.underlying.Next() {
-		_, valueBytes, _, _ := it.underlying.At()
+		cur, err := it.underlying.At()
+		if err != nil {
+			it.err = err
+			return false
+		}
+		valueBytes := cur.Value
 
 		if len(valueBytes) == 0 {
 			continue
@@ -305,10 +310,15 @@ func (it *MultiFieldAggregatingIterator) prepareResult() {
 	}
 }
 
-func (it *MultiFieldAggregatingIterator) At() ([]byte, []byte, core.EntryType, uint64) {
+func (it *MultiFieldAggregatingIterator) At() (*core.IteratorNode, error) {
 	// The result of an aggregation is a new event-like structure.
 	// Using EntryTypePutEvent is consistent with how other data is represented.
-	return it.resultKey, it.resultValue, core.EntryTypePutEvent, 0
+	// return it.resultKey, it.resultValue, core.EntryTypePutEvent, 0
+	return &core.IteratorNode{
+		Key:       it.resultKey,
+		Value:     it.resultValue,
+		EntryType: core.EntryTypePutEvent,
+	}, nil
 }
 
 func (it *MultiFieldAggregatingIterator) Error() error {

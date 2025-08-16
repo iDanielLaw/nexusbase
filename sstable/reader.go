@@ -14,7 +14,6 @@ import (
 	"github.com/INLOpen/nexusbase/cache" // Import the cache package
 	"github.com/INLOpen/nexusbase/core"  // Import core for EntryType, CompressionType
 	"github.com/INLOpen/nexusbase/filter"
-	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/sys"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -469,7 +468,7 @@ func (s *SSTable) decompressBlock(data []byte, compressionType core.CompressionT
 // Supports range scans [startKey, endKey).
 // Corresponds to FR4.7 and integrates with Block Cache (FR4.8).
 // The semaphore `sem` is optional and used to limit concurrency during block reads, primarily for compaction.
-func (s *SSTable) NewIterator(startKey, endKey []byte, sem chan struct{}, order core.SortOrder) (iterator.Interface, error) {
+func (s *SSTable) NewIterator(startKey, endKey []byte, sem chan struct{}, order core.SortOrder) (core.IteratorInterface[*core.IteratorNode], error) {
 	// FR4.7: Create and return an instance of sstableIterator.
 	// The iterator will handle seeking to the startKey using the index internally
 	// and will use s.blockCache for reading blocks (FR4.8).
@@ -623,7 +622,9 @@ func (s *SSTable) VerifyBloomFilterIntegrity() []error {
 	}
 	iter, _ := NewSSTableIterator(s, nil, nil, nil, core.Ascending) // Full scan without semaphore
 	for iter.Next() {
-		key, _, _, _ := iter.At()
+		// key, _, _, _ := iter.At()
+		cur, _ := iter.At()
+		key := cur.Key
 		if !s.filter.Contains(key) {
 			errs = append(errs, fmt.Errorf("SSTable ID %d: Bloom filter returned false negative for key %s", s.id, string(key)))
 		}

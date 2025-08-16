@@ -335,7 +335,11 @@ func TestMultiFieldDownsamplingIterator(t *testing.T) {
 			}
 
 			for downsampler.Next() {
-				key, value, _, _ := downsampler.At()
+				// key, value, _, _ := downsampler.At()
+				cur, _ := downsampler.At()
+				key := cur.Key
+				value := cur.Value
+
 				ts, _ := core.DecodeTimestamp(key[len(key)-8:])
 				seriesKey := key[:len(key)-8]
 

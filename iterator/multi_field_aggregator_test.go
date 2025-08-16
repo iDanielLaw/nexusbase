@@ -231,7 +231,9 @@ func TestMultiFieldAggregatingIterator(t *testing.T) {
 				assert.Contains(t, aggIter.Error().Error(), tc.expectedErr.Error())
 				return // Test ends here for error cases
 			}
-			_, resultValue, _, _ := aggIter.At()
+			// _, resultValue, _, _ := aggIter.At()
+			cur, _ := aggIter.At()
+			resultValue := cur.Value
 
 			require.NoError(t, aggIter.Error())
 			require.True(t, hasNext, "Next() should return true for the single aggregated result")

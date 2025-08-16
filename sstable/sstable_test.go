@@ -64,6 +64,7 @@ func (m *mockFile) Close() error {
 	}
 	return nil
 }
+
 // mockFilter is a simple mock for the filter.Filter interface for testing.
 type mockFilter struct {
 	data map[string]bool
@@ -926,7 +927,12 @@ func TestSSTableIterator_New(t *testing.T) {
 
 		var actualEntries []testEntry
 		for iter.Next() {
-			key, value, entryType, pointID := iter.At()
+			// key, value, entryType, pointID := iter.At()
+			cur, _ := iter.At()
+			key := cur.Key
+			value := cur.Value
+			entryType := cur.EntryType
+			pointID := cur.SeqNum
 			actualEntries = append(actualEntries, testEntry{
 				Key:       append([]byte(nil), key...),
 				Value:     append([]byte(nil), value...),
@@ -954,7 +960,13 @@ func TestSSTableIterator_New(t *testing.T) {
 
 		var actualEntries []testEntry
 		for iter.Next() {
-			key, value, entryType, pointID := iter.At()
+			// key, value, entryType, pointID := iter.At()
+			cur, _ := iter.At()
+			key := cur.Key
+			value := cur.Value
+			entryType := cur.EntryType
+			pointID := cur.SeqNum
+
 			actualEntries = append(actualEntries, testEntry{
 				Key:       append([]byte(nil), key...),
 				Value:     append([]byte(nil), value...),
@@ -989,7 +1001,13 @@ func TestSSTableIterator_New(t *testing.T) {
 
 		var actualEntries []testEntry
 		for iter.Next() {
-			key, value, entryType, pointID := iter.At()
+			// key, value, entryType, pointID := iter.At()
+			cur, _ := iter.At()
+			key := cur.Key
+			value := cur.Value
+			entryType := cur.EntryType
+			pointID := cur.SeqNum
+
 			actualEntries = append(actualEntries, testEntry{
 				Key:       append([]byte(nil), key...),
 				Value:     append([]byte(nil), value...),
@@ -1024,7 +1042,10 @@ func TestSSTableIterator_New(t *testing.T) {
 		defer iter.Close()
 
 		if iter.Next() {
-			key, _, _, _ := iter.At()
+			// key, _, _, _ := iter.At()
+			cur, _ := iter.At()
+			key := cur.Key
+
 			t.Errorf("Expected no entries for empty range, but got one: Key=%s", string(key))
 		}
 		if err := iter.Error(); err != nil {
@@ -1042,7 +1063,10 @@ func TestSSTableIterator_New(t *testing.T) {
 		defer iter.Close()
 
 		if iter.Next() {
-			key, _, _, _ := iter.At()
+			// key, _, _, _ := iter.At()
+			cur, _ := iter.At()
+			key := cur.Key
+
 			t.Errorf("Expected no entries for invalid range (start > end), but got one: Key=%s", string(key))
 		}
 		if err := iter.Error(); err != nil {

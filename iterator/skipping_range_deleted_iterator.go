@@ -15,7 +15,7 @@ type RangeDeletedChecker func(seriesKey []byte, timestamp int64, dataPointSeqNum
 // SkippingRangeDeletedIterator wraps an existing iterator and skips entries
 // that are covered by a range tombstone.
 type SkippingRangeDeletedIterator struct {
-	underlying           Interface
+	underlying           core.IteratorInterface[*core.IteratorNode]
 	isRangeDeleted       RangeDeletedChecker
 	extractSeriesKeyFunc SeriesKeyExtractorFunc      // To extract series part from data point key
 	decodeTsFunc         func([]byte) (int64, error) // To decode timestamp from data point key, now returns error
@@ -24,11 +24,11 @@ type SkippingRangeDeletedIterator struct {
 
 // NewSkippingRangeDeletedIterator creates a new iterator that skips range-deleted entries.
 func NewSkippingRangeDeletedIterator(
-	underlying Interface,
+	underlying core.IteratorInterface[*core.IteratorNode],
 	checker RangeDeletedChecker,
 	extractor SeriesKeyExtractorFunc,
 	decodeTs func([]byte) (int64, error),
-) Interface {
+) core.IteratorInterface[*core.IteratorNode] {
 	return &SkippingRangeDeletedIterator{
 		underlying:           underlying,
 		isRangeDeleted:       checker,
@@ -43,28 +43,31 @@ func (it *SkippingRangeDeletedIterator) Next() bool {
 		return false
 	}
 	for it.underlying.Next() {
-		dataPointKey, _, _, dataPointSeqNum := it.underlying.At()
-
+		cur, err := it.underlying.At()
+		if err != nil {
+			it.err = err
+			return false
+		}
 		// Extract series identifier from the data point key
 
-		seriesKeyBytes, extractErr := it.extractSeriesKeyFunc(dataPointKey)
+		seriesKeyBytes, extractErr := it.extractSeriesKeyFunc(cur.Key)
 		if extractErr != nil {
 			it.err = fmt.Errorf("skipping_range_deleted_iterator: %w", extractErr)
 			return false
 		}
 
 		// Timestamp is the last 8 bytes of the dataPointKey
-		if len(dataPointKey) < 8 { // Should be caught by extractSeriesKeyFunc ideally
-			it.err = fmt.Errorf("skipping_range_deleted_iterator: key too short to contain timestamp: %x", dataPointKey)
+		if len(cur.Key) < 8 { // Should be caught by extractSeriesKeyFunc ideally
+			it.err = fmt.Errorf("skipping_range_deleted_iterator: key too short to contain timestamp: %x", cur.Key)
 			return false
 		}
-		timestamp, decodeErr := it.decodeTsFunc(dataPointKey[len(dataPointKey)-8:])
+		timestamp, decodeErr := it.decodeTsFunc(cur.Key[len(cur.Key)-8:])
 		if decodeErr != nil {
 			it.err = fmt.Errorf("skipping_range_deleted_iterator: failed to decode timestamp: %w", decodeErr)
 			return false
 		}
 
-		if !it.isRangeDeleted(seriesKeyBytes, timestamp, dataPointSeqNum) {
+		if !it.isRangeDeleted(seriesKeyBytes, timestamp, cur.SeqNum) {
 			return true // Found an entry not covered by a range tombstone
 		}
 		// If covered by range tombstone, skip it and try next.
@@ -73,7 +76,7 @@ func (it *SkippingRangeDeletedIterator) Next() bool {
 	return false // Underlying iterator is exhausted or an error occurred
 }
 
-func (it *SkippingRangeDeletedIterator) At() ([]byte, []byte, core.EntryType, uint64) {
+func (it *SkippingRangeDeletedIterator) At() (*core.IteratorNode, error) {
 	return it.underlying.At()
 }
 

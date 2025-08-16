@@ -264,7 +264,12 @@ func processQueryIterator(iter core.QueryResultIteratorInterface) ([]QueryResult
 	for iter.Next() {
 		// Get the raw key for the cursor *before* decoding the item.
 		// This is crucial for pagination as the raw key is the source of truth for the cursor.
-		rawKey, _, _, _ := iter.UnderlyingAt()
+		// rawKey, _, _, _ := iter.UnderlyingAt()
+		cur, err := iter.UnderlyingAt()
+		if err != nil {
+			return nil, nil, err
+		}
+		rawKey := cur.Key
 		if rawKey != nil {
 			// This copy is important because the underlying buffer might be reused by the iterator.
 			lastKey = make([]byte, len(rawKey))

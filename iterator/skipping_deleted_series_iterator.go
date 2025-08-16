@@ -17,14 +17,14 @@ type SeriesKeyExtractorFunc func(dataPointKey []byte) ([]byte, error)
 // provided the data point's sequence number is older than or equal to
 // the deletion sequence number.
 type SkippingDeletedSeriesIterator struct {
-	underlying           Interface
+	underlying           core.IteratorInterface[*core.IteratorNode]
 	isSeriesDeleted      SeriesDeletedChecker
 	extractSeriesKeyFunc SeriesKeyExtractorFunc // Function to extract series key
 	err                  error
 }
 
 // NewSkippingDeletedSeriesIterator creates a new iterator that skips deleted series.
-func NewSkippingDeletedSeriesIterator(underlying Interface, checker SeriesDeletedChecker, extractor SeriesKeyExtractorFunc) Interface {
+func NewSkippingDeletedSeriesIterator(underlying core.IteratorInterface[*core.IteratorNode], checker SeriesDeletedChecker, extractor SeriesKeyExtractorFunc) core.IteratorInterface[*core.IteratorNode] {
 	return &SkippingDeletedSeriesIterator{
 		underlying:           underlying,
 		isSeriesDeleted:      checker,
@@ -38,17 +38,20 @@ func (it *SkippingDeletedSeriesIterator) Next() bool {
 		return false
 	}
 	for it.underlying.Next() {
-		dataPointKey, _, _, dataPointSeqNum := it.underlying.At()
+		cur, err := it.underlying.At()
+		if err != nil {
+			return false
+		}
 
 		// Extract series identifier from the data point key
 		// This seriesKeyBytes is metric_name<NULL>tags_string
-		seriesKeyBytes, extractErr := it.extractSeriesKeyFunc(dataPointKey)
+		seriesKeyBytes, extractErr := it.extractSeriesKeyFunc(cur.Key)
 		if extractErr != nil {
 			it.err = fmt.Errorf("skipping_deleted_series_iterator: %w", extractErr)
 			return false
 		}
 
-		if !it.isSeriesDeleted(seriesKeyBytes, dataPointSeqNum) {
+		if !it.isSeriesDeleted(seriesKeyBytes, cur.SeqNum) {
 			return true // Found a data point from a non-deleted series (or newer than deletion)
 		}
 		// If series is deleted and this data point is old enough, skip it.
@@ -57,7 +60,7 @@ func (it *SkippingDeletedSeriesIterator) Next() bool {
 	return false                   // Underlying iterator is exhausted or an error occurred
 }
 
-func (it *SkippingDeletedSeriesIterator) At() ([]byte, []byte, core.EntryType, uint64) {
+func (it *SkippingDeletedSeriesIterator) At() (*core.IteratorNode, error) {
 	return it.underlying.At()
 }
 

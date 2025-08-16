@@ -41,7 +41,7 @@ func TestMergingIterator_TombstoneHandling(t *testing.T) {
 		string(core.EncodeSeriesKeyWithString("range.deleted.series", nil)): []timeRange{{start: 100, end: 201, maxSeq: 1000}}, // Deletes if ts in [100, 201) and seqNum <= 1000
 	})
 	mergeParams := MergingIteratorParams{
-		Iters:                []Interface{iter1, iter2, iter3},
+		Iters:                []core.IteratorInterface[*core.IteratorNode]{iter1, iter2, iter3},
 		StartKey:             nil,
 		EndKey:               nil,
 		IsSeriesDeleted:      seriesDeleter,
@@ -66,7 +66,13 @@ func TestMergingIterator_TombstoneHandling(t *testing.T) {
 	var actualResults []*testPoint
 
 	for mergingIter.Next() {
-		key, value, entryType, seqNo := mergingIter.At()
+		// key, value, entryType, seqNo := mergingIter.At()
+		cur, _ := mergingIter.At()
+		key := cur.Key
+		value := cur.Value
+		entryType := cur.EntryType
+		seqNo := cur.SeqNum
+
 		// Decode the key/value back into a testPoint for comparison
 		metricBytes, err := extractSeriesKey(key)
 		require.NoError(t, err)

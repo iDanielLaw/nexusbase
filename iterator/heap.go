@@ -3,18 +3,29 @@ package iterator
 import (
 	"bytes"
 	"container/heap"
+	"fmt"
+
+	"github.com/INLOpen/nexusbase/core"
 )
 
 // minHeap implements heap.Interface for a slice of Iterators.
 // It is used to efficiently find the iterator with the smallest current key.
-type minHeap []Interface
+type minHeap []core.IteratorInterface[*core.IteratorNode]
 
 func (h minHeap) Len() int { return len(h) }
 
 func (h minHeap) Less(i, j int) bool {
 	// Compare keys first
-	keyI, _, _, pointIDI := h[i].At()
-	keyJ, _, _, pointIDJ := h[j].At()
+	curA, errA := h[i].At()
+	if errA != nil {
+		panic(fmt.Sprintf("iterator in heap has error: %v", errA))
+	}
+	curB, errB := h[j].At()
+	if errB != nil {
+		panic(fmt.Sprintf("iterator in heap has error: %v", errB))
+	}
+	keyI, _, _, pointIDI := curA.Key, curA.Value, curA.EntryType, curA.SeqNum
+	keyJ, _, _, pointIDJ := curB.Key, curB.Value, curB.EntryType, curB.SeqNum
 	keyCmp := bytes.Compare(keyI, keyJ)
 	if keyCmp != 0 {
 		return keyCmp < 0
@@ -29,7 +40,7 @@ func (h minHeap) Swap(i, j int) {
 }
 
 func (h *minHeap) Push(x interface{}) {
-	*h = append(*h, x.(Interface))
+	*h = append(*h, x.(core.IteratorInterface[*core.IteratorNode]))
 }
 
 func (h *minHeap) Pop() interface{} {
@@ -42,7 +53,7 @@ func (h *minHeap) Pop() interface{} {
 
 // NewMinHeap creates and initializes a new min-heap from a slice of iterators.
 // It filters out any iterators that are already exhausted.
-func NewMinHeap(iters []Interface) *minHeap {
+func NewMinHeap(iters []core.IteratorInterface[*core.IteratorNode]) *minHeap {
 	// Filter out iterators that are already invalid
 	validIters := make(minHeap, 0, len(iters))
 	for _, iter := range iters {
@@ -64,8 +75,11 @@ func (h *minHeap) Key() []byte {
 	if h.Len() == 0 {
 		return nil
 	}
-	key, _, _, _ := (*h)[0].At()
-	return key
+	cur, err := (*h)[0].At()
+	if err != nil {
+		panic(fmt.Sprintf("iterator at top of heap has error: %v", err))
+	}
+	return cur.Key
 }
 
 // Value returns the value of the iterator at the top of the heap.
@@ -73,8 +87,11 @@ func (h *minHeap) Value() []byte {
 	if h.Len() == 0 {
 		return nil
 	}
-	_, value, _, _ := (*h)[0].At()
-	return value
+	cur, err := (*h)[0].At()
+	if err != nil {
+		panic(fmt.Sprintf("iterator at top of heap has error: %v", err))
+	}
+	return cur.Value
 }
 
 // Next advances the iterator at the top of the heap to its next element.
