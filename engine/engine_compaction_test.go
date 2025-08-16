@@ -298,7 +298,7 @@ func createDummySSTableWithTombstones(t *testing.T, eng StorageEngineInterface, 
 // entries with the expected data.
 func verifySSTableContent(t *testing.T, tables []*sstable.SSTable, expectedData map[string]string, eng StorageEngineInterface) {
 	t.Helper()
-	var iters []iterator.Interface
+	var iters []core.Interface
 	for _, tbl := range tables { // Pass nil for semaphore in test verification
 		iter, err := tbl.NewIterator(nil, nil, nil, core.Ascending)
 		if err != nil {

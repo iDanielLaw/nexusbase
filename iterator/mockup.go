@@ -28,7 +28,7 @@ type mockIterator struct {
 	err    error
 }
 
-var _ Interface = (*mockIterator)(nil)
+var _ core.Interface = (*mockIterator)(nil)
 
 func (m *mockIterator) Next() bool {
 	// A mid-stream error is typically discovered upon trying to read the next item.

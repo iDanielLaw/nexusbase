@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/INLOpen/nexusbase/iterator"
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sstable"
 )
 
@@ -54,14 +54,14 @@ func ApproximatelyEqual(a, b float64) bool {
 
 // latencyObservingIterator wraps an iterator to observe latency upon Close.
 type LatencyObservingIterator struct {
-	iterator.Interface
+	core.Interface
 	engine             *storageEngine
 	startTime          time.Time
 	aggregations       []string
-	underlyingIterator iterator.Interface
+	underlyingIterator core.Interface
 }
 
-func NewLatencyObservingIterator(iter iterator.Interface, engine *storageEngine, startTime time.Time, aggregations []string) iterator.Interface {
+func NewLatencyObservingIterator(iter core.Interface, engine *storageEngine, startTime time.Time, aggregations []string) core.Interface {
 	return &LatencyObservingIterator{
 		Interface:          iter,
 		engine:             engine,

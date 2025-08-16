@@ -10,13 +10,13 @@ import (
 // This is the core mechanism for cursor-based pagination, ensuring the last item of the previous
 // page is not included in the current page.
 type SkippingIterator struct {
-	underlying Interface
+	underlying core.Interface
 	skipKey    []byte
 	skipped    bool
 }
 
 // NewSkippingIterator creates a new iterator that wraps another and skips a specific key.
-func NewSkippingIterator(iter Interface, keyToSkip []byte) Interface {
+func NewSkippingIterator(iter core.Interface, keyToSkip []byte) core.Interface {
 	return &SkippingIterator{
 		underlying: iter,
 		skipKey:    keyToSkip,

@@ -12,7 +12,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core" // For core.EntryType
-	"github.com/INLOpen/nexusbase/iterator"
 )
 
 func writeTestSSTable(t *testing.T, dir string, entries []testEntry, fileID uint64, compressor core.Compressor, blockSize int) (*SSTable, string, int64) {
@@ -500,7 +499,7 @@ func TestSSTable_Compression_IteratorEdgeCases(t *testing.T) {
 }
 
 // testIteratorRange is a helper function to reduce code duplication for range scan tests.
-func testIteratorRange(t *testing.T, iter iterator.Interface, expectedEntries []testEntry) {
+func testIteratorRange(t *testing.T, iter core.Interface, expectedEntries []testEntry) {
 	t.Helper()
 
 	var actualEntries []testEntry
@@ -522,7 +521,7 @@ func testIteratorRange(t *testing.T, iter iterator.Interface, expectedEntries []
 }
 
 // copyTestEntryFromIterator creates a deep copy of a testEntry from an iterator.
-func copyTestEntryFromIterator(it iterator.Interface) testEntry {
+func copyTestEntryFromIterator(it core.Interface) testEntry {
 	key, value, entryType, pointID := it.At()
 	return testEntry{
 		Key:       append([]byte(nil), key...),

@@ -7,7 +7,6 @@ import (
 	"bytes"
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/iterator"
 	// "testing" // Temporary for logging in tests
 )
 
@@ -52,7 +51,7 @@ type sstableIterator struct {
 // NewSSTableIterator creates a new iterator for the given SSTable and key range.
 // This function is typically called by SSTable.NewIterator.
 // Corresponds to FR4.7.
-func NewSSTableIterator(s *SSTable, startKey, endKey []byte, sem chan struct{}, order core.SortOrder) (iterator.Interface, error) {
+func NewSSTableIterator(s *SSTable, startKey, endKey []byte, sem chan struct{}, order core.SortOrder) (core.Interface, error) {
 	// TODO (FR4.7, FR4.8): Implementation details:
 	it := &sstableIterator{
 		sstable:           s,

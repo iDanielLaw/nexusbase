@@ -9,7 +9,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,7 +100,7 @@ func setupIteratorTest(t *testing.T) (*SSTable, []testEntry) {
 }
 
 // collectIteratorResults drains an iterator and returns all its entries.
-func collectIteratorResults(t *testing.T, it iterator.Interface) []testEntry {
+func collectIteratorResults(t *testing.T, it core.Interface) []testEntry {
 	t.Helper()
 	var results []testEntry
 	for it.Next() {

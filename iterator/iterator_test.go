@@ -19,14 +19,14 @@ import (
 func TestMergingIterator_WithTombstones(t *testing.T) {
 	testCases := []struct {
 		name           string
-		iterators      []Interface
+		iterators      []core.Interface
 		seriesDeleter  SeriesDeletedChecker
 		rangeDeleter   RangeDeletedChecker
 		expectedResult []*testPoint
 	}{
 		{
 			name: "Simple merge with no tombstones",
-			iterators: []Interface{
+			iterators: []core.Interface{
 				&mockIterator{
 					points: []*testPoint{
 						makeTestPoint(t, "seriesA", nil, 100, map[string]interface{}{"value": "v1"}, core.EntryTypePutEvent, 1),
@@ -49,7 +49,7 @@ func TestMergingIterator_WithTombstones(t *testing.T) {
 		},
 		{
 			name: "Point tombstone hides older value",
-			iterators: []Interface{
+			iterators: []core.Interface{
 				&mockIterator{
 					points: []*testPoint{
 						makeTestPoint(t, "seriesA", nil, 100, map[string]interface{}{"value": "v1"}, core.EntryTypePutEvent, 1),
@@ -67,7 +67,7 @@ func TestMergingIterator_WithTombstones(t *testing.T) {
 		},
 		{
 			name: "Point tombstone is hidden by newer value",
-			iterators: []Interface{
+			iterators: []core.Interface{
 				&mockIterator{
 					points: []*testPoint{
 						makeTestPoint(t, "seriesA", nil, 100, map[string]interface{}{"value": "v2"}, core.EntryTypePutEvent, 2),
@@ -87,7 +87,7 @@ func TestMergingIterator_WithTombstones(t *testing.T) {
 		},
 		{
 			name: "Series tombstone hides all points in series",
-			iterators: []Interface{
+			iterators: []core.Interface{
 				&mockIterator{
 					points: []*testPoint{
 						makeTestPoint(t, "seriesA", nil, 100, map[string]interface{}{"value": "v1"}, core.EntryTypePutEvent, 1),
@@ -106,7 +106,7 @@ func TestMergingIterator_WithTombstones(t *testing.T) {
 		},
 		{
 			name: "Range tombstone hides points in range",
-			iterators: []Interface{
+			iterators: []core.Interface{
 				&mockIterator{
 					points: []*testPoint{
 						makeTestPoint(t, "seriesA", nil, 100, map[string]interface{}{"value": "v1"}, core.EntryTypePutEvent, 1),
@@ -126,7 +126,7 @@ func TestMergingIterator_WithTombstones(t *testing.T) {
 		},
 		{
 			name: "Combined tombstones",
-			iterators: []Interface{
+			iterators: []core.Interface{
 				&mockIterator{
 					points: []*testPoint{
 						makeTestPoint(t, "seriesA", nil, 100, map[string]interface{}{"value": "vA"}, core.EntryTypePutEvent, 1), // Kept
@@ -236,7 +236,7 @@ func TestMergingIterator_DescendingOrder(t *testing.T) {
 
 	// Create the merging iterator with DESCENDING order
 	params := MergingIteratorParams{
-		Iters:                []Interface{iter1, iter2, iter3},
+		Iters:                []core.Interface{iter1, iter2, iter3},
 		Order:                core.Descending,
 		IsSeriesDeleted:      seriesDeletedChecker(nil), // No deletions for this test
 		IsRangeDeleted:       rangeDeletedChecker(nil),  // No deletions for this test

@@ -15,7 +15,7 @@ type RangeDeletedChecker func(seriesKey []byte, timestamp int64, dataPointSeqNum
 // SkippingRangeDeletedIterator wraps an existing iterator and skips entries
 // that are covered by a range tombstone.
 type SkippingRangeDeletedIterator struct {
-	underlying           Interface
+	underlying           core.Interface
 	isRangeDeleted       RangeDeletedChecker
 	extractSeriesKeyFunc SeriesKeyExtractorFunc      // To extract series part from data point key
 	decodeTsFunc         func([]byte) (int64, error) // To decode timestamp from data point key, now returns error
@@ -24,11 +24,11 @@ type SkippingRangeDeletedIterator struct {
 
 // NewSkippingRangeDeletedIterator creates a new iterator that skips range-deleted entries.
 func NewSkippingRangeDeletedIterator(
-	underlying Interface,
+	underlying core.Interface,
 	checker RangeDeletedChecker,
 	extractor SeriesKeyExtractorFunc,
 	decodeTs func([]byte) (int64, error),
-) Interface {
+) core.Interface {
 	return &SkippingRangeDeletedIterator{
 		underlying:           underlying,
 		isRangeDeleted:       checker,

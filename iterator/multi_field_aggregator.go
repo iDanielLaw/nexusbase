@@ -87,7 +87,7 @@ func (a *aggregateAccumulator) Add(val core.PointValue) error {
 // MultiFieldAggregatingIterator aggregates multiple fields from an underlying iterator.
 // It consumes the entire underlying iterator on the first call to Next() and produces a single result.
 type MultiFieldAggregatingIterator struct {
-	underlying        Interface
+	underlying        core.Interface
 	specs             []core.AggregationSpec
 	fieldAccumulators map[string]*aggregateAccumulator
 	starAccumulator   *aggregateAccumulator // For count(*)
@@ -98,7 +98,7 @@ type MultiFieldAggregatingIterator struct {
 }
 
 // NewMultiFieldAggregatingIterator creates a new iterator that aggregates multiple fields.
-func NewMultiFieldAggregatingIterator(underlying Interface, specs []core.AggregationSpec, resultKey []byte) (*MultiFieldAggregatingIterator, error) {
+func NewMultiFieldAggregatingIterator(underlying core.Interface, specs []core.AggregationSpec, resultKey []byte) (*MultiFieldAggregatingIterator, error) {
 	if len(specs) == 0 {
 		return nil, fmt.Errorf("no aggregation specs provided")
 	}

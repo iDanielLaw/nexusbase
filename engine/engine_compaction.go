@@ -662,7 +662,7 @@ func (cm *CompactionManager) writeCompactedEntry(
 	return nil
 }
 
-func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables []*sstable.SSTable) (iterator.Interface, error) {
+func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables []*sstable.SSTable) (core.Interface, error) {
 	_, span := cm.tracer.Start(ctx, "CompactionManager.createMergingIterator")
 	defer span.End()
 
@@ -670,7 +670,7 @@ func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables [
 		return iterator.NewEmptyIterator(), nil
 	}
 
-	var iters []iterator.Interface
+	var iters []core.Interface
 	for _, table := range tables {
 		iter, err := table.NewIterator(nil, nil, cm.blockReadSemaphore, core.Ascending)
 		if err != nil {
@@ -698,7 +698,7 @@ func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables [
 
 func (cm *CompactionManager) processMergedEntries(
 	ctx context.Context,
-	mergedIter iterator.Interface,
+	mergedIter core.Interface,
 	retentionCutoffTime int64,
 	currentWriter *core.SSTableWriterInterface,
 	newSSTables *[]*sstable.SSTable,

@@ -3,11 +3,13 @@ package iterator
 import (
 	"bytes"
 	"container/heap"
+
+	"github.com/INLOpen/nexusbase/core"
 )
 
 // minHeap implements heap.Interface for a slice of Iterators.
 // It is used to efficiently find the iterator with the smallest current key.
-type minHeap []Interface
+type minHeap []core.Interface
 
 func (h minHeap) Len() int { return len(h) }
 
@@ -29,7 +31,7 @@ func (h minHeap) Swap(i, j int) {
 }
 
 func (h *minHeap) Push(x interface{}) {
-	*h = append(*h, x.(Interface))
+	*h = append(*h, x.(core.Interface))
 }
 
 func (h *minHeap) Pop() interface{} {
@@ -42,7 +44,7 @@ func (h *minHeap) Pop() interface{} {
 
 // NewMinHeap creates and initializes a new min-heap from a slice of iterators.
 // It filters out any iterators that are already exhausted.
-func NewMinHeap(iters []Interface) *minHeap {
+func NewMinHeap(iters []core.Interface) *minHeap {
 	// Filter out iterators that are already invalid
 	validIters := make(minHeap, 0, len(iters))
 	for _, iter := range iters {

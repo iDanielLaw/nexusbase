@@ -17,14 +17,14 @@ type SeriesKeyExtractorFunc func(dataPointKey []byte) ([]byte, error)
 // provided the data point's sequence number is older than or equal to
 // the deletion sequence number.
 type SkippingDeletedSeriesIterator struct {
-	underlying           Interface
+	underlying           core.Interface
 	isSeriesDeleted      SeriesDeletedChecker
 	extractSeriesKeyFunc SeriesKeyExtractorFunc // Function to extract series key
 	err                  error
 }
 
 // NewSkippingDeletedSeriesIterator creates a new iterator that skips deleted series.
-func NewSkippingDeletedSeriesIterator(underlying Interface, checker SeriesDeletedChecker, extractor SeriesKeyExtractorFunc) Interface {
+func NewSkippingDeletedSeriesIterator(underlying core.Interface, checker SeriesDeletedChecker, extractor SeriesKeyExtractorFunc) core.Interface {
 	return &SkippingDeletedSeriesIterator{
 		underlying:           underlying,
 		isSeriesDeleted:      checker,

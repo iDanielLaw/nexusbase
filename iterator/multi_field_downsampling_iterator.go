@@ -91,7 +91,7 @@ func (a *downsampleAccumulator) Add(val core.PointValue) error {
 
 // MultiFieldDownsamplingIterator aggregates multiple fields over time windows.
 type MultiFieldDownsamplingIterator struct {
-	underlying Interface
+	underlying core.Interface
 	specs      []core.AggregationSpec
 	interval   time.Duration
 
@@ -123,7 +123,7 @@ type MultiFieldDownsamplingIterator struct {
 }
 
 // NewMultiFieldDownsamplingIterator creates a new downsampling iterator.
-func NewMultiFieldDownsamplingIterator(iter Interface, specs []core.AggregationSpec, interval time.Duration, startTime, endTime int64, emitEmpty bool) (*MultiFieldDownsamplingIterator, error) {
+func NewMultiFieldDownsamplingIterator(iter core.Interface, specs []core.AggregationSpec, interval time.Duration, startTime, endTime int64, emitEmpty bool) (*MultiFieldDownsamplingIterator, error) {
 	if interval <= 0 {
 		return nil, fmt.Errorf("downsample interval must be positive")
 	}
