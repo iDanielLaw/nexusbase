@@ -751,6 +751,7 @@ func (pc *pruneContext) findPolicySnapshots(opts PruneOptions, clock utils.Clock
 		return t
 	}
 
+	var rootsToPrune []Info
 	for i, root := range validRoots {
 		// Rule 1: Keep if protected by the KeepN policy.
 		if opts.KeepN > 0 && i < opts.KeepN {
@@ -766,17 +767,14 @@ func (pc *pruneContext) findPolicySnapshots(opts PruneOptions, clock utils.Clock
 		}
 
 		// If we reach here, the chain is not protected and should be pruned.
-		// Collect all snapshots in this chain for pruning.
-		queue := []string{root.ID}
-		for len(queue) > 0 {
-			currentID := queue[0]
-			queue = queue[1:]
-			idsToPrune[currentID] = struct{}{}
-			if children, ok := pc.childrenMap[currentID]; ok {
-				queue = append(queue, children...)
-			}
-		}
+		rootsToPrune = append(rootsToPrune, root)
 	}
+
+	// Collect all snapshots from the chains that need to be pruned.
+	for _, root := range rootsToPrune {
+		pc.collectChainIDs(root.ID, idsToPrune)
+	}
+
 	return idsToPrune
 }
 
@@ -832,6 +830,19 @@ func (m *manager) Prune(ctx context.Context, snapshotsBaseDir string, opts Prune
 
 	// 3. Delete the identified snapshot directories
 	return m.deleteSnapshots(snapshotsBaseDir, allIDsToPrune)
+}
+
+// collectChainIDs adds all snapshot IDs in a chain, starting from rootID, to the given set.
+func (pc *pruneContext) collectChainIDs(rootID string, ids map[string]struct{}) {
+	queue := []string{rootID}
+	for len(queue) > 0 {
+		currentID := queue[0]
+		queue = queue[1:]
+		ids[currentID] = struct{}{}
+		if children, ok := pc.childrenMap[currentID]; ok {
+			queue = append(queue, children...)
+		}
+	}
 }
 
 // deleteSnapshots performs the file system deletion of the given snapshot IDs.

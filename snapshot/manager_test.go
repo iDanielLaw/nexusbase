@@ -2925,4 +2925,52 @@ func TestManager_Prune(t *testing.T) {
 		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_2_to_delete")) // The one that succeeded
 		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_3_to_keep"))     // The one that should be kept
 	})
+
+	t.Run("Complex_KeepN_Age_And_Broken", func(t *testing.T) {
+		// 1. Setup
+		ctx, manager, snapshotsBaseDir := setup(t)
+		now := time.Now()
+
+		// Chain 1 (Newest, Kept by KeepN=2)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_1", core.SnapshotTypeFull, "", now)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_1.1", core.SnapshotTypeIncremental, "full_1", now.Add(1*time.Minute))
+
+		// Chain 2 (Second newest, Kept by KeepN=2)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_2", core.SnapshotTypeFull, "", now.Add(-1*time.Hour))
+
+		// Chain 3 (Old, but kept by PruneOlderThan=25h because its newest part is newer than 25h ago)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_3", core.SnapshotTypeFull, "", now.Add(-26*time.Hour))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_3.1", core.SnapshotTypeIncremental, "full_3", now.Add(-24*time.Hour))
+
+		// Chain 4 (Old, pruned by PruneOlderThan=25h)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_4", core.SnapshotTypeFull, "", now.Add(-30*time.Hour))
+
+		// Chain 5 (Old, also pruned by PruneOlderThan=25h)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "full_5", core.SnapshotTypeFull, "", now.Add(-48*time.Hour))
+		createPruneTestSnapshot(t, snapshotsBaseDir, "incr_5.1", core.SnapshotTypeIncremental, "full_5", now.Add(-47*time.Hour))
+
+		// Broken Chain (Pruned by PruneBroken=true)
+		createPruneTestSnapshot(t, snapshotsBaseDir, "orphan_1", core.SnapshotTypeIncremental, "non_existent_parent", now)
+
+		// 2. Execution
+		opts := PruneOptions{
+			KeepN:          2,
+			PruneOlderThan: 25 * time.Hour,
+			PruneBroken:    true,
+		}
+		deletedIDs, err := manager.Prune(ctx, snapshotsBaseDir, opts)
+
+		// 3. Verification
+		require.NoError(t, err)
+		expectedDeleted := []string{"full_4", "full_5", "incr_5.1", "orphan_1"}
+		assert.ElementsMatch(t, expectedDeleted, deletedIDs)
+
+		// Check remaining/pruned files
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_1"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_2"))
+		assert.DirExists(t, filepath.Join(snapshotsBaseDir, "full_3"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_4"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "full_5"))
+		assert.NoDirExists(t, filepath.Join(snapshotsBaseDir, "orphan_1"))
+	})
 }
