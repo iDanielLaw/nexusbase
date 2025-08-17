@@ -1647,3 +1647,79 @@ func TestCompactionManager_PerformCompactionCycle_LN_Failure(t *testing.T) {
 	// The semaphore should have been released.
 	assert.Len(t, cm.lnCompactionSemaphore, 0, "LN compaction semaphore should be released after failure")
 }
+
+func TestCompactionManager_PerformCompactionCycle_L0_Failure(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// 1. Setup engine with a factory to inject a failing compactor
+	dummyEngine, err := NewStorageEngine(StorageEngineOptions{
+		DataDir:                   tempDir,
+		Logger:                    logger,
+		MaxLevels:                 5,
+		MaxL0Files:                2, // Trigger L0 compaction with 2 files
+		SSTableCompressor:         &compressors.NoCompressionCompressor{},
+		CompactionIntervalSeconds: 3600, // Disable auto compaction
+	})
+	require.NoError(t, err)
+
+	concreteEngine := dummyEngine.(*storageEngine)
+
+	simulatedError := errors.New("simulated L0 writer finish error")
+
+	concreteEngine.setCompactorFactory = func(seo StorageEngineOptions, se *storageEngine) (CompactionManagerInterface, error) {
+		cmParams := CompactionManagerParams{
+			LevelsManager: se.levelsManager,
+			DataDir:       se.sstDir,
+			Opts: CompactionOptions{
+				MaxL0Files:        2,
+				SSTableCompressor: &compressors.NoCompressionCompressor{},
+			},
+			Logger:               se.logger,
+			Tracer:               trace.NewNoopTracerProvider().Tracer("test"),
+			IsSeriesDeleted:      func(b []byte, u uint64) bool { return false },
+			IsRangeDeleted:       func(b []byte, i int64, u uint64) bool { return false },
+			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			FileRemover:          &realFileRemover{},
+			SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) {
+				return &MockSSTableWriter{
+					failFinish: true,
+					finishErr:  simulatedError,
+					filePath:   filepath.Join(se.sstDir, fmt.Sprintf("%d.sst.tmp", opts.ID)),
+				}, nil
+			},
+			Engine: se,
+		}
+		return NewCompactionManager(cmParams)
+	}
+
+	// 2. Start the engine
+	require.NoError(t, dummyEngine.Start())
+	t.Cleanup(func() { dummyEngine.Close() })
+
+	lm := concreteEngine.levelsManager
+	cm := concreteEngine.compactor.(*CompactionManager)
+	metrics := concreteEngine.metrics
+
+	// 3. Arrange state to trigger L0 compaction
+	l0Table1 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l0.fail.1"}})
+	l0Table2 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l0.fail.2"}})
+	lm.AddL0Table(l0Table1)
+	lm.AddL0Table(l0Table2)
+	require.Len(t, lm.GetTablesForLevel(0), 2, "L0 should have 2 tables initially")
+	require.Empty(t, lm.GetTablesForLevel(1), "L1 should be empty initially")
+	initialErrorCount := metrics.CompactionErrorsTotal.Value()
+
+	// 4. Act
+	cm.performCompactionCycle()
+
+	// 5. Assert
+	require.Eventually(t, func() bool {
+		return metrics.CompactionErrorsTotal.Value() > initialErrorCount
+	}, 2*time.Second, 20*time.Millisecond, "Timed out waiting for L0 compaction error metric to be incremented")
+
+	assert.Equal(t, initialErrorCount+1, metrics.CompactionErrorsTotal.Value(), "CompactionErrorsTotal should be incremented by 1")
+	assert.False(t, cm.l0CompactionActive.Load(), "l0CompactionActive should be false after failure")
+	assert.Len(t, lm.GetTablesForLevel(0), 2, "L0 should still contain its original tables after failed compaction")
+	assert.Empty(t, lm.GetTablesForLevel(1), "L1 should remain empty after failed compaction")
+}

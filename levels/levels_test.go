@@ -252,22 +252,73 @@ func TestLevelsManager_NeedsLevelNCompaction(t *testing.T) {
 }
 
 func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
-	lm, _ := NewLevelsManager(3, 2, 100, nil)
-	defer lm.Close()
+	t.Run("PicksCandidateWithMostOverlap", func(t *testing.T) {
+		// 1. Setup
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+		defer lm.Close()
 
-	assert.Nil(t, lm.PickCompactionCandidateForLevelN(1), "PickCompactionCandidateForLevelN should return nil for empty L1")
+		// 2. Arrange: Create SSTables
+		// L1 Tables
+		// Table A overlaps with a very large table in L2
+		l1_tableA := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("key_a"), []byte("v")}, {[]byte("key_c"), []byte("v")}}) // Range a-c
+		defer l1_tableA.Close()
+		// Table B overlaps with two small tables in L2
+		l1_tableB := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("key_m"), []byte("v")}, {[]byte("key_p"), []byte("v")}}) // Range m-p
+		defer l1_tableB.Close()
 
-	t1 := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("pick_a"), makeValue(50)}}) // Smaller
-	defer t1.Close()
-	t2 := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("pick_c"), makeValue(100)}}) // Larger
-	defer t2.Close()
-	t3 := newTestSSTable(t, 3, []struct{ key, value []byte }{{[]byte("pick_e"), makeValue(70)}})
-	defer t3.Close()
-	lm.levels[1].SetTables([]*sstable.SSTable{t1, t2, t3})
+		// L2 Tables
+		// Create Table X to be very large to maximize its overlap size
+		l2_tableX_large := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(2048)}}) // Overlaps with l1_tableA
+		defer l2_tableX_large.Close()
 
-	candidate := lm.PickCompactionCandidateForLevelN(1)
-	require.NotNil(t, candidate, "PickCompactionCandidateForLevelN should return a table for L1")
-	assert.Equal(t, t2.ID(), candidate.ID(), "PickCompactionCandidateForLevelN should pick the largest table")
+		// Create Table Y and Z to be small
+		l2_tableY := newTestSSTable(t, 11, []struct{ key, value []byte }{{[]byte("key_n"), makeValue(10)}}) // Overlaps with l1_tableB
+		defer l2_tableY.Close()
+		l2_tableZ := newTestSSTable(t, 12, []struct{ key, value []byte }{{[]byte("key_o"), makeValue(10)}}) // Overlaps with l1_tableB
+		defer l2_tableZ.Close()
+
+		// Set up the levels
+		// Overlap(A) = Size(X_large) = ~2KB+
+		// Overlap(B) = Size(Y) + Size(Z) = ~20 bytes + overhead
+		// We expect Table A to be chosen.
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+		lm.levels[2].SetTables([]*sstable.SSTable{l2_tableX_large, l2_tableY, l2_tableZ})
+
+		// 3. Act
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+
+		// 4. Assert
+		require.NotNil(t, candidate)
+		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick Table A with the most overlap size")
+	})
+
+	t.Run("PicksFirstCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+		defer lm.Close()
+
+		l1_tableA := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("key_a"), []byte("v")}})
+		defer l1_tableA.Close()
+		l1_tableB := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("key_b"), []byte("v")}})
+		defer l1_tableB.Close()
+		l2_tableX := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_x"), []byte("v")}})
+		defer l2_tableX.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+		lm.levels[2].SetTables([]*sstable.SSTable{l2_tableX})
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick the first table when there is no overlap")
+	})
+
+	t.Run("ReturnsNilForInvalidOrEmptyLevel", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+		defer lm.Close()
+
+		assert.Nil(t, lm.PickCompactionCandidateForLevelN(0), "Should return nil for L0")
+		assert.Nil(t, lm.PickCompactionCandidateForLevelN(4), "Should return nil for max level - 1")
+		assert.Nil(t, lm.PickCompactionCandidateForLevelN(1), "Should return nil for empty level")
+	})
 }
 
 func TestLevelsManager_VerifyConsistency(t *testing.T) {

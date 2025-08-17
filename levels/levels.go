@@ -216,13 +216,9 @@ func (lm *LevelsManager) GetLevelTableCounts() (map[int]int, error) {
 	return counts, nil
 }
 
-// GetOverlappingTables returns SSTables from a given level that overlap with the provided key range [minKey, maxKey].
-// For L0, all tables are considered overlapping if the range itself is valid (as L0 tables can overlap arbitrarily).
-// For L1+, tables are sorted by minKey and non-overlapping, so we can find relevant tables more efficiently.
-func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
-	lm.mu.RLock()
-	defer lm.mu.RUnlock()
-
+// getOverlappingTablesLocked is the unlocked version of GetOverlappingTables.
+// It must be called with the LevelsManager's read lock held.
+func (lm *LevelsManager) getOverlappingTablesLocked(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
 	if levelNum < 0 || levelNum >= len(lm.levels) {
 		return nil
 	}
@@ -258,32 +254,58 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 	return overlappingTables
 }
 
+// GetOverlappingTables returns SSTables from a given level that overlap with the provided key range [minKey, maxKey].
+// For L0, all tables are considered overlapping if the range itself is valid (as L0 tables can overlap arbitrarily).
+// For L1+, tables are sorted by minKey and non-overlapping, so we can find relevant tables more efficiently.
+func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	return lm.getOverlappingTablesLocked(levelNum, minRangeKey, maxRangeKey)
+}
+
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
-// A simple strategy is to pick the first one (often oldest or smallest minKey).
-// This version picks the largest table in the level.
+// The strategy is to pick the table that has the largest total size of overlapping tables in level N+1.
+// This helps reduce write amplification by compacting the "most problematic" file first.
+// If no tables have any overlap, it falls back to picking the first table in the level to ensure
+// compaction can still proceed.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
 
-	if levelNum <= 0 || levelNum >= len(lm.levels) || lm.levels[levelNum].Size() == 0 {
-		fmt.Println("Error: Invalid level number or empty level")
+	if levelNum <= 0 || levelNum >= lm.maxLevels-1 {
 		return nil
 	}
 
-	// Strategy: Pick the largest SSTable in this level for compaction.	// Another common strategy is to pick the oldest (which would be tables[0] if sorted by age/ID,
-	// or the one with the smallest minKey if that implies age).
-	var largestTable *sstable.SSTable
-	var maxSizeBytes int64 = -1
+	level := lm.levels[levelNum]
+	if level.Size() == 0 {
+		return nil
+	}
 
-	for _, table := range lm.levels[levelNum].GetTables() {
-		if table.Size() > maxSizeBytes {
-			maxSizeBytes = table.Size()
-			largestTable = table
+	var bestTable *sstable.SSTable
+	maxOverlapSize := int64(-1) // Use -1 to ensure the first table with 0 overlap is chosen if no overlaps exist.
+
+	for _, table := range level.GetTables() {
+		minKey, maxKey := table.MinKey(), table.MaxKey()
+		overlappingTables := lm.getOverlappingTablesLocked(levelNum+1, minKey, maxKey)
+
+		var currentOverlapSize int64
+		for _, overlapTable := range overlappingTables {
+			currentOverlapSize += overlapTable.Size()
+		}
+
+		if currentOverlapSize > maxOverlapSize {
+			maxOverlapSize = currentOverlapSize
+			bestTable = table
 		}
 	}
-	// largestTable might still be nil if initial check passed but loop didn't find anything.
-	// The initial check for len(tables) == 0 should cover this.
-	return largestTable
+
+	// Fallback: If no table has any overlap, pick the first one to keep compaction moving.
+	if bestTable == nil && level.Size() > 0 {
+		return level.GetTables()[0]
+	}
+
+	return bestTable
 }
 
 // ApplyCompactionResults updates the levels structure after a compaction.
