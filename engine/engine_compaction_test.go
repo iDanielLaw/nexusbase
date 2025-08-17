@@ -136,7 +136,7 @@ func setupCompactionManagerWithMockWriter(t *testing.T, mockWriter *MockSSTableW
 	t.Helper()
 	logger := slog.Default()
 
-	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"), levels.PickOldest)
 	t.Cleanup(func() { lm.Close() })
 
 	// Create a dummy engine just to get a stringStore
@@ -1219,7 +1219,7 @@ func TestCompactionManager_RetentionPolicy(t *testing.T) {
 	cutoffTime := mockNow.Add(-retentionDuration).UnixNano()
 
 	// Setup LevelsManager
-	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"), levels.PickOldest)
 	defer lm.Close()
 
 	// Setup a dummy engine to get a StringStore, ensure it uses the same data directory

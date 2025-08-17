@@ -62,7 +62,7 @@ type mockEngineProvider struct {
 
 func newMockEngineProvider(t *testing.T, dataDir string) *mockEngineProvider {
 	t.Helper()
-	lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer(""))
+	lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer(""), levels.PickOldest)
 	require.NoError(t, err)
 
 	return &mockEngineProvider{

@@ -11,6 +11,17 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// CompactionFallbackStrategy defines the strategy for picking a compaction candidate
+// when no table has significant overlap with the next level.
+type CompactionFallbackStrategy int
+
+const (
+	// PickOldest selects the table with the smallest ID (oldest). This is the default.
+	PickOldest CompactionFallbackStrategy = iota
+	// PickLargest selects the table with the largest size.
+	PickLargest
+)
+
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
 	ids := make([]uint64, len(tables))
 	for i, tbl := range tables {
@@ -30,20 +41,22 @@ type LevelsManager struct {
 	maxL0Files     int           // Trigger for L0->L1 compaction
 	baseTargetSize int64         // Target size for L1 SSTables, subsequent levels are multiples
 	tracer         trace.Tracer  // For creating spans
-	// TODO: Add other configuration options relevant to compaction strategy (FR5.2)
+	// fallbackStrategy defines the logic to use when no table has a clear overlap advantage.
+	fallbackStrategy CompactionFallbackStrategy
 }
 
 var _ Manager = (*LevelsManager)(nil)
 
 // NewLevelsManager creates a new LevelsManager.
 // Corresponds to FR5.1, FR5.2.
-func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, tracer trace.Tracer) (*LevelsManager, error) {
+func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, tracer trace.Tracer, fallbackStrategy CompactionFallbackStrategy) (*LevelsManager, error) {
 	lm := &LevelsManager{
-		levels:         make([]*LevelState, maxLevels),
-		maxLevels:      maxLevels,
-		maxL0Files:     maxL0Files,
-		baseTargetSize: baseTargetSize,
-		tracer:         tracer,
+		levels:           make([]*LevelState, maxLevels),
+		maxLevels:        maxLevels,
+		maxL0Files:       maxL0Files,
+		baseTargetSize:   baseTargetSize,
+		tracer:           tracer,
+		fallbackStrategy: fallbackStrategy,
 	}
 	for i := 0; i < maxLevels; i++ {
 		lm.levels[i] = newLevelState(i)
@@ -267,7 +280,7 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
 // The primary strategy is to pick the table with the largest total size of overlapping tables in level N+1.
 // This helps reduce write amplification by compacting the "most problematic" file first.
-// If no tables have any overlap, it falls back to picking the largest table in the level to ensure
+// If no tables have any overlap, it falls back to a configurable strategy (e.g., oldest or largest) to ensure
 // compaction can still proceed.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
@@ -284,7 +297,7 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 
 	tables := level.GetTables()
 	var bestTable *sstable.SSTable
-	maxOverlapSize := int64(-1)
+	maxOverlapSize := int64(-1) // Use -1 to ensure a table with 0 overlap is chosen if no overlaps exist.
 
 	for _, table := range tables {
 		minKey, maxKey := table.MinKey(), table.MaxKey()
@@ -303,16 +316,31 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 
 	// If no table had any overlap with the next level, trigger fallback logic.
 	if maxOverlapSize <= 0 {
-		// Fallback: Pick the largest table in the current level.
-		var largestTable *sstable.SSTable
-		var maxSize int64 = -1
-		for _, table := range tables {
-			if table.Size() > maxSize {
-				maxSize = table.Size()
-				largestTable = table
+		// Fallback logic is now configurable
+		switch lm.fallbackStrategy {
+		case PickLargest:
+			// Fallback: Pick the largest table in the current level.
+			var largestTable *sstable.SSTable
+			var maxSize int64 = -1
+			for _, table := range tables {
+				if table.Size() > maxSize {
+					maxSize = table.Size()
+					largestTable = table
+				}
 			}
+			return largestTable
+		case PickOldest:
+			fallthrough // Fallthrough to the default case
+		default:
+			// Default Fallback: Pick the oldest table (smallest ID) in the current level.
+			var oldestTable *sstable.SSTable
+			for _, table := range tables {
+				if oldestTable == nil || table.ID() < oldestTable.ID() {
+					oldestTable = table
+				}
+			}
+			return oldestTable
 		}
-		return largestTable
 	}
 
 	return bestTable

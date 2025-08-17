@@ -95,6 +95,7 @@ type StorageEngineOptions struct {
 	SelfMonitoringIntervalMs int
 	// Rules for rounding relative query time ranges for caching. Must be sorted by QueryDurationThreshold.
 	RelativeQueryRoundingRules []RoundingRule
+	CompactionFallbackStrategy levels.CompactionFallbackStrategy
 }
 
 // storageEngine is the main struct that manages the LSM-tree components.
@@ -891,7 +892,7 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 			cacheWithMetrics.SetMetrics(e.metrics.CacheHits, e.metrics.CacheMisses)
 		}
 	}
-	lm, err := levels.NewLevelsManager(e.opts.MaxLevels, e.opts.MaxL0Files, e.opts.TargetSSTableSize, e.tracer)
+	lm, err := levels.NewLevelsManager(e.opts.MaxLevels, e.opts.MaxL0Files, e.opts.TargetSSTableSize, e.tracer, e.opts.CompactionFallbackStrategy)
 	if err != nil {
 		e.logger.Error("failed to create levels manager", "error", err)
 		return fmt.Errorf("failed to create levels manager: %w", err)

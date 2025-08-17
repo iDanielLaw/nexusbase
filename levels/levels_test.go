@@ -13,7 +13,7 @@ import (
 )
 
 func TestNewLevelsManager(t *testing.T) {
-	lm, err := NewLevelsManager(7, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+	lm, err := NewLevelsManager(7, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 	require.NoError(t, err)
 	require.NotNil(t, lm)
 	defer lm.Close()
@@ -21,6 +21,7 @@ func TestNewLevelsManager(t *testing.T) {
 	assert.Len(t, lm.levels, 7, "Expected 7 levels")
 	assert.Equal(t, 4, lm.maxL0Files, "Expected maxL0Files to be 4")
 	assert.Equal(t, int64(1024), lm.baseTargetSize, "Expected baseTargetSize to be 1024")
+	assert.Equal(t, PickOldest, lm.fallbackStrategy, "Expected default fallback strategy")
 
 	for i, level := range lm.levels {
 		assert.Equal(t, i, level.levelNumber, "Level %d has incorrect levelNumber", i)
@@ -29,7 +30,7 @@ func TestNewLevelsManager(t *testing.T) {
 }
 
 func TestLevelsManager_AddL0Table(t *testing.T) {
-	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 
 	tbl1 := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("keyA"), []byte("v")}})
@@ -60,7 +61,7 @@ func TestLevelsManager_NeedsL0Compaction(t *testing.T) {
 	// The overhead of a single-entry SSTable (header, index, bloom filter, footer, etc.)
 	// is non-trivial. Set a trigger size that is clearly larger than this overhead.
 	triggerSize := int64(500) // 500 bytes
-	lm, _ := NewLevelsManager(3, maxL0, triggerSize, nil)
+	lm, _ := NewLevelsManager(3, maxL0, triggerSize, nil, PickOldest)
 	defer lm.Close()
 
 	assert.False(t, lm.NeedsL0Compaction(maxL0, triggerSize), "Expected NeedsL0Compaction to be false for empty L0")
@@ -78,7 +79,7 @@ func TestLevelsManager_NeedsL0Compaction(t *testing.T) {
 	assert.True(t, lm.NeedsL0Compaction(maxL0, triggerSize), "Expected NeedsL0Compaction to be true for L0 with 2 tables (maxL0=2)")
 
 	// Test 3: Reset and test size-based trigger
-	lm, _ = NewLevelsManager(3, 10, triggerSize, nil) // High file count, low size trigger
+	lm, _ = NewLevelsManager(3, 10, triggerSize, nil, PickOldest) // High file count, low size trigger
 	defer lm.Close()
 
 	tbl_l0_large := newTestSSTable(t, 3, []struct{ key, value []byte }{{[]byte("l0_large"), makeValue(int(triggerSize))}})
@@ -87,7 +88,7 @@ func TestLevelsManager_NeedsL0Compaction(t *testing.T) {
 	assert.True(t, lm.NeedsL0Compaction(10, triggerSize), "Expected NeedsL0Compaction to be true for L0 with 1 large table")
 
 	// Test 4: Reset and test size-based trigger with multiple files
-	lm, _ = NewLevelsManager(3, 10, triggerSize, nil) // High file count, low size trigger
+	lm, _ = NewLevelsManager(3, 10, triggerSize, nil, PickOldest) // High file count, low size trigger
 	defer lm.Close()
 	tbl_l0_part1 := newTestSSTable(t, 4, []struct{ key, value []byte }{{[]byte("l0_part1"), makeValue(int(triggerSize / 2))}})
 	defer tbl_l0_part1.Close()
@@ -99,7 +100,7 @@ func TestLevelsManager_NeedsL0Compaction(t *testing.T) {
 }
 
 func TestLevelsManager_GetOverlappingTables(t *testing.T) {
-	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 
 	// L0 tables
@@ -148,7 +149,7 @@ func TestLevelsManager_GetOverlappingTables(t *testing.T) {
 
 func TestLevelsManager_ApplyCompactionResults(t *testing.T) {
 	t.Run("L0_to_L1", func(t *testing.T) {
-		lm, _ := NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+		lm, _ := NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 		defer lm.Close()
 
 		// Initial L0 tables
@@ -184,7 +185,7 @@ func TestLevelsManager_ApplyCompactionResults(t *testing.T) {
 	})
 
 	t.Run("LN_to_LN+1", func(t *testing.T) {
-		lm, _ := NewLevelsManager(3, 2, 1024, nil)
+		lm, _ := NewLevelsManager(3, 2, 1024, nil, PickOldest)
 		defer lm.Close()
 
 		l1_source := newTestSSTable(t, 301, []struct{ key, value []byte }{{[]byte("l1m"), []byte("v")}})
@@ -220,7 +221,7 @@ func TestLevelsManager_NeedsLevelNCompaction(t *testing.T) {
 
 	baseTarget := int64(1024)
 	multiplier := 2
-	lm, _ := NewLevelsManager(4, 2, baseTarget, nil) // Re-init lm with new baseTarget
+	lm, _ := NewLevelsManager(4, 2, baseTarget, nil, PickOldest) // Re-init lm with new baseTarget
 	defer lm.Close()
 
 	assert.False(t, lm.NeedsLevelNCompaction(0, multiplier), "NeedsLevelNCompaction should be false for L0")
@@ -254,7 +255,7 @@ func TestLevelsManager_NeedsLevelNCompaction(t *testing.T) {
 func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 	t.Run("PicksCandidateWithMostOverlap", func(t *testing.T) {
 		// 1. Setup
-		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 		defer lm.Close()
 
 		// 2. Arrange: Create SSTables
@@ -292,21 +293,44 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick Table A with the most overlap size")
 	})
 
-	t.Run("PicksLargestCandidateWhenNoOverlap", func(t *testing.T) {
-		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+	t.Run("Fallback_PicksOldestCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 		defer lm.Close()
 
-		// Table A is smaller
-		l1_tableA := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("key_a"), makeValue(10)}})
+		// Table A is newer (ID 10) but has a smaller MinKey
+		l1_tableA := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_c"), makeValue(100)}})
 		defer l1_tableA.Close()
-		// Table B is larger
-		l1_tableB := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(100)}})
+		// Table B is older (ID 5) but has a larger MinKey
+		l1_tableB := newTestSSTable(t, 5, []struct{ key, value []byte }{{[]byte("key_d"), makeValue(10)}})
 		defer l1_tableB.Close()
 		// L2 table that does not overlap with L1 tables
-		l2_tableX := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_x"), []byte("v")}})
+		l2_tableX := newTestSSTable(t, 20, []struct{ key, value []byte }{{[]byte("key_x"), []byte("v")}})
 		defer l2_tableX.Close()
 
 		// SetTables will sort them by minKey, so order is [A, B]
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+		lm.levels[2].SetTables([]*sstable.SSTable{l2_tableX})
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		// When there is no overlap, it should pick the oldest table (B, ID 5)
+		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the oldest table (smallest ID) when there is no overlap")
+	})
+
+	t.Run("Fallback_PicksLargestCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickLargest)
+		defer lm.Close()
+
+		// Table A is smaller but older (ID 5)
+		l1_tableA := newTestSSTable(t, 5, []struct{ key, value []byte }{{[]byte("key_a"), makeValue(10)}})
+		defer l1_tableA.Close()
+		// Table B is larger but newer (ID 10)
+		l1_tableB := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(100)}})
+		defer l1_tableB.Close()
+		// L2 table that does not overlap with L1 tables
+		l2_tableX := newTestSSTable(t, 20, []struct{ key, value []byte }{{[]byte("key_x"), []byte("v")}})
+		defer l2_tableX.Close()
+
 		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
 		lm.levels[2].SetTables([]*sstable.SSTable{l2_tableX})
 
@@ -317,7 +341,7 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 	})
 
 	t.Run("ReturnsNilForInvalidOrEmptyLevel", func(t *testing.T) {
-		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 		defer lm.Close()
 
 		assert.Nil(t, lm.PickCompactionCandidateForLevelN(0), "Should return nil for L0")
@@ -328,7 +352,7 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 
 func TestLevelsManager_VerifyConsistency(t *testing.T) {
 	t.Run("Valid_L1", func(t *testing.T) {
-		lm, _ := NewLevelsManager(3, 2, 100, nil)
+		lm, _ := NewLevelsManager(3, 2, 100, nil, PickOldest)
 		defer lm.Close()
 
 		l1t1 := newTestSSTable(t, 101, []struct{ key, value []byte }{{[]byte("a"), []byte("v")}, {[]byte("b"), []byte("v")}})
@@ -342,7 +366,7 @@ func TestLevelsManager_VerifyConsistency(t *testing.T) {
 	})
 
 	t.Run("L1_Overlap", func(t *testing.T) {
-		lm, _ := NewLevelsManager(3, 2, 100, nil)
+		lm, _ := NewLevelsManager(3, 2, 100, nil, PickOldest)
 		defer lm.Close()
 
 		tableA := newTestSSTable(t, 301, []struct{ key, value []byte }{{[]byte("alpha"), []byte("v")}, {[]byte("gamma"), []byte("v")}})
@@ -358,7 +382,7 @@ func TestLevelsManager_VerifyConsistency(t *testing.T) {
 	})
 
 	t.Run("L1_SortOrderError", func(t *testing.T) {
-		lm, _ := NewLevelsManager(3, 2, 100, nil)
+		lm, _ := NewLevelsManager(3, 2, 100, nil, PickOldest)
 		defer lm.Close()
 
 		l1t1 := newTestSSTable(t, 101, []struct{ key, value []byte }{{[]byte("a"), []byte("v")}})
@@ -381,7 +405,7 @@ func TestLevelsManager_VerifyConsistency(t *testing.T) {
 }
 
 func TestLevelsManager_ApplyCompactionResults_InvalidLevels(t *testing.T) {
-	lm, _ := NewLevelsManager(3, 2, 1024, nil)
+	lm, _ := NewLevelsManager(3, 2, 1024, nil, PickOldest)
 	defer lm.Close()
 
 	newTables := []*sstable.SSTable{}
@@ -409,14 +433,14 @@ func TestLevelsManager_ApplyCompactionResults_InvalidLevels(t *testing.T) {
 }
 
 func TestLevelsManager_MaxLevels(t *testing.T) {
-	lm, _ := NewLevelsManager(5, 4, 1024, nil)
+	lm, _ := NewLevelsManager(5, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 	assert.Equal(t, 5, lm.MaxLevels())
 }
 
 func TestLevelsManager_GetTotalSizeForLevel(t *testing.T) {
 
-	lm, _ := NewLevelsManager(3, 2, 100, nil)
+	lm, _ := NewLevelsManager(3, 2, 100, nil, PickOldest)
 	defer lm.Close()
 
 	assert.Zero(t, lm.GetTotalSizeForLevel(0), "Expected total size for L0 to be 0")
@@ -434,7 +458,7 @@ func TestLevelsManager_GetTotalSizeForLevel(t *testing.T) {
 
 func TestLevelsManager_GetSSTablesForRead_Concurrency(t *testing.T) {
 
-	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 	tbl1 := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("conc_a"), []byte("v")}})
 	defer tbl1.Close()
@@ -472,7 +496,7 @@ func TestLevelsManager_GetSSTablesForRead_Concurrency(t *testing.T) {
 }
 
 func TestLevelsManager_GetLevelForTable(t *testing.T) {
-	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 
 	// Add tables
@@ -513,7 +537,7 @@ func TestLevelsManager_GetLevelForTable(t *testing.T) {
 }
 
 func TestLevelsManager_AddTablesToLevel(t *testing.T) {
-	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 
 	// Test adding to a valid level
@@ -543,7 +567,7 @@ func TestLevelsManager_AddTablesToLevel(t *testing.T) {
 }
 func TestLevelsManager_AddTableToLevel(t *testing.T) {
 
-	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 
 	// Test adding to a valid level
@@ -564,7 +588,7 @@ func TestLevelsManager_AddTableToLevel(t *testing.T) {
 }
 
 func TestLevelsManager_RemoveTables(t *testing.T) {
-	lm, _ := NewLevelsManager(3, 4, 1024, nil)
+	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest)
 	defer lm.Close()
 
 	// Add some tables to level 1
