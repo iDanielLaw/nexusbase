@@ -172,6 +172,8 @@ func TestWriteAndLoadSSTable_New(t *testing.T) {
 		t.Fatal("writeTestSSTable returned nil sstable")
 	}
 
+	assert.Equal(t, uint64(len(entries)), writtenSST.KeyCount(), "KeyCount should match number of entries written")
+
 	if !bytes.Equal(writtenSST.MinKey(), entries[0].Key) {
 		t.Errorf("writtenSST.MinKey() = %s, want %s", string(writtenSST.MinKey()), string(entries[0].Key))
 	}
@@ -219,6 +221,7 @@ func TestWriteAndLoadSSTable_New(t *testing.T) {
 	}
 
 	// Compare loaded SSTable properties
+	assert.Equal(t, writtenSST.KeyCount(), loadedSSTable.KeyCount(), "Loaded KeyCount should match original")
 	if !bytes.Equal(loadedSSTable.MinKey(), writtenSST.MinKey()) {
 		t.Errorf("loadedSSTable.MinKey() = %s, want %s", string(loadedSSTable.MinKey()), string(writtenSST.MinKey()))
 	}

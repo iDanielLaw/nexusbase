@@ -63,6 +63,7 @@ type StorageEngineOptions struct {
 	TargetSSTableSize              int64
 	LevelsTargetSizeMultiplier     int
 	MaxLevels                      int
+	MaxConcurrentLNCompactions     int
 	BloomFilterFalsePositiveRate   float64
 	SSTableDefaultBlockSize        int
 	InitialSequenceNumber          uint64
@@ -94,6 +95,7 @@ type StorageEngineOptions struct {
 	SelfMonitoringIntervalMs int
 	// Rules for rounding relative query time ranges for caching. Must be sorted by QueryDurationThreshold.
 	RelativeQueryRoundingRules []RoundingRule
+	CompactionFallbackStrategy levels.CompactionFallbackStrategy
 }
 
 // storageEngine is the main struct that manages the LSM-tree components.
@@ -890,7 +892,7 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 			cacheWithMetrics.SetMetrics(e.metrics.CacheHits, e.metrics.CacheMisses)
 		}
 	}
-	lm, err := levels.NewLevelsManager(e.opts.MaxLevels, e.opts.MaxL0Files, e.opts.TargetSSTableSize, e.tracer)
+	lm, err := levels.NewLevelsManager(e.opts.MaxLevels, e.opts.MaxL0Files, e.opts.TargetSSTableSize, e.tracer, e.opts.CompactionFallbackStrategy)
 	if err != nil {
 		e.logger.Error("failed to create levels manager", "error", err)
 		return fmt.Errorf("failed to create levels manager: %w", err)
@@ -907,7 +909,7 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 				TargetSSTableSize:          e.opts.TargetSSTableSize,
 				LevelsTargetSizeMultiplier: e.opts.LevelsTargetSizeMultiplier,
 				CompactionIntervalSeconds:  e.opts.CompactionIntervalSeconds,
-				MaxConcurrentLNCompactions: 1, // Default value, can be made configurable
+				MaxConcurrentLNCompactions: e.opts.MaxConcurrentLNCompactions, // Default value, can be made configurable
 				SSTableCompressor:          e.opts.SSTableCompressor,
 				RetentionPeriod:            e.opts.RetentionPeriod,
 			},

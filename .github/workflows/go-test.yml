@@ -36,7 +36,7 @@ jobs:
 
     - name: Test
       if: steps.check_changes.outputs.go_changes_detected == 'true'
-      run: go test -v -timeout 120s ./...
+      run: go test -v -race -timeout 120s ./...
 
   build-windows:
     runs-on: windows-latest

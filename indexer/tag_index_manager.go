@@ -107,6 +107,7 @@ type TagIndexManagerOptions struct {
 	LevelsTargetSizeMultiplier int
 	FlushIntervalMs            int // Interval for periodic index memtable flushes.
 	CompactionIntervalSeconds  int // Interval to check for index compaction.
+	CompactionFallbackStrategy levels.CompactionFallbackStrategy
 	L0CompactionTriggerSize    int64
 	MaxL0Files                 int // Number of L0 index files to trigger compaction.
 	MaxLevels                  int
@@ -179,7 +180,7 @@ func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies,
 		opts.LevelsTargetSizeMultiplier = 5
 	}
 
-	lm, err := levels.NewLevelsManager(opts.MaxLevels, opts.MaxL0Files, opts.BaseTargetSize, tracer)
+	lm, err := levels.NewLevelsManager(opts.MaxLevels, opts.MaxL0Files, opts.BaseTargetSize, tracer, opts.CompactionFallbackStrategy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create levels manager for tag index: %w", err)
 	}

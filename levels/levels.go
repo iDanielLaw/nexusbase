@@ -4,11 +4,38 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
+	"math/rand"
 	"sort"
 	"sync"
 
 	"github.com/INLOpen/nexusbase/sstable"
 	"go.opentelemetry.io/otel/trace"
+)
+
+// CompactionFallbackStrategy defines the strategy for picking a compaction candidate
+// when no table has significant overlap with the next level.
+type CompactionFallbackStrategy int
+
+const (
+	// PickOldest selects the table with the smallest ID (oldest). This is the default.
+	PickOldest CompactionFallbackStrategy = iota
+	// PickLargest selects the table with the largest size.
+	PickLargest
+	// PickSmallest selects the table with the smallest size.
+	PickSmallest
+	// PickMostKeys selects the table with the most keys.
+	PickMostKeys
+	// PickSmallestAvgKeySize selects the table with the smallest average data size per key.
+	PickSmallestAvgKeySize
+	// PickOldestByTimestamp selects the table with the smallest MinKey (representing the oldest timestamp).
+	PickOldestByTimestamp
+	// PickFewestKeys selects the table with the fewest keys, useful for cleaning up small, sparse tables.
+	PickFewestKeys
+	// PickRandom selects a random table to prevent starvation from other deterministic strategies.
+	PickRandom
+	// PickLargestAvgKeySize selects the table with the largest average data size per key.
+	PickLargestAvgKeySize
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -30,20 +57,22 @@ type LevelsManager struct {
 	maxL0Files     int           // Trigger for L0->L1 compaction
 	baseTargetSize int64         // Target size for L1 SSTables, subsequent levels are multiples
 	tracer         trace.Tracer  // For creating spans
-	// TODO: Add other configuration options relevant to compaction strategy (FR5.2)
+	// fallbackStrategy defines the logic to use when no table has a clear overlap advantage.
+	fallbackStrategy CompactionFallbackStrategy
 }
 
 var _ Manager = (*LevelsManager)(nil)
 
 // NewLevelsManager creates a new LevelsManager.
 // Corresponds to FR5.1, FR5.2.
-func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, tracer trace.Tracer) (*LevelsManager, error) {
+func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, tracer trace.Tracer, fallbackStrategy CompactionFallbackStrategy) (*LevelsManager, error) {
 	lm := &LevelsManager{
-		levels:         make([]*LevelState, maxLevels),
-		maxLevels:      maxLevels,
-		maxL0Files:     maxL0Files,
-		baseTargetSize: baseTargetSize,
-		tracer:         tracer,
+		levels:           make([]*LevelState, maxLevels),
+		maxLevels:        maxLevels,
+		maxL0Files:       maxL0Files,
+		baseTargetSize:   baseTargetSize,
+		tracer:           tracer,
+		fallbackStrategy: fallbackStrategy,
 	}
 	for i := 0; i < maxLevels; i++ {
 		lm.levels[i] = newLevelState(i)
@@ -216,13 +245,9 @@ func (lm *LevelsManager) GetLevelTableCounts() (map[int]int, error) {
 	return counts, nil
 }
 
-// GetOverlappingTables returns SSTables from a given level that overlap with the provided key range [minKey, maxKey].
-// For L0, all tables are considered overlapping if the range itself is valid (as L0 tables can overlap arbitrarily).
-// For L1+, tables are sorted by minKey and non-overlapping, so we can find relevant tables more efficiently.
-func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
-	lm.mu.RLock()
-	defer lm.mu.RUnlock()
-
+// getOverlappingTablesLocked is the unlocked version of GetOverlappingTables.
+// It must be called with the LevelsManager's read lock held.
+func (lm *LevelsManager) getOverlappingTablesLocked(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
 	if levelNum < 0 || levelNum >= len(lm.levels) {
 		return nil
 	}
@@ -258,32 +283,162 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 	return overlappingTables
 }
 
+// GetOverlappingTables returns SSTables from a given level that overlap with the provided key range [minKey, maxKey].
+// For L0, all tables are considered overlapping if the range itself is valid (as L0 tables can overlap arbitrarily).
+// For L1+, tables are sorted by minKey and non-overlapping, so we can find relevant tables more efficiently.
+func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	return lm.getOverlappingTablesLocked(levelNum, minRangeKey, maxRangeKey)
+}
+
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
-// A simple strategy is to pick the first one (often oldest or smallest minKey).
-// This version picks the largest table in the level.
+// The primary strategy is to pick the table with the largest total size of overlapping tables in level N+1.
+// This helps reduce write amplification by compacting the "most problematic" file first.
+// If no tables have any overlap, it falls back to a configurable strategy (e.g., oldest or largest) to ensure
+// compaction can still proceed.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
 
-	if levelNum <= 0 || levelNum >= len(lm.levels) || lm.levels[levelNum].Size() == 0 {
-		fmt.Println("Error: Invalid level number or empty level")
+	if levelNum <= 0 || levelNum >= lm.maxLevels-1 {
 		return nil
 	}
 
-	// Strategy: Pick the largest SSTable in this level for compaction.	// Another common strategy is to pick the oldest (which would be tables[0] if sorted by age/ID,
-	// or the one with the smallest minKey if that implies age).
-	var largestTable *sstable.SSTable
-	var maxSizeBytes int64 = -1
+	level := lm.levels[levelNum]
+	if level.Size() == 0 {
+		return nil
+	}
 
-	for _, table := range lm.levels[levelNum].GetTables() {
-		if table.Size() > maxSizeBytes {
-			maxSizeBytes = table.Size()
-			largestTable = table
+	tables := level.GetTables()
+	var bestTable *sstable.SSTable
+	maxOverlapSize := int64(-1) // Use -1 to ensure a table with 0 overlap is chosen if no overlaps exist.
+
+	for _, table := range tables {
+		minKey, maxKey := table.MinKey(), table.MaxKey()
+		overlappingTables := lm.getOverlappingTablesLocked(levelNum+1, minKey, maxKey)
+
+		var currentOverlapSize int64
+		for _, overlapTable := range overlappingTables {
+			currentOverlapSize += overlapTable.Size()
+		}
+
+		if currentOverlapSize > maxOverlapSize {
+			maxOverlapSize = currentOverlapSize
+			bestTable = table
 		}
 	}
-	// largestTable might still be nil if initial check passed but loop didn't find anything.
-	// The initial check for len(tables) == 0 should cover this.
-	return largestTable
+
+	// If no table had any overlap with the next level, trigger fallback logic.
+	if maxOverlapSize <= 0 {
+		// Fallback logic is now configurable
+		switch lm.fallbackStrategy {
+		case PickLargest:
+			// Fallback: Pick the largest table in the current level.
+			var largestTable *sstable.SSTable
+			var maxSize int64 = -1
+			for _, table := range tables {
+				if table.Size() > maxSize {
+					maxSize = table.Size()
+					largestTable = table
+				}
+			}
+			return largestTable
+		case PickSmallest:
+			// Fallback: Pick the smallest table in the current level.
+			var smallestTable *sstable.SSTable
+			for _, table := range tables {
+				if smallestTable == nil || table.Size() < smallestTable.Size() {
+					smallestTable = table
+				}
+			}
+			return smallestTable
+		case PickMostKeys:
+			// Fallback: Pick the table with the most keys.
+			var mostKeysTable *sstable.SSTable
+			for _, table := range tables {
+				if mostKeysTable == nil || table.KeyCount() > mostKeysTable.KeyCount() {
+					mostKeysTable = table
+				}
+			}
+			return mostKeysTable
+		case PickSmallestAvgKeySize:
+			// Fallback: Pick the table with the smallest average size per key.
+			// This can be useful for compacting tables with many small, inefficiently stored keys.
+			var smallestAvgSizeTable *sstable.SSTable
+			minAvgSize := math.MaxFloat64
+
+			for _, table := range tables {
+				if table.KeyCount() == 0 {
+					continue // Avoid division by zero; tables with no keys are not candidates.
+				}
+				avgSize := float64(table.Size()) / float64(table.KeyCount())
+				if avgSize < minAvgSize {
+					minAvgSize = avgSize
+					smallestAvgSizeTable = table
+				}
+			}
+			return smallestAvgSizeTable
+		case PickLargestAvgKeySize:
+			// Fallback: Pick the table with the largest average size per key.
+			// This can be useful for compacting tables with few, very large keys.
+			var largestAvgSizeTable *sstable.SSTable
+			maxAvgSize := -1.0
+
+			for _, table := range tables {
+				if table.KeyCount() == 0 {
+					continue // Avoid division by zero.
+				}
+				avgSize := float64(table.Size()) / float64(table.KeyCount())
+				if avgSize > maxAvgSize {
+					maxAvgSize = avgSize
+					largestAvgSizeTable = table
+				}
+			}
+			return largestAvgSizeTable
+		case PickOldestByTimestamp:
+			// Fallback: Pick the table with the smallest MinKey.
+			// Since tables in L1+ are already sorted by MinKey, this is the first table.
+			if len(tables) > 0 {
+				return tables[0]
+			}
+			return nil
+		case PickFewestKeys:
+			// Fallback: Pick the table with the fewest keys.
+			// Useful for cleaning up small, sparse tables.
+			var fewestKeysTable *sstable.SSTable
+			minKeyCount := uint64(math.MaxUint64)
+			for _, table := range tables {
+				if table.KeyCount() < minKeyCount {
+					minKeyCount = table.KeyCount()
+					fewestKeysTable = table
+				}
+			}
+			return fewestKeysTable
+		case PickRandom:
+			// Fallback: Pick a random table.
+			// This helps prevent starvation where the same tables are always
+			// ignored by other fallback strategies.
+			if len(tables) > 0 {
+				return tables[rand.Intn(len(tables))]
+			}
+			return nil
+		case PickOldest:
+			fallthrough // Fallthrough to the default case
+		default:
+			// Default Fallback: Pick the oldest table (smallest ID) in the current level.
+			var oldestTable *sstable.SSTable
+			for _, table := range tables {
+				if oldestTable == nil || table.ID() < oldestTable.ID() {
+					oldestTable = table
+				}
+			}
+			return oldestTable
+		}
+	}
+
+	return bestTable
 }
 
 // ApplyCompactionResults updates the levels structure after a compaction.
