@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 	"log/slog" // Import slog
+	"math"
 	"sync"
 	"sync/atomic"
 
