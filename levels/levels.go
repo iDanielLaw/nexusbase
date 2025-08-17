@@ -20,6 +20,8 @@ const (
 	PickOldest CompactionFallbackStrategy = iota
 	// PickLargest selects the table with the largest size.
 	PickLargest
+	// PickSmallest selects the table with the smallest size.
+	PickSmallest
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -329,6 +331,15 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 				}
 			}
 			return largestTable
+		case PickSmallest:
+			// Fallback: Pick the smallest table in the current level.
+			var smallestTable *sstable.SSTable
+			for _, table := range tables {
+				if smallestTable == nil || table.Size() < smallestTable.Size() {
+					smallestTable = table
+				}
+			}
+			return smallestTable
 		case PickOldest:
 			fallthrough // Fallthrough to the default case
 		default:
