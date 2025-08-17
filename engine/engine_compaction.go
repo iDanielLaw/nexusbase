@@ -582,6 +582,11 @@ func (cm *CompactionManager) removeAndCleanupSSTables(ctx context.Context, table
 			cm.logger.Error("Error deleting old SSTable file.", "path", oldTable.FilePath(), "error", err)
 			// Log the error but continue trying to clean up other files.
 			allErrors = append(allErrors, fmt.Errorf("failed to delete old SSTable file %s: %w", oldTable.FilePath(), err))
+		} else {
+			// Successfully removed the file, so increment the metric.
+			if cm.metrics != nil && cm.metrics.SSTablesDeletedTotal != nil {
+				cm.metrics.SSTablesDeletedTotal.Add(1)
+			}
 		}
 	}
 	err := errors.Join(allErrors...)
