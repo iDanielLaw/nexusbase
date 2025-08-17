@@ -24,11 +24,11 @@ type MetricsServer struct {
 }
 
 // NewMetricsServer creates and configures a new HTTP server.
-func NewMetricsServer(cfg *config.DebugMode, logger *slog.Logger) *MetricsServer {
+func NewMetricsServer(cfg *config.DebugConfig, logger *slog.Logger) *MetricsServer {
 	mux := http.NewServeMux()
 	logger = logger.With("component", "MetricsServer")
 
-	if cfg.EnabledProfiling {
+	if cfg.PProfEnabled {
 		mux.HandleFunc("/debug/pprof/", pprof.Index)
 		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -37,11 +37,11 @@ func NewMetricsServer(cfg *config.DebugMode, logger *slog.Logger) *MetricsServer
 		logger.Info("pprof profiling endpoints enabled on /debug/pprof")
 	}
 	// Register expvar handler for metrics under /metrics
-	if cfg.EnabledMetrics {
+	if cfg.MetricsEnabled {
 		mux.Handle("/metrics", expvar.Handler())
 		logger.Info("expvar metrics endpoint enabled on /metrics")
 		// Register handler for the built-in monitoring UI
-		if cfg.EnabledMonitorUI {
+		if cfg.MonitorUIEnabled {
 			// The UI expects to be run from the project root.
 			uiFilePath := "ui/monitor.html"
 			uiMemstatPath := "ui/memstats.html"

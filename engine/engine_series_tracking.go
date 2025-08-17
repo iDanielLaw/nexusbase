@@ -14,6 +14,10 @@ func (e *storageEngine) addActiveSeries(seriesKey string) {
 		e.activeSeries[seriesKey] = struct{}{}
 		// 2. Persist it to the series log file.
 		e.persistNewSeriesKey_locked([]byte(seriesKey))
+		// 3. Increment the metric for new series creation.
+		if e.metrics != nil && e.metrics.SeriesCreatedTotal != nil {
+			e.metrics.SeriesCreatedTotal.Add(1)
+		}
 	}
 	e.activeSeriesMu.Unlock()
 }

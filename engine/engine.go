@@ -919,6 +919,7 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 			IsSeriesDeleted:      e.isSeriesDeleted,
 			IsRangeDeleted:       e.isCoveredByRangeTombstone,
 			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			Metrics:              e.metrics,    // Pass the engine's metrics instance
 			BlockCache:           e.blockCache, // Pass the block cache
 			FileRemover:          nil,          // Use default real file remover
 			SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) { // This is the default factory that creates real SSTableWriters.

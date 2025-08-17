@@ -19,6 +19,7 @@ import (
 	"github.com/INLOpen/nexusbase/engine" // StorageEngine
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/hooks/listeners"
+	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/wal"
 
 	"go.opentelemetry.io/otel"
@@ -161,7 +162,7 @@ func main() {
 
 	// Select compressor based on config
 	var sstCompressor core.Compressor
-	switch cfg.Engine.SSTableCompression {
+	switch cfg.Engine.SSTable.Compression {
 	case "lz4":
 		sstCompressor = &compressors.LZ4Compressor{}
 		logger.Info("Using LZ4 compression for SSTables.")
@@ -175,12 +176,12 @@ func main() {
 		sstCompressor = &compressors.NoCompressionCompressor{}
 		logger.Info("Using no compression for SSTables.")
 	default:
-		logger.Error("Invalid sstable_compression value in config.", "value", cfg.Engine.SSTableCompression)
+		logger.Error("Invalid sstable_compression value in config.", "value", cfg.Engine.SSTable.Compression)
 		os.Exit(1)
 	}
 	var metricSrv *server.MetricsServer
-	if cfg.DebugMode.Enabled {
-		metricSrv = server.NewMetricsServer(&cfg.DebugMode, logger)
+	if cfg.Debug.Enabled {
+		metricSrv = server.NewMetricsServer(&cfg.Debug, logger)
 		go func() {
 			if err := metricSrv.Start(); err != nil {
 				logger.Error("Failed to start metrics server", "error", err)
@@ -195,34 +196,74 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse durations from config strings
+	memtableFlushInterval := config.ParseDuration(cfg.Engine.Memtable.FlushInterval, 0, logger)
+	compactionInterval := config.ParseDuration(cfg.Engine.Compaction.CheckInterval, 120*time.Second, logger)
+	metadataSyncInterval := config.ParseDuration(cfg.Engine.MetadataSyncInterval, 60*time.Second, logger)
+	checkpointInterval := config.ParseDuration(cfg.Engine.CheckpointInterval, 300*time.Second, logger)
+	walFlushInterval := config.ParseDuration(cfg.Engine.WAL.FlushInterval, 1000*time.Millisecond, logger)
+	selfMonitoringInterval := config.ParseDuration(cfg.SelfMonitoring.Interval, 5*time.Second, logger)
+	indexFlushInterval := config.ParseDuration(cfg.Engine.Index.FlushInterval, 60*time.Second, logger)
+	indexCompactionInterval := config.ParseDuration(cfg.Engine.Index.CompactionCheckInterval, 20*time.Second, logger)
+
+	// Parse CompactionFallbackStrategy
+	var fallbackStrategy levels.CompactionFallbackStrategy
+	switch strings.ToLower(cfg.Engine.Compaction.FallbackStrategy) {
+	case "picklargest":
+		fallbackStrategy = levels.PickLargest
+	case "picksmallest":
+		fallbackStrategy = levels.PickSmallest
+	case "pickmostkeys":
+		fallbackStrategy = levels.PickMostKeys
+	case "picksmallestavgkeysize":
+		fallbackStrategy = levels.PickSmallestAvgKeySize
+	case "pickoldestbytimestamp":
+		fallbackStrategy = levels.PickOldestByTimestamp
+	case "pickfewestkeys":
+		fallbackStrategy = levels.PickFewestKeys
+	case "pickrandom":
+		fallbackStrategy = levels.PickRandom
+	case "picklargestavgkeysize":
+		fallbackStrategy = levels.PickLargestAvgKeySize
+	case "pickoldest":
+		fallthrough
+	default:
+		fallbackStrategy = levels.PickOldest
+	}
+
 	// Configure StorageEngine options
 	opts := engine.StorageEngineOptions{
-		DataDir:                      cfg.Engine.DataDir,
-		MemtableThreshold:            cfg.Engine.MemtableThresholdMB * 1024 * 1024,
-		MemtableFlushIntervalMs:      cfg.Engine.MemtableFlushIntervalMs,
-		BlockCacheCapacity:           cfg.Engine.BlockCacheCapacity,
-		L0CompactionTriggerSize:      cfg.Engine.L0CompactionTriggerSizeMB * 1024 * 1024,
-		MaxL0Files:                   cfg.Engine.MaxL0Files,
-		TargetSSTableSize:            cfg.Engine.TargetSSTableSizeMB * 1024 * 1024,
-		LevelsTargetSizeMultiplier:   cfg.Engine.LevelsTargetSizeMultiplier,
-		MaxLevels:                    cfg.Engine.MaxLevels,
-		BloomFilterFalsePositiveRate: cfg.Engine.BloomFilterFalsePositiveRate,
-		SSTableDefaultBlockSize:      cfg.Engine.SSTableDefaultBlockSizeKB * 1024,
-		CompactionIntervalSeconds:    cfg.Engine.CompactionIntervalSeconds,
-		TracerProvider:               tp, // Pass the configured provider
-		CheckpointIntervalSeconds:    cfg.Engine.CheckpointIntervalSeconds,
-		// Metrics:                      engine.NewEngineMetrics(true, "engine_"),
-		SSTableCompressor:    sstCompressor,
-		WALSyncMode:          wal.WALSyncMode(cfg.Engine.WALSyncMode),
-		WALBatchSize:         cfg.Engine.WALBatchSize,
-		WALFlushIntervalMs:   cfg.Engine.WALFlushIntervalMs,
-		WALMaxSegmentSize:    cfg.Engine.WALMaxSegmentSize,
-		WALPurgeKeepSegments: cfg.Engine.WALPurgeKeepSegments,
-		RetentionPeriod:      cfg.Engine.RetentionPeriod,
-		// Self-monitoring is now configured and managed by the engine itself.
-		SelfMonitoringEnabled:    cfg.SelfMonitoring.Enabled,
-		SelfMonitoringIntervalMs: cfg.SelfMonitoring.IntervalSeconds * 1000,
-		Logger:                   logger,
+		DataDir:                        cfg.Engine.DataDir,
+		MemtableThreshold:              cfg.Engine.Memtable.SizeThresholdBytes,
+		MemtableFlushIntervalMs:        int(memtableFlushInterval.Milliseconds()),
+		BlockCacheCapacity:             cfg.Engine.Cache.BlockCacheCapacity,
+		L0CompactionTriggerSize:        cfg.Engine.Compaction.L0TriggerSizeBytes,
+		MaxL0Files:                     cfg.Engine.Compaction.L0TriggerFileCount,
+		TargetSSTableSize:              cfg.Engine.Compaction.TargetSSTableSizeBytes,
+		LevelsTargetSizeMultiplier:     cfg.Engine.Compaction.LevelsSizeMultiplier,
+		MaxLevels:                      cfg.Engine.Compaction.MaxLevels,
+		BloomFilterFalsePositiveRate:   cfg.Engine.SSTable.BloomFilterFPRate,
+		SSTableDefaultBlockSize:        int(cfg.Engine.SSTable.BlockSizeBytes),
+		CompactionIntervalSeconds:      int(compactionInterval.Seconds()),
+		TracerProvider:                 tp, // Pass the configured provider
+		MetadataSyncIntervalSeconds:    int(metadataSyncInterval.Seconds()),
+		CheckpointIntervalSeconds:      int(checkpointInterval.Seconds()),
+		SSTableCompressor:              sstCompressor,
+		WALSyncMode:                    wal.WALSyncMode(cfg.Engine.WAL.SyncMode),
+		WALBatchSize:                   cfg.Engine.WAL.BatchSize,
+		WALFlushIntervalMs:             int(walFlushInterval.Milliseconds()),
+		WALMaxSegmentSize:              cfg.Engine.WAL.MaxSegmentSizeBytes,
+		WALPurgeKeepSegments:           cfg.Engine.WAL.PurgeKeepSegments,
+		RetentionPeriod:                cfg.Engine.RetentionPeriod,
+		SelfMonitoringEnabled:          cfg.SelfMonitoring.Enabled,
+		SelfMonitoringIntervalMs:       int(selfMonitoringInterval.Milliseconds()),
+		IndexMemtableThreshold:         cfg.Engine.Index.MemtableThreshold,
+		IndexFlushIntervalMs:           int(indexFlushInterval.Milliseconds()),
+		IndexCompactionIntervalSeconds: int(indexCompactionInterval.Seconds()),
+		IndexMaxL0Files:                cfg.Engine.Index.L0TriggerFileCount,
+		IndexBaseTargetSize:            cfg.Engine.Index.BaseTargetSizeBytes,
+		CompactionFallbackStrategy:     fallbackStrategy,
+		Logger:                         logger,
 	}
 
 	// Create the storage engine instance first.
