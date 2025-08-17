@@ -9,6 +9,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -125,7 +126,7 @@ func TestSSTableIterator_Ascending(t *testing.T) {
 	sst, allEntries := setupIteratorTest(t)
 
 	t.Run("FullScan", func(t *testing.T) {
-		it, err := sst.NewIterator(nil, nil, nil, core.Ascending)
+		it, err := sst.NewIterator(nil, nil, nil, types.Ascending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -137,7 +138,7 @@ func TestSSTableIterator_Ascending(t *testing.T) {
 		startKey := []byte("c")
 		endKey := []byte("g") // Should not include 'g'
 
-		it, err := sst.NewIterator(startKey, endKey, nil, core.Ascending)
+		it, err := sst.NewIterator(startKey, endKey, nil, types.Ascending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -155,7 +156,7 @@ func TestSSTableIterator_Ascending(t *testing.T) {
 	t.Run("RangeScan_ToEnd", func(t *testing.T) {
 		startKey := []byte("e")
 
-		it, err := sst.NewIterator(startKey, nil, nil, core.Ascending)
+		it, err := sst.NewIterator(startKey, nil, nil, types.Ascending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -183,7 +184,7 @@ func TestSSTableIterator_Descending(t *testing.T) {
 	}
 
 	t.Run("FullScan", func(t *testing.T) {
-		it, err := sst.NewIterator(nil, nil, nil, core.Descending)
+		it, err := sst.NewIterator(nil, nil, nil, types.Descending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -195,7 +196,7 @@ func TestSSTableIterator_Descending(t *testing.T) {
 		startKey := []byte("c")
 		endKey := []byte("g") // Should not include 'g'
 
-		it, err := sst.NewIterator(startKey, endKey, nil, core.Descending)
+		it, err := sst.NewIterator(startKey, endKey, nil, types.Descending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -213,7 +214,7 @@ func TestSSTableIterator_Descending(t *testing.T) {
 	t.Run("RangeScan_FromStart", func(t *testing.T) {
 		endKey := []byte("e") // Exclusive
 
-		it, err := sst.NewIterator(nil, endKey, nil, core.Descending)
+		it, err := sst.NewIterator(nil, endKey, nil, types.Descending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -238,7 +239,7 @@ func TestSSTableIterator_EdgeCases(t *testing.T) {
 		defer emptySST.Close()
 		defer os.Remove(path)
 
-		it, err := emptySST.NewIterator(nil, nil, nil, core.Ascending)
+		it, err := emptySST.NewIterator(nil, nil, nil, types.Ascending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -249,7 +250,7 @@ func TestSSTableIterator_EdgeCases(t *testing.T) {
 		startKey := []byte("g")
 		endKey := []byte("c")
 
-		it, err := sst.NewIterator(startKey, endKey, nil, core.Ascending)
+		it, err := sst.NewIterator(startKey, endKey, nil, types.Ascending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -261,7 +262,7 @@ func TestSSTableIterator_EdgeCases(t *testing.T) {
 		startKey := []byte("b_intermediate")
 		endKey := []byte("b_z")
 
-		it, err := sst.NewIterator(startKey, endKey, nil, core.Ascending)
+		it, err := sst.NewIterator(startKey, endKey, nil, types.Ascending)
 		require.NoError(t, err)
 		defer it.Close()
 
@@ -273,7 +274,7 @@ func TestSSTableIterator_EdgeCases(t *testing.T) {
 		// The iterator should start at the next key after the non-existent start key.
 		startKey := []byte("c_nonexistent")
 
-		it, err := sst.NewIterator(startKey, nil, nil, core.Ascending)
+		it, err := sst.NewIterator(startKey, nil, nil, types.Ascending)
 		require.NoError(t, err)
 		defer it.Close()
 

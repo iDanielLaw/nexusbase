@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,7 +66,7 @@ func TestStorageEngine_Query_Order(t *testing.T) {
 			Tags:      tags,
 			StartTime: baseTime.UnixNano(),
 			EndTime:   baseTime.Add(5 * time.Minute).UnixNano(),
-			Order:     core.Descending,
+			Order:     types.Descending,
 		}
 
 		iter, err := eng.Query(ctx, params)
@@ -95,7 +96,7 @@ func TestStorageEngine_Query_Order(t *testing.T) {
 			Tags:      tags,
 			StartTime: baseTime.UnixNano(),
 			EndTime:   baseTime.Add(5 * time.Minute).UnixNano(),
-			Order:     core.Ascending, // Explicitly test ascending
+			Order:     types.Ascending, // Explicitly test ascending
 		}
 
 		iter, err := eng.Query(ctx, params)

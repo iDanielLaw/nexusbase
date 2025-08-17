@@ -3,32 +3,33 @@ package nbql
 import (
 	"testing"
 
-	"github.com/INLOpen/nexusbase/core"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestGenerateCacheKey(t *testing.T) {
 	testCases := []struct {
 		name     string
-		stmt1    *QueryStatement
-		stmt2    *QueryStatement // A statement that should produce the same key as stmt1
-		diffStmt *QueryStatement // A statement that should produce a different key
+		stmt1    *corenbql.QueryStatement
+		stmt2    *corenbql.QueryStatement // A statement that should produce the same key as stmt1
+		diffStmt *corenbql.QueryStatement // A statement that should produce a different key
 	}{
 		{
 			name: "Simple relative query",
-			stmt1: &QueryStatement{
+			stmt1: &corenbql.QueryStatement{
 				Metric:           "cpu.usage",
 				IsRelative:       true,
 				RelativeDuration: "1h",
 				Tags:             map[string]string{"host": "server-a"},
 			},
-			stmt2: &QueryStatement{ // Identical query
+			stmt2: &corenbql.QueryStatement{ // Identical query
 				Metric:           "cpu.usage",
 				IsRelative:       true,
 				RelativeDuration: "1h",
 				Tags:             map[string]string{"host": "server-a"},
 			},
-			diffStmt: &QueryStatement{ // Different duration
+			diffStmt: &corenbql.QueryStatement{ // Different duration
 				Metric:           "cpu.usage",
 				IsRelative:       true,
 				RelativeDuration: "5m",
@@ -37,19 +38,19 @@ func TestGenerateCacheKey(t *testing.T) {
 		},
 		{
 			name: "Tags order should not matter",
-			stmt1: &QueryStatement{
+			stmt1: &corenbql.QueryStatement{
 				Metric:           "http.requests",
 				IsRelative:       true,
 				RelativeDuration: "30m",
 				Tags:             map[string]string{"host": "A", "region": "us-east"},
 			},
-			stmt2: &QueryStatement{ // Same tags, different order in map literal
+			stmt2: &corenbql.QueryStatement{ // Same tags, different order in map literal
 				Metric:           "http.requests",
 				IsRelative:       true,
 				RelativeDuration: "30m",
 				Tags:             map[string]string{"region": "us-east", "host": "A"},
 			},
-			diffStmt: &QueryStatement{ // Different tag value
+			diffStmt: &corenbql.QueryStatement{ // Different tag value
 				Metric:           "http.requests",
 				IsRelative:       true,
 				RelativeDuration: "30m",
@@ -58,35 +59,35 @@ func TestGenerateCacheKey(t *testing.T) {
 		},
 		{
 			name: "Query with aggregation and downsampling",
-			stmt1: &QueryStatement{
+			stmt1: &corenbql.QueryStatement{
 				Metric:             "system.load",
 				IsRelative:         true,
 				RelativeDuration:   "6h",
 				DownsampleInterval: "5m",
 				EmitEmptyWindows:   true,
-				AggregationSpecs: []AggregationSpec{
+				AggregationSpecs: []corenbql.AggregationSpec{
 					{Function: "avg", Field: "load1"},
 					{Function: "max", Field: "load5", Alias: "max_load"},
 				},
 			},
-			stmt2: &QueryStatement{ // Identical
+			stmt2: &corenbql.QueryStatement{ // Identical
 				Metric:             "system.load",
 				IsRelative:         true,
 				RelativeDuration:   "6h",
 				DownsampleInterval: "5m",
 				EmitEmptyWindows:   true,
-				AggregationSpecs: []AggregationSpec{
+				AggregationSpecs: []corenbql.AggregationSpec{
 					{Function: "avg", Field: "load1"},
 					{Function: "max", Field: "load5", Alias: "max_load"},
 				},
 			},
-			diffStmt: &QueryStatement{ // Different aggregation
+			diffStmt: &corenbql.QueryStatement{ // Different aggregation
 				Metric:             "system.load",
 				IsRelative:         true,
 				RelativeDuration:   "6h",
 				DownsampleInterval: "5m",
 				EmitEmptyWindows:   true,
-				AggregationSpecs: []AggregationSpec{
+				AggregationSpecs: []corenbql.AggregationSpec{
 					{Function: "avg", Field: "load1"},
 					// Missing the max aggregation
 				},
@@ -94,23 +95,23 @@ func TestGenerateCacheKey(t *testing.T) {
 		},
 		{
 			name: "Query with different sort order",
-			stmt1: &QueryStatement{
+			stmt1: &corenbql.QueryStatement{
 				Metric:    "logs.count",
 				StartTime: 1000,
 				EndTime:   2000,
-				SortOrder: core.Ascending,
+				SortOrder: types.Ascending,
 			},
-			stmt2: &QueryStatement{ // Identical
+			stmt2: &corenbql.QueryStatement{ // Identical
 				Metric:    "logs.count",
 				StartTime: 1000,
 				EndTime:   2000,
-				SortOrder: core.Ascending,
+				SortOrder: types.Ascending,
 			},
-			diffStmt: &QueryStatement{ // Different sort order
+			diffStmt: &corenbql.QueryStatement{ // Different sort order
 				Metric:    "logs.count",
 				StartTime: 1000,
 				EndTime:   2000,
-				SortOrder: core.Descending,
+				SortOrder: types.Descending,
 			},
 		},
 	}

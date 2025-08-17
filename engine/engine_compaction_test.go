@@ -21,6 +21,7 @@ import (
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
@@ -300,7 +301,7 @@ func verifySSTableContent(t *testing.T, tables []*sstable.SSTable, expectedData 
 	t.Helper()
 	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, tbl := range tables { // Pass nil for semaphore in test verification
-		iter, err := tbl.NewIterator(nil, nil, nil, core.Ascending)
+		iter, err := tbl.NewIterator(nil, nil, nil, types.Ascending)
 		if err != nil {
 			t.Fatalf("Failed to create iterator for table %d: %v", tbl.ID(), err)
 		}
@@ -1262,7 +1263,7 @@ func TestCompactionManager_RetentionPolicy(t *testing.T) {
 	defer newTables[0].Close()
 
 	// Verify the content of the new table
-	iter, err := newTables[0].NewIterator(nil, nil, nil, core.Ascending)
+	iter, err := newTables[0].NewIterator(nil, nil, nil, types.Ascending)
 	if err != nil {
 		t.Fatalf("Failed to create iterator for new table: %v", err)
 	}

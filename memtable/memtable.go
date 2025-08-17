@@ -10,6 +10,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/INLOpen/skiplist"
 )
 
@@ -286,10 +287,10 @@ func (m *Memtable) Len() int {
 // NewIterator creates a new iterator for the Memtable.
 // The iterator holds a read lock on the memtable for its lifetime.
 // The caller MUST call Close() on the iterator to release the lock.
-func (m *Memtable) NewIterator(startKey, endKey []byte, order core.SortOrder) core.IteratorInterface[*core.IteratorNode] {
+func (m *Memtable) NewIterator(startKey, endKey []byte, order types.SortOrder) core.IteratorInterface[*core.IteratorNode] {
 	m.mu.RLock() // Acquire read lock
 	opts := make([]skiplist.IteratorOption[*MemtableKey, *MemtableEntry], 0)
-	if order == core.Descending {
+	if order == types.Descending {
 		opts = append(opts, skiplist.WithReverse[*MemtableKey, *MemtableEntry]())
 	}
 

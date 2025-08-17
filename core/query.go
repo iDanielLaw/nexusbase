@@ -1,5 +1,7 @@
 package core
 
+import "github.com/INLOpen/nexuscore/types"
+
 type AggregationFunc string
 
 const (
@@ -33,7 +35,7 @@ type QueryParams struct {
 	DownsampleInterval string
 	IsRelative         bool   // New: Flag to indicate a relative time query
 	RelativeDuration   string // New: Stores the duration string, e.g., "1h"
-	Order              SortOrder
+	Order              types.SortOrder
 	Limit              int64
 	EmitEmptyWindows   bool
 	AfterKey           []byte // For cursor-based pagination

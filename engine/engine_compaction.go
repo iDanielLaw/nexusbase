@@ -18,6 +18,7 @@ import (
 	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexuscore/types"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -672,7 +673,7 @@ func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables [
 
 	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, table := range tables {
-		iter, err := table.NewIterator(nil, nil, cm.blockReadSemaphore, core.Ascending)
+		iter, err := table.NewIterator(nil, nil, cm.blockReadSemaphore, types.Ascending)
 		if err != nil {
 			// Close already opened iterators before returning
 			for _, openedIter := range iters {

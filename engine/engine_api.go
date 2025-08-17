@@ -13,6 +13,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/api/tsdb"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexuscore/types"
 
 	"path/filepath"
 
@@ -382,7 +383,7 @@ func (e *storageEngine) delete(ctx context.Context, key []byte) error {
 type rangeScanParams struct {
 	StartKey []byte
 	EndKey   []byte
-	Order    core.SortOrder
+	Order    types.SortOrder
 }
 
 // rangeScan provides an iterator over a range of keys.

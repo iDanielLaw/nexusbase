@@ -16,6 +16,7 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/utils"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -380,7 +381,7 @@ func TestExecutor_executePush_AutoTimestamp(t *testing.T) {
 	// สร้าง Executor ด้วย mock engine และ mock clock
 	executor := api.NewExecutor(mockEngine, mockClock)
 
-	pushCmd := &api.PushStatement{
+	pushCmd := &corenbql.PushStatement{
 		Metric:    "cpu.usage",
 		Fields:    map[string]interface{}{"value": 50.5},
 		Tags:      map[string]string{"host": "server1"},

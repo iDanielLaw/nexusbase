@@ -20,6 +20,7 @@ import (
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -554,7 +555,7 @@ func (tim *TagIndexManager) mergeIndexSSTables(tables []*sstable.SSTable, delete
 
 	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, table := range tables {
-		iter, err := table.NewIterator(nil, nil, tim.blockReadSemaphore, core.Ascending)
+		iter, err := table.NewIterator(nil, nil, tim.blockReadSemaphore, types.Ascending)
 		if err != nil {
 			for _, openedIter := range iters {
 				openedIter.Close()

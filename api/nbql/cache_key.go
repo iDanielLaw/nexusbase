@@ -5,14 +5,15 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/INLOpen/nexusbase/core"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
+	"github.com/INLOpen/nexuscore/types"
 )
 
 // generateCacheKey creates a canonical and unique string key for a given QueryStatement.
 // This key is used for caching query results, especially for relative time queries.
 // A canonical key ensures that queries that are semantically identical but written
 // differently (e.g., different tag order) produce the same key.
-func generateCacheKey(stmt *QueryStatement) string {
+func generateCacheKey(stmt *corenbql.QueryStatement) string {
 	// Using bytes.Buffer is more efficient for building strings piece by piece than concatenation.
 	var key bytes.Buffer
 
@@ -80,7 +81,7 @@ func generateCacheKey(stmt *QueryStatement) string {
 	key.WriteByte('|')
 
 	// 5. Sort Order: ASC vs DESC produces different results.
-	if stmt.SortOrder == core.Descending {
+	if stmt.SortOrder == types.Descending {
 		key.WriteString("DESC")
 	} else {
 		key.WriteString("ASC") // Default

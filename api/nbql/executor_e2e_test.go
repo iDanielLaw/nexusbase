@@ -14,6 +14,8 @@ import (
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 )
 
 // getBaseOptsForE2ETest provides basic engine options for end-to-end testing.
@@ -86,7 +88,7 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 	sourceExecutor := NewExecutor(sourceEngine, &utils.SystemClock{})
 
 	// Execute SNAPSHOT command
-	snapshotCmd, err := Parse("SNAPSHOT")
+	snapshotCmd, err := corenbql.Parse("SNAPSHOT")
 	require.NoError(t, err)
 	result, err := sourceExecutor.Execute(ctx, snapshotCmd)
 	require.NoError(t, err)
@@ -116,7 +118,7 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 
 	// Execute RESTORE command
 	restoreQuery := fmt.Sprintf("RESTORE FROM '%s' WITH OVERWRITE", filepath.ToSlash(snapshotPath))
-	restoreCmd, err := Parse(restoreQuery)
+	restoreCmd, err := corenbql.Parse(restoreQuery)
 	require.NoError(t, err)
 	_, err = destExecutor.Execute(ctx, restoreCmd)
 	require.NoError(t, err)
@@ -175,7 +177,7 @@ func TestExecutor_E2E_RemoveSeries(t *testing.T) {
 	// --- Phase 3: Execute REMOVE SERIES command ---
 	executor := NewExecutor(eng, &utils.SystemClock{})
 	removeQuery := `REMOVE SERIES "e2e.remove" TAGGED (host="a", dc="us-east")`
-	removeCmd, err := Parse(removeQuery)
+	removeCmd, err := corenbql.Parse(removeQuery)
 	require.NoError(t, err)
 
 	result, err := executor.Execute(ctx, removeCmd)
@@ -232,7 +234,7 @@ func TestExecutor_E2E_RemovePoint(t *testing.T) {
 	// --- Phase 3: Execute REMOVE FROM ... AT ... command ---
 	executor := NewExecutor(eng, &utils.SystemClock{})
 	removeQuery := `REMOVE FROM "e2e.remove.point" TAGGED (host="c") AT 200`
-	removeCmd, err := Parse(removeQuery)
+	removeCmd, err := corenbql.Parse(removeQuery)
 	require.NoError(t, err)
 
 	result, err := executor.Execute(ctx, removeCmd)
@@ -293,7 +295,7 @@ func TestExecutor_E2E_RemoveRange(t *testing.T) {
 	// --- Phase 3: Execute REMOVE FROM ... FROM ... TO ... command ---
 	executor := NewExecutor(eng, &utils.SystemClock{})
 	removeQuery := `REMOVE FROM "e2e.remove.range" TAGGED (host="d") FROM 200 TO 400`
-	removeCmd, err := Parse(removeQuery)
+	removeCmd, err := corenbql.Parse(removeQuery)
 	require.NoError(t, err)
 
 	result, err := executor.Execute(ctx, removeCmd)

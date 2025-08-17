@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -243,7 +244,7 @@ func TestMergingIterator_DescendingOrder(t *testing.T) {
 	// Create the merging iterator with DESCENDING order
 	params := MergingIteratorParams{
 		Iters:                []core.IteratorInterface[*core.IteratorNode]{iter1, iter2, iter3},
-		Order:                core.Descending,
+		Order:                types.Descending,
 		IsSeriesDeleted:      seriesDeletedChecker(nil), // No deletions for this test
 		IsRangeDeleted:       rangeDeletedChecker(nil),  // No deletions for this test
 		ExtractSeriesKeyFunc: extractSeriesKey,

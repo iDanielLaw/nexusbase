@@ -9,6 +9,7 @@ import (
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/utils"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -192,7 +193,7 @@ func TestExecutor_SnapshotRestore(t *testing.T) {
 	t.Run("executeSnapshot success", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
 		executor := NewExecutor(mockEngine, &utils.SystemClock{})
-		cmd := &SnapshotStatement{}
+		cmd := &corenbql.SnapshotStatement{}
 		expectedPath := "/var/data/nexus/snapshots/snap-123.nbb"
 
 		mockEngine.On("CreateSnapshot", ctx).Return(expectedPath, nil).Once()
@@ -209,7 +210,7 @@ func TestExecutor_SnapshotRestore(t *testing.T) {
 	t.Run("executeSnapshot engine error", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
 		executor := NewExecutor(mockEngine, &utils.SystemClock{})
-		cmd := &SnapshotStatement{}
+		cmd := &corenbql.SnapshotStatement{}
 		expectedError := errors.New("disk is full")
 
 		mockEngine.On("CreateSnapshot", ctx).Return("", expectedError).Once()
@@ -223,7 +224,7 @@ func TestExecutor_SnapshotRestore(t *testing.T) {
 	t.Run("executeRestore success", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
 		executor := NewExecutor(mockEngine, &utils.SystemClock{})
-		cmd := &RestoreStatement{Path: "/path/to/restore.nbb", Overwrite: true}
+		cmd := &corenbql.RestoreStatement{Path: "/path/to/restore.nbb", Overwrite: true}
 
 		mockEngine.On("RestoreFromSnapshot", ctx, cmd.Path, cmd.Overwrite).Return(nil).Once()
 

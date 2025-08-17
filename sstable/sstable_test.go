@@ -17,6 +17,7 @@ import (
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sys"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -919,7 +920,7 @@ func TestSSTableIterator_New(t *testing.T) {
 	expectedAllEntriesFromSSTable := entries // Use the original entries directly
 
 	t.Run("full_scan_new", func(t *testing.T) {
-		iter, err := sst.NewIterator(nil, nil, nil, core.Ascending)
+		iter, err := sst.NewIterator(nil, nil, nil, types.Ascending)
 		if err != nil {
 			t.Fatalf("sst.NewIterator(nil, nil) error = %v", err)
 		}
@@ -952,7 +953,7 @@ func TestSSTableIterator_New(t *testing.T) {
 	t.Run("range_scan_banana_to_date_new", func(t *testing.T) {
 		startKey := []byte("banana")
 		endKey := []byte("date") // Exclusive
-		iter, err := sst.NewIterator(startKey, endKey, nil, core.Ascending)
+		iter, err := sst.NewIterator(startKey, endKey, nil, types.Ascending)
 		if err != nil {
 			t.Fatalf("sst.NewIterator(%s, %s) error = %v", startKey, endKey, err)
 		}
@@ -993,7 +994,7 @@ func TestSSTableIterator_New(t *testing.T) {
 
 	t.Run("scan_from_key_to_end", func(t *testing.T) {
 		startKey := []byte("date")
-		iter, err := sst.NewIterator(startKey, nil, nil, core.Ascending) // nil endKey means scan to end
+		iter, err := sst.NewIterator(startKey, nil, nil, types.Ascending) // nil endKey means scan to end
 		if err != nil {
 			t.Fatalf("sst.NewIterator(%s, nil) error = %v", startKey, err)
 		}
@@ -1035,7 +1036,7 @@ func TestSSTableIterator_New(t *testing.T) {
 	t.Run("scan_empty_range_no_data", func(t *testing.T) {
 		startKey := []byte("foo")
 		endKey := []byte("goo") // A range with no data in between
-		iter, err := sst.NewIterator(startKey, endKey, nil, core.Ascending)
+		iter, err := sst.NewIterator(startKey, endKey, nil, types.Ascending)
 		if err != nil {
 			t.Fatalf("sst.NewIterator(%s, %s) error = %v", startKey, endKey, err)
 		}
@@ -1056,7 +1057,7 @@ func TestSSTableIterator_New(t *testing.T) {
 	t.Run("scan_empty_range_invalid_bounds", func(t *testing.T) {
 		startKey := []byte("zebra")
 		endKey := []byte("apple") // startKey > endKey
-		iter, err := sst.NewIterator(startKey, endKey, nil, core.Ascending)
+		iter, err := sst.NewIterator(startKey, endKey, nil, types.Ascending)
 		if err != nil {
 			t.Fatalf("sst.NewIterator(%s, %s) error = %v", startKey, endKey, err)
 		}
@@ -1457,7 +1458,7 @@ func TestSSTable_Close(t *testing.T) {
 	})
 
 	t.Run("NewIterator_After_Close", func(t *testing.T) {
-		_, err := sst.NewIterator(nil, nil, nil, core.Ascending)
+		_, err := sst.NewIterator(nil, nil, nil, types.Ascending)
 		assert.ErrorIs(t, err, ErrClosed, "NewIterator() after Close() should return ErrClosed")
 	})
 

@@ -7,6 +7,7 @@ import (
 	"bytes"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexuscore/types"
 	// "testing" // Temporary for logging in tests
 )
 
@@ -26,10 +27,10 @@ type decodedEntry struct {
 type sstableIterator struct {
 	sstable *SSTable // Reference to the parent SSTable
 
-	startKey []byte         // Start boundary (inclusive)
-	endKey   []byte         // End boundary (exclusive)
-	sem      chan struct{}  // Optional semaphore to limit block read concurrency
-	order    core.SortOrder // The iteration order (ascending/descending)
+	startKey []byte          // Start boundary (inclusive)
+	endKey   []byte          // End boundary (exclusive)
+	sem      chan struct{}   // Optional semaphore to limit block read concurrency
+	order    types.SortOrder // The iteration order (ascending/descending)
 
 	// State for iteration
 	currentKey       []byte
@@ -51,7 +52,7 @@ type sstableIterator struct {
 // NewSSTableIterator creates a new iterator for the given SSTable and key range.
 // This function is typically called by SSTable.NewIterator.
 // Corresponds to FR4.7.
-func NewSSTableIterator(s *SSTable, startKey, endKey []byte, sem chan struct{}, order core.SortOrder) (core.IteratorInterface[*core.IteratorNode], error) {
+func NewSSTableIterator(s *SSTable, startKey, endKey []byte, sem chan struct{}, order types.SortOrder) (core.IteratorInterface[*core.IteratorNode], error) {
 	// TODO (FR4.7, FR4.8): Implementation details:
 	it := &sstableIterator{
 		sstable:           s,
@@ -68,7 +69,7 @@ func NewSSTableIterator(s *SSTable, startKey, endKey []byte, sem chan struct{}, 
 		return it, nil
 	}
 
-	if order == core.Ascending {
+	if order == types.Ascending {
 		// For ascending, find the block that could contain the startKey.
 		it.currentIndexEntry = s.index.findFirstGreaterOrEqual(startKey)
 		// If startKey is not nil and the found block's FirstKey is strictly greater than startKey,
@@ -127,7 +128,7 @@ func (it *sstableIterator) loadBlockAtIndex(blockIdx int) bool {
 
 	it.currentIndexEntry = blockIdx
 
-	if it.order == core.Ascending {
+	if it.order == types.Ascending {
 		it.blockIter = NewBlockIterator(entriesData)
 	} else { // Descending
 		// For descending order, we decode the entire block into memory to iterate backwards.
@@ -157,7 +158,7 @@ func (it *sstableIterator) Next() bool {
 		return false
 	}
 
-	if it.order == core.Ascending {
+	if it.order == types.Ascending {
 		for {
 			if it.blockIter != nil && it.blockIter.Next() {
 				key := it.blockIter.Key()
