@@ -14,7 +14,7 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 )
@@ -83,7 +83,7 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 		logger.Info("gRPC server is disabled (port is 0 or not configured).")
 	}
 
-	executor := nbql.NewExecutor(eng, &utils.SystemClock{})
+	executor := nbql.NewExecutor(eng, clock.SystemClockDefault)
 
 	// 2. Initialize the TCP (NBQL) server if the port is configured.
 	if cfg.Server.TCPPort > 0 {

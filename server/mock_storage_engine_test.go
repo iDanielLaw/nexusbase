@@ -7,7 +7,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -184,12 +184,12 @@ func (m *MockStorageEngine) GetTagValues(metric, tagKey string) ([]string, error
 	}
 	return args.Get(0).([]string), args.Error(1)
 }
-func (m *MockStorageEngine) GetClock() utils.Clock {
+func (m *MockStorageEngine) GetClock() clock.Clock {
 	args := m.Called()
 	if args.Get(0) == nil {
-		return &utils.SystemClock{} // Return a default clock if not mocked
+		return &clock.SystemClock{} // Return a default clock if not mocked
 	}
-	return args.Get(0).(utils.Clock)
+	return args.Get(0).(clock.Clock)
 }
 
 // MockQueryResultIterator is a manual mock implementation of core.QueryResultIteratorInterface.

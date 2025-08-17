@@ -9,8 +9,8 @@ import (
 	"time" // Import time
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexuscore/types"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/INLOpen/skiplist"
 )
 
@@ -171,13 +171,13 @@ type Memtable struct {
 
 // NewMemtable creates a new Memtable with a given size threshold.
 // Corresponds to FR3.1, FR3.2 (threshold part).
-func NewMemtable(threshold int64, clock utils.Clock) *Memtable {
+func NewMemtable(threshold int64, clk clock.Clock) *Memtable {
 	return &Memtable{
 		data:           skiplist.NewWithComparator[*MemtableKey, *MemtableEntry](comparator), // Pass an instance of the Comparable type
 		threshold:      threshold,
 		sizeBytes:      0, // Start with 0 size
 		FlushRetries:   0, // Initialize flush retries
-		CreationTime:   clock.Now(),
+		CreationTime:   clk.Now(),
 		CompletionChan: nil, // Default to nil, only set for synchronous flushes
 		Err:            nil,
 	}

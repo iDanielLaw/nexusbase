@@ -21,8 +21,8 @@ import (
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/sys"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -40,7 +40,7 @@ type mockEngineProvider struct {
 	sstDir  string
 	walDir  string
 	logger  *slog.Logger
-	clock   utils.Clock
+	clock   clock.Clock
 	tracer  trace.Tracer
 	hooks   hooks.HookManager
 
@@ -70,7 +70,7 @@ func newMockEngineProvider(t *testing.T, dataDir string) *mockEngineProvider {
 		sstDir:             filepath.Join(dataDir, "sst"),
 		walDir:             filepath.Join(dataDir, "wal"),
 		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		clock:              utils.NewMockClock(time.Now()),
+		clock:              clock.NewMockClock(time.Now()),
 		tracer:             noop.NewTracerProvider().Tracer("test"),
 		hooks:              hooks.NewHookManager(nil),
 		levelsManager:      lm,
@@ -91,7 +91,7 @@ func (m *mockEngineProvider) CheckStarted() error {
 	return fmt.Errorf("engine not started")
 }
 func (m *mockEngineProvider) GetWAL() wal.WALInterface { return m.wal }
-func (m *mockEngineProvider) GetClock() utils.Clock    { return m.clock }
+func (m *mockEngineProvider) GetClock() clock.Clock    { return m.clock }
 func (m *mockEngineProvider) GetLogger() *slog.Logger {
 	// Lenient mock: just return the logger.
 	return m.logger
@@ -1057,7 +1057,7 @@ func TestManager_CreateIncremental(t *testing.T) {
 		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
 
 		provider := newMockEngineProvider(t, dataDir)
-		mockClock, ok := provider.clock.(*utils.MockClock)
+		mockClock, ok := provider.clock.(*clock.MockClock)
 		require.True(t, ok, "provider clock should be a mock clock")
 
 		require.NoError(t, os.MkdirAll(provider.sstDir, 0755))

@@ -13,7 +13,7 @@ import (
 
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -65,7 +65,7 @@ func TestTCP2Server_HandlerConnection(t *testing.T) {
 	// Setup mocks and dependencies
 	mockAuth := &mockAuthenticator{}
 	mockEngine := new(MockStorageEngine)
-	mockClock := utils.NewMockClock(time.Now())
+	mockClock := clock.NewMockClock(time.Now())
 	executor := api.NewExecutor(mockEngine, mockClock)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 

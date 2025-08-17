@@ -20,8 +20,8 @@ import (
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/sys"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexuscore/types"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
@@ -105,7 +105,7 @@ func (m *mockFileRemover) Remove(name string) error {
 }
 
 // Helper to create a CompactionManager with a mock SSTableWriterFactory
-func setupCompactionManagerWithMockWriter(t *testing.T, mockWriter *MockSSTableWriter, clock utils.Clock) CompactionManagerInterface {
+func setupCompactionManagerWithMockWriter(t *testing.T, mockWriter *MockSSTableWriter, clock clock.Clock) CompactionManagerInterface {
 	t.Helper()
 	logger := slog.Default()
 
@@ -379,7 +379,7 @@ func TestCompactionManager_Merge_WriterAddError(t *testing.T) {
 		addErr:          fmt.Errorf("simulated add error"),
 		currentSizeFunc: func() int64 { return 0 }, // Prevent rollover logic from triggering
 	}
-	cmIface := setupCompactionManagerWithMockWriter(t, mockWriter, utils.NewMockClock(mockNow))
+	cmIface := setupCompactionManagerWithMockWriter(t, mockWriter, clock.NewMockClock(mockNow))
 	cm := cmIface.(*CompactionManager)
 
 	inputSST := createDummySSTable(t, cm.Engine, 101, []testEntry{
@@ -399,7 +399,7 @@ func TestCompactionManager_Merge_WriterAddError(t *testing.T) {
 func TestCompactionManager_Merge_WriterFinishError(t *testing.T) {
 	mockWriter := &MockSSTableWriter{failFinish: true, finishErr: fmt.Errorf("simulated finish error")}
 	mockNow := time.Date(2024, 7, 15, 12, 0, 0, 0, time.UTC)
-	cmIface := setupCompactionManagerWithMockWriter(t, mockWriter, utils.NewMockClock(mockNow))
+	cmIface := setupCompactionManagerWithMockWriter(t, mockWriter, clock.NewMockClock(mockNow))
 	cm := cmIface.(*CompactionManager)
 
 	inputSST := createDummySSTable(t, cm.Engine, 101, []testEntry{
@@ -424,7 +424,7 @@ func TestCompactionManager_Merge_WriterFinishError(t *testing.T) {
 func TestCompactionManager_Merge_LoadSSTableError(t *testing.T) {
 	mockWriter := &MockSSTableWriter{failLoad: true} // This mock will cause LoadSSTable to fail
 	mockNow := time.Date(2024, 7, 15, 12, 0, 0, 0, time.UTC)
-	cmIface := setupCompactionManagerWithMockWriter(t, mockWriter, utils.NewMockClock(mockNow))
+	cmIface := setupCompactionManagerWithMockWriter(t, mockWriter, clock.NewMockClock(mockNow))
 	cm := cmIface.(*CompactionManager)
 
 	inputSST := createDummySSTable(t, cm.Engine, 101, []testEntry{
@@ -795,7 +795,7 @@ func TestEngine_Compaction_WithRetentionPolicy(t *testing.T) {
 
 	// Define a fixed "now" for the test and a retention period
 	mockNow := time.Now() //time.Date(2024, 7, 15, 12, 0, 0, 0, time.UTC)
-	clock := utils.NewMockClock(mockNow)
+	clk := clock.NewMockClock(mockNow)
 	retentionPeriod := "30m"
 	retentionDuration, _ := time.ParseDuration(retentionPeriod)
 	cutoffTime := mockNow.Add(-retentionDuration)
@@ -815,7 +815,7 @@ func TestEngine_Compaction_WithRetentionPolicy(t *testing.T) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		BloomFilterFalsePositiveRate: 0.01,
 		Metrics:                      NewEngineMetrics(false, "retention_e2e_"),
-		Clock:                        clock,
+		Clock:                        clk,
 		Logger:                       slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})).With("component", "StorageEngine"),
 	}
 
@@ -851,7 +851,7 @@ func TestEngine_Compaction_WithRetentionPolicy(t *testing.T) {
 	// fmt.Println("_------------------------------------------------")
 
 	// Advance the clock to ensure the next SSTable gets a unique ID
-	opts.Clock = utils.NewMockClock(mockNow.Add(1 * time.Second))
+	opts.Clock = clock.NewMockClock(mockNow.Add(1 * time.Second))
 
 	// --- Phase 2: Create second L0 file with new data ---
 	engine2, err := NewStorageEngine(opts)
@@ -915,7 +915,7 @@ func TestEngine_Compaction_WithRetentionPolicy(t *testing.T) {
 	unlockFunc()
 
 	// Manually trigger a synchronous compaction
-	clock.SetTime(mockNow.Add(1 * time.Minute))
+	clk.SetTime(mockNow.Add(1 * time.Minute))
 	if err := concreteEngine3.compactor.(*CompactionManager).compactL0ToL1(context.Background()); err != nil {
 		t.Fatalf("Manual compaction failed: %v", err)
 	}
@@ -1198,7 +1198,7 @@ func TestCompactionManager_RetentionPolicy(t *testing.T) {
 	// Setup a dummy engine to get a StringStore, ensure it uses the same data directory
 	dummyEngine, err := NewStorageEngine(StorageEngineOptions{
 		DataDir:           tempDir,
-		Clock:             utils.NewMockClock(mockNow),
+		Clock:             clock.NewMockClock(mockNow),
 		MaxLevels:         3,
 		MaxL0Files:        2,
 		TargetSSTableSize: 1024,

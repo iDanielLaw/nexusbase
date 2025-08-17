@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexuscore/types"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -132,7 +132,7 @@ func TestMemtable_Get_Scenarios(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mt := NewMemtable(1024, &utils.SystemClock{})
+			mt := NewMemtable(1024, clock.SystemClockDefault)
 			for _, op := range tc.operations {
 				// Encode the test value string into the expected byte format for FieldValues
 				valueBytes := makeTestEventValue(t, op.value)
@@ -155,7 +155,7 @@ func TestMemtable_Get_Scenarios(t *testing.T) {
 	}
 }
 func TestMemtable_Size(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	key1 := []byte("testKey1")
 	value1 := makeTestEventValue(t, "testValue1")
@@ -190,7 +190,7 @@ func TestMemtable_Size(t *testing.T) {
 }
 
 func TestMemtable_Iterator(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	entries := []struct {
 		key   []byte
@@ -247,7 +247,7 @@ func TestMemtable_Iterator(t *testing.T) {
 }
 
 func TestMemtable_Iterator_Ranges(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	keys := []string{"a", "b", "c", "d", "e", "f"}
 	for i, k := range keys {
 		valueBytes := makeTestEventValue(t, "v"+k)
@@ -382,7 +382,7 @@ func TestMemtable_Iterator_Ranges(t *testing.T) {
 }
 
 func TestMemtable_IsFull(t *testing.T) {
-	mt := NewMemtable(100, &utils.SystemClock{}) // Small threshold for testing
+	mt := NewMemtable(100, clock.SystemClockDefault) // Small threshold for testing
 
 	// Put entries until it's almost full
 	i := 0
@@ -437,7 +437,7 @@ func (m *MockSSTableWriter) FilePath() string   { return "mock_path" }
 func (m *MockSSTableWriter) CurrentSize() int64 { return 0 } // Not relevant for this test
 
 func TestMemtable_FlushToSSTable_WriterError(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	mt.Put([]byte("key1"), makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
 	mt.Put([]byte("key2"), makeTestEventValue(t, "val2"), core.EntryTypePutEvent, 2)
 
@@ -470,7 +470,7 @@ func TestMemtable_Close_Pool(t *testing.T) {
 
 	// 1. Create and populate a memtable. This initial run will have allocations
 	// as it gets new objects from the pool.
-	mt1 := NewMemtable(1024, &utils.SystemClock{})
+	mt1 := NewMemtable(1024, clock.SystemClockDefault)
 	for i, data := range testData {
 		valueBytes := makeTestEventValue(t, string(data.value))
 		if err := mt1.Put(data.key, valueBytes, core.EntryTypePutEvent, uint64(i+1)); err != nil {
@@ -485,7 +485,7 @@ func TestMemtable_Close_Pool(t *testing.T) {
 	// 3. Now, measure the allocations for populating a new memtable.
 	// Because the pools for MemtableKey and MemtableEntry should now be populated, we expect zero allocations for them.
 	allocs := testing.AllocsPerRun(1, func() {
-		mt2 := NewMemtable(1024, &utils.SystemClock{})
+		mt2 := NewMemtable(1024, clock.SystemClockDefault)
 		for i, data := range testData {
 			valueBytes := makeTestEventValue(t, string(data.value))
 			// These Put calls should get objects from the pool, resulting in no new allocations.
@@ -499,7 +499,7 @@ func TestMemtable_Close_Pool(t *testing.T) {
 }
 
 func TestMemtable_Iterator_ComplexPutDelete(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	// Sequence of operations
 	// SeqNum is crucial here for determining the latest state of a key
@@ -622,7 +622,7 @@ func TestMemtable_Iterator_ComplexPutDelete(t *testing.T) {
 
 // TestMemtableIterator_Empty tests the iterator on an empty memtable.
 func TestMemtableIterator_Empty(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	// Ascending
 	iterAsc := mt.NewIterator(nil, nil, types.Ascending)
@@ -661,7 +661,7 @@ func TestMemtableIterator_Empty(t *testing.T) {
 
 // TestMemtableIterator_SingleItem tests the iterator on a memtable with one item.
 func TestMemtableIterator_SingleItem(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	key1 := []byte("key1")
 	val1 := makeTestEventValue(t, "val1")
 	mt.Put(key1, val1, core.EntryTypePutEvent, 1)
@@ -715,7 +715,7 @@ func TestMemtableIterator_SingleItem(t *testing.T) {
 // where the initial seek lands on a key that is >= endKey, requiring the iterator to advance
 // to the next distinct key before starting.
 func TestMemtableIterator_DescendingBoundsEdgeCase(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	keys := []string{"a", "b", "d", "e"} // Note: "c" is missing
 	for i, k := range keys {
 		valueBytes := makeTestEventValue(t, "v"+k)
@@ -742,7 +742,7 @@ func TestMemtableIterator_DescendingBoundsEdgeCase(t *testing.T) {
 
 // TestMemtableIterator_Close ensures the Close method works correctly.
 func TestMemtableIterator_Close(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	mt.Put([]byte("a"), makeTestEventValue(t, "a"), core.EntryTypePutEvent, 1)
 
 	iter := mt.NewIterator(nil, nil, types.Ascending)
@@ -765,7 +765,7 @@ func TestMemtableIterator_Close(t *testing.T) {
 // to use an internal Prev() call to correctly position the iterator on the latest version
 // without extra memory allocations.
 func TestMemtableIterator_Descending_MultiVersion_Correctness(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	// Add multiple versions for "key-b"
 	mt.Put([]byte("key-b"), makeTestEventValue(t, "v1"), core.EntryTypePutEvent, 10)
@@ -829,7 +829,7 @@ func TestMemtableIterator_Descending_MultiVersion_Correctness(t *testing.T) {
 // createBenchmarkMemtable creates and populates a memtable for benchmark tests.
 func createBenchmarkMemtable(b *testing.B, numItems int, versionsPerKey int) *Memtable {
 	b.Helper()
-	mt := NewMemtable(int64(numItems*versionsPerKey*200), &utils.SystemClock{}) // Estimate size
+	mt := NewMemtable(int64(numItems*versionsPerKey*200), clock.SystemClockDefault) // Estimate size
 	for i := 0; i < numItems; i++ {
 		key := []byte(fmt.Sprintf("key-%09d", i))
 		for v := 0; v < versionsPerKey; v++ {

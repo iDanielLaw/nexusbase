@@ -9,7 +9,7 @@ import (
 	"github.com/INLOpen/nexusbase/internal"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -20,7 +20,7 @@ import (
 
 // --- State & Config Getters ---
 
-func (e *storageEngine) GetClock() utils.Clock {
+func (e *storageEngine) GetClock() clock.Clock {
 	return e.clock
 }
 

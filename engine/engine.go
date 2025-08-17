@@ -20,7 +20,7 @@ import (
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/snapshot"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
@@ -87,7 +87,7 @@ type StorageEngineOptions struct {
 	IndexMaxLevels                 int
 	IndexBaseTargetSize            int64
 	Logger                         *slog.Logger
-	Clock                          utils.Clock // Clock interface for testing, defaults to SystemClock
+	Clock                          clock.Clock // Clock interface for testing, defaults to SystemClock
 
 	SelfMonitoringEnabled    bool
 	SelfMonitoringPrefix     string
@@ -156,7 +156,7 @@ type storageEngine struct {
 
 	internalFile internalFileManage
 
-	clock utils.Clock
+	clock clock.Clock
 
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
@@ -194,11 +194,11 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		logger = opts.Logger.With("component", "StorageEngine")
 	}
 
-	var clock utils.Clock
+	var clk clock.Clock
 	if opts.Clock == nil {
-		clock = &utils.SystemClock{}
+		clk = clock.SystemClockDefault
 	} else {
-		clock = opts.Clock
+		clk = opts.Clock
 	}
 
 	if opts.BloomFilterFalsePositiveRate < 0 || opts.BloomFilterFalsePositiveRate > 1 {
@@ -213,7 +213,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		flushChan:          make(chan struct{}, 1),        // For async flushes from Put
 		forceFlushChan:     make(chan chan error),         // For sync flushes, unbuffered
 		shutdownChan:       make(chan struct{}),
-		engineStartTime:    clock.Now(),
+		engineStartTime:    clk.Now(),
 		activeSeries:       make(map[string]struct{}),
 		deletedSeries:      make(map[string]uint64),
 		pubsub:             NewPubSub(), // Initialize PubSub
@@ -221,7 +221,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		logger:             logger,
 		metrics:            opts.Metrics,
 		hookManager:        hooks.NewHookManager(logger.With("component", "HookManager")),
-		clock:              clock,
+		clock:              clk,
 		internalFile: internalFileManage{
 			Create:   sys.Create,
 			Open:     sys.Open,

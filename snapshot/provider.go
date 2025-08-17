@@ -10,8 +10,8 @@ import (
 	"github.com/INLOpen/nexusbase/internal"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -22,7 +22,7 @@ type EngineProvider interface {
 	// State & Config
 	CheckStarted() error
 	GetWAL() wal.WALInterface
-	GetClock() utils.Clock
+	GetClock() clock.Clock
 	GetLogger() *slog.Logger
 	GetTracer() trace.Tracer
 	GetHookManager() hooks.HookManager

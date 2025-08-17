@@ -14,7 +14,7 @@ import (
 
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -253,7 +253,7 @@ func TestTCPConnectionHandler_HandleAuthentication(t *testing.T) {
 
 func TestTCPConnectionHandler_HandleCommand(t *testing.T) {
 	mockEngine := new(MockStorageEngine)
-	mockClock := utils.NewMockClock(time.Now())
+	mockClock := clock.NewMockClock(time.Now())
 	executor := api.NewExecutor(mockEngine, mockClock)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	handler := NewTCPConnectionHandler(executor, nil, testLogger)
