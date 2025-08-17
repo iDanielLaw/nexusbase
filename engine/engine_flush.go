@@ -13,6 +13,7 @@ import (
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexuscore/types"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -180,7 +181,7 @@ func (e *storageEngine) moveToDLQ(mem *memtable.Memtable) error {
 	}
 	defer file.Close()
 	encoder := json.NewEncoder(file)
-	iter := mem.NewIterator(nil, nil, core.Ascending)
+	iter := mem.NewIterator(nil, nil, types.Ascending)
 	defer iter.Close()
 	for iter.Next() {
 		cur, err := iter.At()

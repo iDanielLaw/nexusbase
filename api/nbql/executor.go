@@ -9,39 +9,40 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 )
 
 // Executor processes parsed AST commands and interacts with the storage engine.
 type Executor struct {
 	engine engine.StorageEngineInterface
-	clock  utils.Clock
+	clock  clock.Clock
 }
 
 // NewExecutor creates a new command executor.
-func NewExecutor(eng engine.StorageEngineInterface, clock utils.Clock) *Executor {
+func NewExecutor(eng engine.StorageEngineInterface, clock clock.Clock) *Executor {
 	return &Executor{engine: eng, clock: clock}
 }
 
 // Execute takes a command from the AST and runs it against the engine.
 // It returns a formatted string response.
-func (e *Executor) Execute(ctx context.Context, cmd Command) (interface{}, error) {
+func (e *Executor) Execute(ctx context.Context, cmd corenbql.Command) (interface{}, error) {
 	switch c := cmd.(type) {
-	case *PushStatement:
+	case *corenbql.PushStatement:
 		return e.executePush(ctx, c)
-	case *PushsStatement:
+	case *corenbql.PushsStatement:
 		return e.executePushs(ctx, c)
-	case *QueryStatement:
+	case *corenbql.QueryStatement:
 		return e.executeQuery(ctx, c)
-	case *RemoveStatement:
+	case *corenbql.RemoveStatement:
 		return e.executeRemove(ctx, c)
-	case *ShowStatement:
+	case *corenbql.ShowStatement:
 		return e.executeShow(ctx, c)
-	case *FlushStatement:
+	case *corenbql.FlushStatement:
 		return e.executeFlush(ctx, c)
-	case *SnapshotStatement:
+	case *corenbql.SnapshotStatement:
 		return e.executeSnapshot(ctx, c)
-	case *RestoreStatement:
+	case *corenbql.RestoreStatement:
 		return e.executeRestore(ctx, c)
 	default:
 		return "", fmt.Errorf("unknown or unsupported command type: %T", c)
@@ -49,7 +50,7 @@ func (e *Executor) Execute(ctx context.Context, cmd Command) (interface{}, error
 }
 
 // executeSnapshot handles the SNAPSHOT command.
-func (e *Executor) executeSnapshot(ctx context.Context, cmd *SnapshotStatement) (interface{}, error) {
+func (e *Executor) executeSnapshot(ctx context.Context, cmd *corenbql.SnapshotStatement) (interface{}, error) {
 	// Note: The StorageEngineInterface needs to be updated with a CreateSnapshot method.
 	// e.g., CreateSnapshot(ctx context.Context) (snapshotPath string, err error)
 	snapshotPath, err := e.engine.CreateSnapshot(ctx)
@@ -66,7 +67,7 @@ func (e *Executor) executeSnapshot(ctx context.Context, cmd *SnapshotStatement) 
 }
 
 // executeRestore handles the RESTORE command.
-func (e *Executor) executeRestore(ctx context.Context, cmd *RestoreStatement) (interface{}, error) {
+func (e *Executor) executeRestore(ctx context.Context, cmd *corenbql.RestoreStatement) (interface{}, error) {
 	// Note: The StorageEngineInterface needs to be updated with a RestoreFromSnapshot method.
 	// e.g., RestoreFromSnapshot(ctx context.Context, path string, overwrite bool) error
 	err := e.engine.RestoreFromSnapshot(ctx, cmd.Path, cmd.Overwrite)
@@ -80,7 +81,7 @@ func (e *Executor) executeRestore(ctx context.Context, cmd *RestoreStatement) (i
 }
 
 // executePush handles the PUSH command.
-func (e *Executor) executePush(ctx context.Context, cmd *PushStatement) (interface{}, error) {
+func (e *Executor) executePush(ctx context.Context, cmd *corenbql.PushStatement) (interface{}, error) {
 	ts := cmd.Timestamp
 	if ts == 0 {
 		ts = e.clock.Now().UnixNano()
@@ -101,7 +102,7 @@ func (e *Executor) executePush(ctx context.Context, cmd *PushStatement) (interfa
 }
 
 // executePush handles the PUSH command batch.
-func (e *Executor) executePushs(ctx context.Context, cmd *PushsStatement) (interface{}, error) {
+func (e *Executor) executePushs(ctx context.Context, cmd *corenbql.PushsStatement) (interface{}, error) {
 	now := e.clock.Now().UnixNano()
 	dps := make([]core.DataPoint, len(cmd.Items))
 	for i, item := range cmd.Items {
@@ -127,7 +128,7 @@ func (e *Executor) executePushs(ctx context.Context, cmd *PushsStatement) (inter
 	return ManipulateResponse{Status: ResponseOK, RowsAffected: uint64(len(cmd.Items))}, nil
 }
 
-func (e *Executor) QueryStream(ctx context.Context, cmd *QueryStatement) (core.QueryParams, core.QueryResultIteratorInterface, error) {
+func (e *Executor) QueryStream(ctx context.Context, cmd *corenbql.QueryStatement) (core.QueryParams, core.QueryResultIteratorInterface, error) {
 	// Translate AST-level AggregationSpecs to core-level AggregationSpecs
 	coreAggSpecs := make([]core.AggregationSpec, len(cmd.AggregationSpecs))
 	for i, spec := range cmd.AggregationSpecs {
@@ -171,9 +172,9 @@ func (e *Executor) QueryStream(ctx context.Context, cmd *QueryStatement) (core.Q
 }
 
 // executeRemove handles the REMOVE command.
-func (e *Executor) executeRemove(ctx context.Context, cmd *RemoveStatement) (interface{}, error) {
+func (e *Executor) executeRemove(ctx context.Context, cmd *corenbql.RemoveStatement) (interface{}, error) {
 	switch cmd.Type {
-	case RemoveTypeSeries:
+	case corenbql.RemoveTypeSeries:
 		// This handles REMOVE SERIES "metric" TAGGED (...)
 		if err := e.engine.DeleteSeries(ctx, cmd.Metric, cmd.Tags); err != nil {
 			return ManipulateResponse{}, err
@@ -181,7 +182,7 @@ func (e *Executor) executeRemove(ctx context.Context, cmd *RemoveStatement) (int
 		// DeleteSeries affects 1 series definition.
 		return ManipulateResponse{Status: ResponseOK, RowsAffected: 1}, nil
 
-	case RemoveTypePoint:
+	case corenbql.RemoveTypePoint:
 		// This handles REMOVE FROM "metric" TAGGED (...) AT <timestamp>
 		// We can use DeletesByTimeRange with the same start and end time to delete a single point.
 		if err := e.engine.DeletesByTimeRange(ctx, cmd.Metric, cmd.Tags, cmd.StartTime, cmd.StartTime); err != nil {
@@ -189,7 +190,7 @@ func (e *Executor) executeRemove(ctx context.Context, cmd *RemoveStatement) (int
 		}
 		return ManipulateResponse{Status: ResponseOK, RowsAffected: 1}, nil
 
-	case RemoveTypeRange:
+	case corenbql.RemoveTypeRange:
 		// This handles REMOVE FROM "metric" TAGGED (...) FROM <start> TO <end>
 		if err := e.engine.DeletesByTimeRange(ctx, cmd.Metric, cmd.Tags, cmd.StartTime, cmd.EndTime); err != nil {
 			return ManipulateResponse{}, fmt.Errorf("failed to delete range for series '%s' with tags %v: %w", cmd.Metric, cmd.Tags, err)
@@ -204,17 +205,17 @@ func (e *Executor) executeRemove(ctx context.Context, cmd *RemoveStatement) (int
 }
 
 // executeShow handles the SHOW command.
-func (e *Executor) executeShow(ctx context.Context, cmd *ShowStatement) (interface{}, error) {
+func (e *Executor) executeShow(ctx context.Context, cmd *corenbql.ShowStatement) (interface{}, error) {
 	var results []string
 	var err error
 
 	switch cmd.Type {
-	case ShowMetrics:
+	case corenbql.ShowMetrics:
 		results, err = e.engine.GetMetrics()
-	case ShowTagKeys:
+	case corenbql.ShowTagKeys:
 		// Corresponds to SHOW TAG KEYS FROM <metric>
 		results, err = e.engine.GetTagsForMetric(cmd.Metric)
-	case ShowTagValues:
+	case corenbql.ShowTagValues:
 		// Corresponds to SHOW TAG VALUES [FROM <metric>] WITH KEY = <key>
 		results, err = e.engine.GetTagValues(cmd.Metric, cmd.TagKey)
 	default:
@@ -233,19 +234,19 @@ func (e *Executor) executeShow(ctx context.Context, cmd *ShowStatement) (interfa
 }
 
 // executeFlush handles the FLUSH command with its variations.
-func (e *Executor) executeFlush(ctx context.Context, cmd *FlushStatement) (interface{}, error) {
+func (e *Executor) executeFlush(ctx context.Context, cmd *corenbql.FlushStatement) (interface{}, error) {
 	switch cmd.Type {
-	case FlushMemtable:
+	case corenbql.FlushMemtable:
 		// Asynchronously trigger memtable rotation.
 		if err := e.engine.ForceFlush(ctx, false); err != nil {
 			return nil, fmt.Errorf("force flush memtable failed: %w", err)
 		}
 		return ManipulateResponse{Status: ResponseOK /*, Message: "Memtable flush to immutable list triggered."*/}, nil
-	case FlushDisk:
+	case corenbql.FlushDisk:
 		// Asynchronously trigger a compaction cycle check.
 		e.engine.TriggerCompaction()
 		return ManipulateResponse{Status: ResponseOK /*, Message: "Compaction check triggered."*/}, nil
-	case FlushAll:
+	case corenbql.FlushAll:
 		// Synchronously flush memtable all the way to disk.
 		if err := e.engine.ForceFlush(ctx, true); err != nil {
 			return nil, fmt.Errorf("force flush all failed: %w", err)
@@ -304,7 +305,7 @@ func processQueryIterator(iter core.QueryResultIteratorInterface) ([]QueryResult
 }
 
 // executeQuery handles the QUERY command.
-func (e *Executor) executeQuery(ctx context.Context, cmd *QueryStatement) (interface{}, error) {
+func (e *Executor) executeQuery(ctx context.Context, cmd *corenbql.QueryStatement) (interface{}, error) {
 	// 1. Get the iterator stream from the engine.
 	_, iter, err := e.QueryStream(ctx, cmd)
 	if err != nil {

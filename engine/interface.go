@@ -6,7 +6,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/sys"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 )
 
 // StorageEngineInterface defines the public API for the storage engine.
@@ -60,5 +60,5 @@ type StorageEngineInterface interface {
 	GetDLQDir() string
 	GetDataDir() string
 	GetWALPath() string
-	GetClock() utils.Clock
+	GetClock() clock.Clock
 }

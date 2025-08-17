@@ -14,7 +14,7 @@ import (
 	"github.com/INLOpen/nexusbase/internal"
 	"github.com/INLOpen/nexusbase/sstable" // For sstable.DefaultBlockSize
 	"github.com/INLOpen/nexusbase/sys"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1726,7 +1726,7 @@ func TestStorageEngine_Query_RelativeTime(t *testing.T) {
 	// 1. Setup
 	// Use a mock clock for predictable "now"
 	mockNow := time.Date(2024, 7, 16, 12, 0, 0, 0, time.UTC)
-	mockClock := utils.NewMockClock(mockNow)
+	mockClock := clock.NewMockClock(mockNow)
 
 	opts := getBaseOptsForFlushTest(t)
 	opts.Clock = mockClock // Inject the mock clock
@@ -1792,7 +1792,7 @@ func TestStorageEngine_Query_RelativeTime_WithAggregation(t *testing.T) {
 	// 1. Setup
 	// Use a mock clock for predictable "now"
 	mockNow := time.Date(2024, 7, 16, 12, 0, 0, 0, time.UTC)
-	mockClock := utils.NewMockClock(mockNow)
+	mockClock := clock.NewMockClock(mockNow)
 
 	opts := getBaseOptsForFlushTest(t)
 	opts.Clock = mockClock // Inject the mock clock
@@ -1867,7 +1867,7 @@ func TestStorageEngine_Query_RelativeTime_WithDownsampling(t *testing.T) {
 	// 1. Setup
 	// Use a mock clock for predictable "now"
 	mockNow := time.Date(2024, 7, 16, 12, 0, 0, 0, time.UTC)
-	mockClock := utils.NewMockClock(mockNow)
+	mockClock := clock.NewMockClock(mockNow)
 
 	opts := getBaseOptsForFlushTest(t)
 	opts.Clock = mockClock // Inject the mock clock

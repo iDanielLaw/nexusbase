@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/INLOpen/nexusbase/core" // For core.EntryType
+	"github.com/INLOpen/nexuscore/types"
 )
 
 var ErrSkipPoint = errors.New("skip point")
@@ -33,7 +34,7 @@ var _ core.IteratorInterface[*core.IteratorNode] = (*MultiFieldDownsamplingItera
 // mergingIteratorHeap implements heap.Interface for mergingIteratorItem.
 type mergingIteratorHeap struct {
 	items []*mergingIteratorItem
-	order core.SortOrder
+	order types.SortOrder
 }
 
 func (h *mergingIteratorHeap) Len() int { return len(h.items) }
@@ -42,7 +43,7 @@ func (h *mergingIteratorHeap) Less(i, j int) bool {
 
 	// Primary sort key is the timestamp.
 	if itemI.timestamp != itemJ.timestamp {
-		if h.order == core.Descending {
+		if h.order == types.Descending {
 			return itemI.timestamp > itemJ.timestamp
 		}
 		return itemI.timestamp < itemJ.timestamp
@@ -51,7 +52,7 @@ func (h *mergingIteratorHeap) Less(i, j int) bool {
 	// Secondary sort key is the series key.
 	seriesCmp := bytes.Compare(itemI.seriesKey, itemJ.seriesKey)
 	if seriesCmp != 0 {
-		if h.order == core.Descending {
+		if h.order == types.Descending {
 			return seriesCmp > 0
 		}
 		return seriesCmp < 0
@@ -108,7 +109,7 @@ type MergingIteratorParams struct {
 	Iters                []core.IteratorInterface[*core.IteratorNode]
 	StartKey             []byte
 	EndKey               []byte
-	Order                core.SortOrder
+	Order                types.SortOrder
 	IsSeriesDeleted      SeriesDeletedChecker
 	IsRangeDeleted       RangeDeletedChecker
 	ExtractSeriesKeyFunc SeriesKeyExtractorFunc

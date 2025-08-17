@@ -15,7 +15,8 @@ import (
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/utils"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -375,12 +376,12 @@ func TestTCPServer_Query_RawData_WithResults(t *testing.T) {
 func TestExecutor_executePush_AutoTimestamp(t *testing.T) {
 	mockEngine := new(MockStorageEngine)
 	fixedTime := time.Date(2025, time.July, 13, 10, 0, 0, 0, time.UTC)
-	mockClock := utils.NewMockClock(fixedTime) // สร้าง MockClock ด้วยเวลาที่กำหนดเอง
+	mockClock := clock.NewMockClock(fixedTime) // สร้าง MockClock ด้วยเวลาที่กำหนดเอง
 
 	// สร้าง Executor ด้วย mock engine และ mock clock
 	executor := api.NewExecutor(mockEngine, mockClock)
 
-	pushCmd := &api.PushStatement{
+	pushCmd := &corenbql.PushStatement{
 		Metric:    "cpu.usage",
 		Fields:    map[string]interface{}{"value": 50.5},
 		Tags:      map[string]string{"host": "server1"},

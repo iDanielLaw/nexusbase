@@ -13,6 +13,8 @@ import (
 
 	"github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/core"
+
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 )
 
 // TCPConnectionHandler encapsulates the logic for handling a single TCP connection's
@@ -112,7 +114,7 @@ func (h *TCPConnectionHandler) HandleAuthentication(ctx context.Context, conn ne
 
 // HandleCommand parses and executes a command received from the client.
 func (h *TCPConnectionHandler) HandleCommand(ctx context.Context, w io.Writer, cmdType nbql.CommandType, payload []byte) {
-	var stmt nbql.Command
+	var stmt corenbql.Command
 	var err error
 
 	switch cmdType {
@@ -123,7 +125,7 @@ func (h *TCPConnectionHandler) HandleCommand(ctx context.Context, w io.Writer, c
 			err = fmt.Errorf("failed to decode PUSH request: %w", decErr)
 			break
 		}
-		stmt = &nbql.PushStatement{
+		stmt = &corenbql.PushStatement{
 			Metric:    req.Metric,
 			Tags:      req.Tags,
 			Timestamp: req.Timestamp,
@@ -135,16 +137,16 @@ func (h *TCPConnectionHandler) HandleCommand(ctx context.Context, w io.Writer, c
 			err = fmt.Errorf("failed to decode PUSHS request: %w", decErr)
 			break
 		}
-		points := make([]nbql.PushStatement, len(req.Items))
+		points := make([]corenbql.PushStatement, len(req.Items))
 		for i, item := range req.Items {
-			points[i] = nbql.PushStatement{
+			points[i] = corenbql.PushStatement{
 				Metric:    item.Metric,
 				Tags:      item.Tags,
 				Timestamp: item.Timestamp,
 				Fields:    item.Fields.ToMap(),
 			}
 		}
-		stmt = &nbql.PushsStatement{
+		stmt = &corenbql.PushsStatement{
 			Items: points,
 		}
 	case nbql.CommandQuery:
@@ -154,7 +156,7 @@ func (h *TCPConnectionHandler) HandleCommand(ctx context.Context, w io.Writer, c
 			err = fmt.Errorf("failed to decode QUERY request: %w", decErr)
 			break
 		}
-		stmt, err = nbql.Parse(req.QueryString)
+		stmt, err = corenbql.Parse(req.QueryString)
 
 	default:
 		err = fmt.Errorf("received unknown command type: %v", cmdType)
@@ -167,7 +169,7 @@ func (h *TCPConnectionHandler) HandleCommand(ctx context.Context, w io.Writer, c
 	}
 
 	// --- Execute and handle response ---
-	if queryStmt, isQuery := stmt.(*nbql.QueryStatement); isQuery {
+	if queryStmt, isQuery := stmt.(*corenbql.QueryStatement); isQuery {
 		// Handle streaming query results
 		h.handleStreamedQuery(ctx, w, queryStmt)
 	} else {
@@ -191,7 +193,7 @@ func (h *TCPConnectionHandler) HandleCommand(ctx context.Context, w io.Writer, c
 	h.logger.Debug("Command handled successfully")
 }
 
-func (h *TCPConnectionHandler) handleStreamedQuery(ctx context.Context, w io.Writer, stmt *nbql.QueryStatement) {
+func (h *TCPConnectionHandler) handleStreamedQuery(ctx context.Context, w io.Writer, stmt *corenbql.QueryStatement) {
 	queryParams, iter, err := h.executor.QueryStream(ctx, stmt)
 	if err != nil {
 		h.logger.Error("Failed to create query iterator", "error", err)

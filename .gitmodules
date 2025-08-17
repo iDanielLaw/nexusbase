@@ -1,0 +1,4 @@
+[submodule "shared/core"]
+	path = shared/core
+	url = https://github.com/INLOpen/nexuscore.git
+	branch = main

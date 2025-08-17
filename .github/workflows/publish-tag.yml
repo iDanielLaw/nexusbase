@@ -31,6 +31,7 @@ jobs:
           ref: 'main'
           # Fetch all history for semantic-versioning to work correctly
           fetch-depth: 0
+          submodules: true
 
       - name: Get next version
         uses: reecetech/version-increment@2024.10.1

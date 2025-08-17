@@ -9,13 +9,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 )
 
 func TestExecutor_ExecuteFlush_All(t *testing.T) {
 	t.Run("Successful FLUSH ALL", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
-		flushCmd, err := nbql.Parse("FLUSH ALL")
+		flushCmd, err := corenbql.Parse("FLUSH ALL")
 		require.NoError(t, err)
 		// Expect a call to ForceFlush with wait=true
 		mockEngine.On("ForceFlush", mock.Anything, true).Return(nil).Once()
@@ -33,7 +35,7 @@ func TestExecutor_ExecuteFlush_All(t *testing.T) {
 	t.Run("Successful FLUSH (default to ALL)", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
-		flushCmd, err := nbql.Parse("FLUSH")
+		flushCmd, err := corenbql.Parse("FLUSH")
 		require.NoError(t, err)
 
 		// Expect a call to ForceFlush with wait=true
@@ -54,7 +56,7 @@ func TestExecutor_ExecuteFlush_Memtable(t *testing.T) {
 	t.Run("Successful FLUSH MEMTABLE", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
-		flushCmd, err := nbql.Parse("FLUSH MEMTABLE")
+		flushCmd, err := corenbql.Parse("FLUSH MEMTABLE")
 		require.NoError(t, err)
 
 		// Expect a call to ForceFlush with wait=false
@@ -69,7 +71,7 @@ func TestExecutor_ExecuteFlush_Memtable(t *testing.T) {
 	t.Run("Failed FLUSH MEMTABLE", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
-		flushCmd, err := nbql.Parse("FLUSH MEMTABLE")
+		flushCmd, err := corenbql.Parse("FLUSH MEMTABLE")
 		require.NoError(t, err)
 
 		expectedErr := errors.New("flush already in progress")
@@ -86,7 +88,7 @@ func TestExecutor_ExecuteFlush_Memtable(t *testing.T) {
 func TestExecutor_ExecuteFlush_Disk(t *testing.T) {
 	mockEngine := new(MockStorageEngine)
 	executor := nbql.NewExecutor(mockEngine, nil)
-	flushCmd, err := nbql.Parse("FLUSH DISK")
+	flushCmd, err := corenbql.Parse("FLUSH DISK")
 	require.NoError(t, err)
 
 	mockEngine.On("TriggerCompaction").Return().Once()

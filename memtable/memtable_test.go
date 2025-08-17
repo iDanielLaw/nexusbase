@@ -8,7 +8,8 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/types"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -131,7 +132,7 @@ func TestMemtable_Get_Scenarios(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mt := NewMemtable(1024, &utils.SystemClock{})
+			mt := NewMemtable(1024, clock.SystemClockDefault)
 			for _, op := range tc.operations {
 				// Encode the test value string into the expected byte format for FieldValues
 				valueBytes := makeTestEventValue(t, op.value)
@@ -154,7 +155,7 @@ func TestMemtable_Get_Scenarios(t *testing.T) {
 	}
 }
 func TestMemtable_Size(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	key1 := []byte("testKey1")
 	value1 := makeTestEventValue(t, "testValue1")
@@ -189,7 +190,7 @@ func TestMemtable_Size(t *testing.T) {
 }
 
 func TestMemtable_Iterator(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	entries := []struct {
 		key   []byte
@@ -207,7 +208,7 @@ func TestMemtable_Iterator(t *testing.T) {
 	}
 
 	// Create an iterator
-	iter := mt.NewIterator(nil, nil, core.Ascending)
+	iter := mt.NewIterator(nil, nil, types.Ascending)
 	defer iter.Close()
 
 	// Iterate and check the entries
@@ -246,7 +247,7 @@ func TestMemtable_Iterator(t *testing.T) {
 }
 
 func TestMemtable_Iterator_Ranges(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	keys := []string{"a", "b", "c", "d", "e", "f"}
 	for i, k := range keys {
 		valueBytes := makeTestEventValue(t, "v"+k)
@@ -257,7 +258,7 @@ func TestMemtable_Iterator_Ranges(t *testing.T) {
 		name         string
 		startKey     []byte
 		endKey       []byte
-		order        core.SortOrder
+		order        types.SortOrder
 		expectedKeys []string
 	}{
 		// --- Ascending ---
@@ -265,49 +266,49 @@ func TestMemtable_Iterator_Ranges(t *testing.T) {
 			name:         "Asc Full range (nil, nil)",
 			startKey:     nil,
 			endKey:       nil,
-			order:        core.Ascending,
+			order:        types.Ascending,
 			expectedKeys: []string{"a", "b", "c", "d", "e", "f"},
 		},
 		{
 			name:         "Asc From startKey 'c'",
 			startKey:     []byte("c"),
 			endKey:       nil,
-			order:        core.Ascending,
+			order:        types.Ascending,
 			expectedKeys: []string{"c", "d", "e", "f"},
 		},
 		{
 			name:         "Asc Up to endKey 'd'",
 			startKey:     nil,
 			endKey:       []byte("d"),
-			order:        core.Ascending,
+			order:        types.Ascending,
 			expectedKeys: []string{"a", "b", "c"}, // endKey is exclusive
 		},
 		{
 			name:         "Asc Between 'b' and 'e'",
 			startKey:     []byte("b"),
 			endKey:       []byte("e"),
-			order:        core.Ascending,
+			order:        types.Ascending,
 			expectedKeys: []string{"b", "c", "d"},
 		},
 		{
 			name:         "Asc Empty range",
 			startKey:     []byte("c"),
 			endKey:       []byte("c"),
-			order:        core.Ascending,
+			order:        types.Ascending,
 			expectedKeys: []string{},
 		},
 		{
 			name:         "Asc Start key does not exist",
 			startKey:     []byte("b1"),
 			endKey:       nil,
-			order:        core.Ascending,
+			order:        types.Ascending,
 			expectedKeys: []string{"c", "d", "e", "f"},
 		},
 		{
 			name:         "Asc Range with no items",
 			startKey:     []byte("x"),
 			endKey:       []byte("z"),
-			order:        core.Ascending,
+			order:        types.Ascending,
 			expectedKeys: []string{},
 		},
 		// --- Descending ---
@@ -315,49 +316,49 @@ func TestMemtable_Iterator_Ranges(t *testing.T) {
 			name:         "Desc Full range (nil, nil)",
 			startKey:     nil,
 			endKey:       nil,
-			order:        core.Descending,
+			order:        types.Descending,
 			expectedKeys: []string{"f", "e", "d", "c", "b", "a"},
 		},
 		{
 			name:         "Desc From startKey 'c'",
 			startKey:     []byte("c"),
 			endKey:       nil,
-			order:        core.Descending,
+			order:        types.Descending,
 			expectedKeys: []string{"f", "e", "d", "c"},
 		},
 		{
 			name:         "Desc Up to endKey 'd'",
 			startKey:     nil,
 			endKey:       []byte("d"),
-			order:        core.Descending,
+			order:        types.Descending,
 			expectedKeys: []string{"c", "b", "a"}, // endKey is exclusive
 		},
 		{
 			name:         "Desc Between 'b' and 'e'",
 			startKey:     []byte("b"),
 			endKey:       []byte("e"),
-			order:        core.Descending,
+			order:        types.Descending,
 			expectedKeys: []string{"d", "c", "b"},
 		},
 		{
 			name:         "Desc Empty range",
 			startKey:     []byte("c"),
 			endKey:       []byte("c"),
-			order:        core.Descending,
+			order:        types.Descending,
 			expectedKeys: []string{},
 		},
 		{
 			name:         "Desc End key does not exist",
 			startKey:     nil,
 			endKey:       []byte("d1"),
-			order:        core.Descending,
+			order:        types.Descending,
 			expectedKeys: []string{"d", "c", "b", "a"},
 		},
 		{
 			name:         "Desc Range with no items",
 			startKey:     []byte("x"),
 			endKey:       []byte("z"),
-			order:        core.Descending,
+			order:        types.Descending,
 			expectedKeys: []string{},
 		},
 	}
@@ -381,7 +382,7 @@ func TestMemtable_Iterator_Ranges(t *testing.T) {
 }
 
 func TestMemtable_IsFull(t *testing.T) {
-	mt := NewMemtable(100, &utils.SystemClock{}) // Small threshold for testing
+	mt := NewMemtable(100, clock.SystemClockDefault) // Small threshold for testing
 
 	// Put entries until it's almost full
 	i := 0
@@ -436,7 +437,7 @@ func (m *MockSSTableWriter) FilePath() string   { return "mock_path" }
 func (m *MockSSTableWriter) CurrentSize() int64 { return 0 } // Not relevant for this test
 
 func TestMemtable_FlushToSSTable_WriterError(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	mt.Put([]byte("key1"), makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
 	mt.Put([]byte("key2"), makeTestEventValue(t, "val2"), core.EntryTypePutEvent, 2)
 
@@ -469,7 +470,7 @@ func TestMemtable_Close_Pool(t *testing.T) {
 
 	// 1. Create and populate a memtable. This initial run will have allocations
 	// as it gets new objects from the pool.
-	mt1 := NewMemtable(1024, &utils.SystemClock{})
+	mt1 := NewMemtable(1024, clock.SystemClockDefault)
 	for i, data := range testData {
 		valueBytes := makeTestEventValue(t, string(data.value))
 		if err := mt1.Put(data.key, valueBytes, core.EntryTypePutEvent, uint64(i+1)); err != nil {
@@ -484,7 +485,7 @@ func TestMemtable_Close_Pool(t *testing.T) {
 	// 3. Now, measure the allocations for populating a new memtable.
 	// Because the pools for MemtableKey and MemtableEntry should now be populated, we expect zero allocations for them.
 	allocs := testing.AllocsPerRun(1, func() {
-		mt2 := NewMemtable(1024, &utils.SystemClock{})
+		mt2 := NewMemtable(1024, clock.SystemClockDefault)
 		for i, data := range testData {
 			valueBytes := makeTestEventValue(t, string(data.value))
 			// These Put calls should get objects from the pool, resulting in no new allocations.
@@ -498,7 +499,7 @@ func TestMemtable_Close_Pool(t *testing.T) {
 }
 
 func TestMemtable_Iterator_ComplexPutDelete(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	// Sequence of operations
 	// SeqNum is crucial here for determining the latest state of a key
@@ -544,7 +545,7 @@ func TestMemtable_Iterator_ComplexPutDelete(t *testing.T) {
 			{[]byte("elderberry"), "purple_v1", core.EntryTypePutEvent, 9},
 		}
 
-		iter := mt.NewIterator(nil, nil, core.Ascending)
+		iter := mt.NewIterator(nil, nil, types.Ascending)
 		defer iter.Close()
 
 		var actualEntries []MemtableEntry
@@ -588,7 +589,7 @@ func TestMemtable_Iterator_ComplexPutDelete(t *testing.T) {
 			{[]byte("apple"), "", core.EntryTypeDelete, 7},
 		}
 
-		iter := mt.NewIterator(nil, nil, core.Descending)
+		iter := mt.NewIterator(nil, nil, types.Descending)
 		defer iter.Close()
 
 		var actualEntries []MemtableEntry
@@ -621,10 +622,10 @@ func TestMemtable_Iterator_ComplexPutDelete(t *testing.T) {
 
 // TestMemtableIterator_Empty tests the iterator on an empty memtable.
 func TestMemtableIterator_Empty(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	// Ascending
-	iterAsc := mt.NewIterator(nil, nil, core.Ascending)
+	iterAsc := mt.NewIterator(nil, nil, types.Ascending)
 	assert.False(t, iterAsc.Next(), "Next() on empty memtable should be false for ascending")
 	// key, val, et, pid := iterAsc.At()
 	cur, _ := iterAsc.At()
@@ -641,7 +642,7 @@ func TestMemtableIterator_Empty(t *testing.T) {
 	assert.NoError(t, iterAsc.Close())
 
 	// Descending
-	iterDesc := mt.NewIterator(nil, nil, core.Descending)
+	iterDesc := mt.NewIterator(nil, nil, types.Descending)
 	assert.False(t, iterDesc.Next(), "Next() on empty memtable should be false for descending")
 	// key, val, et, pid = iterDesc.At()
 	cur, _ = iterDesc.At()
@@ -660,14 +661,14 @@ func TestMemtableIterator_Empty(t *testing.T) {
 
 // TestMemtableIterator_SingleItem tests the iterator on a memtable with one item.
 func TestMemtableIterator_SingleItem(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	key1 := []byte("key1")
 	val1 := makeTestEventValue(t, "val1")
 	mt.Put(key1, val1, core.EntryTypePutEvent, 1)
 
 	// Ascending
 	t.Run("Ascending", func(t *testing.T) {
-		iter := mt.NewIterator(nil, nil, core.Ascending)
+		iter := mt.NewIterator(nil, nil, types.Ascending)
 		defer iter.Close()
 
 		// First Next() should succeed
@@ -689,7 +690,7 @@ func TestMemtableIterator_SingleItem(t *testing.T) {
 
 	// Descending
 	t.Run("Descending", func(t *testing.T) {
-		iter := mt.NewIterator(nil, nil, core.Descending)
+		iter := mt.NewIterator(nil, nil, types.Descending)
 		defer iter.Close()
 
 		// First Next() should succeed
@@ -714,7 +715,7 @@ func TestMemtableIterator_SingleItem(t *testing.T) {
 // where the initial seek lands on a key that is >= endKey, requiring the iterator to advance
 // to the next distinct key before starting.
 func TestMemtableIterator_DescendingBoundsEdgeCase(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	keys := []string{"a", "b", "d", "e"} // Note: "c" is missing
 	for i, k := range keys {
 		valueBytes := makeTestEventValue(t, "v"+k)
@@ -726,7 +727,7 @@ func TestMemtableIterator_DescendingBoundsEdgeCase(t *testing.T) {
 	// advance to the next distinct key ("b"), and yield that.
 	startKey := []byte("b")
 	endKey := []byte("d")
-	iter := mt.NewIterator(startKey, endKey, core.Descending)
+	iter := mt.NewIterator(startKey, endKey, types.Descending)
 	defer iter.Close()
 
 	// 1. Expect "b"
@@ -741,10 +742,10 @@ func TestMemtableIterator_DescendingBoundsEdgeCase(t *testing.T) {
 
 // TestMemtableIterator_Close ensures the Close method works correctly.
 func TestMemtableIterator_Close(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 	mt.Put([]byte("a"), makeTestEventValue(t, "a"), core.EntryTypePutEvent, 1)
 
-	iter := mt.NewIterator(nil, nil, core.Ascending)
+	iter := mt.NewIterator(nil, nil, types.Ascending)
 
 	// First close and subsequent closes should be safe and not panic
 	require.NoError(t, iter.Close())
@@ -764,7 +765,7 @@ func TestMemtableIterator_Close(t *testing.T) {
 // to use an internal Prev() call to correctly position the iterator on the latest version
 // without extra memory allocations.
 func TestMemtableIterator_Descending_MultiVersion_Correctness(t *testing.T) {
-	mt := NewMemtable(1024, &utils.SystemClock{})
+	mt := NewMemtable(1024, clock.SystemClockDefault)
 
 	// Add multiple versions for "key-b"
 	mt.Put([]byte("key-b"), makeTestEventValue(t, "v1"), core.EntryTypePutEvent, 10)
@@ -786,7 +787,7 @@ func TestMemtableIterator_Descending_MultiVersion_Correctness(t *testing.T) {
 		{[]byte("key-a"), "va", 5},
 	}
 
-	iter := mt.NewIterator(nil, nil, core.Descending)
+	iter := mt.NewIterator(nil, nil, types.Descending)
 	defer iter.Close()
 
 	var actual []struct {
@@ -828,7 +829,7 @@ func TestMemtableIterator_Descending_MultiVersion_Correctness(t *testing.T) {
 // createBenchmarkMemtable creates and populates a memtable for benchmark tests.
 func createBenchmarkMemtable(b *testing.B, numItems int, versionsPerKey int) *Memtable {
 	b.Helper()
-	mt := NewMemtable(int64(numItems*versionsPerKey*200), &utils.SystemClock{}) // Estimate size
+	mt := NewMemtable(int64(numItems*versionsPerKey*200), clock.SystemClockDefault) // Estimate size
 	for i := 0; i < numItems; i++ {
 		key := []byte(fmt.Sprintf("key-%09d", i))
 		for v := 0; v < versionsPerKey; v++ {
@@ -850,7 +851,7 @@ func BenchmarkMemtableIterator_Ascending_FullScan(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		iter := mt.NewIterator(nil, nil, core.Ascending)
+		iter := mt.NewIterator(nil, nil, types.Ascending)
 		for iter.Next() {
 			// Access the data to prevent the compiler from optimizing the loop away.
 			_, _ = iter.At()
@@ -865,7 +866,7 @@ func BenchmarkMemtableIterator_Descending_FullScan(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		iter := mt.NewIterator(nil, nil, core.Descending)
+		iter := mt.NewIterator(nil, nil, types.Descending)
 		for iter.Next() {
 			_, _ = iter.At()
 		}
@@ -884,7 +885,7 @@ func BenchmarkMemtableIterator_Ascending_RangeScan(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		iter := mt.NewIterator(startKey, endKey, core.Ascending)
+		iter := mt.NewIterator(startKey, endKey, types.Ascending)
 		for iter.Next() {
 			_, _ = iter.At()
 		}
@@ -899,7 +900,7 @@ func BenchmarkMemtableIterator_Ascending_MultiVersion(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		iter := mt.NewIterator(nil, nil, core.Ascending)
+		iter := mt.NewIterator(nil, nil, types.Ascending)
 		for iter.Next() {
 			_, _ = iter.At()
 		}

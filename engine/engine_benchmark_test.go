@@ -15,8 +15,8 @@ import (
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1023,7 +1023,7 @@ func setupBenchmarkEngineWithData(b *testing.B, numSeries int, dataDuration time
 	require.NoError(b, err)
 
 	// ใช้ mock clock เพื่อควบคุมเวลาตอนสร้างข้อมูล
-	mockClock := utils.NewMockClock(time.Date(2024, 7, 15, 12, 0, 0, 0, time.UTC))
+	mockClock := clock.NewMockClock(time.Date(2024, 7, 15, 12, 0, 0, 0, time.UTC))
 
 	opts := StorageEngineOptions{
 		DataDir:                      dataDir,

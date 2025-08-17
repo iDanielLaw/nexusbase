@@ -48,10 +48,3 @@ const (
 	SeqNumSize   = 8 // uint64 for sequence number (FR5.3)
 	ChecksumSize = 4 // uint32 for CRC32 checksum (FR5.1)
 )
-
-type SortOrder byte
-
-const (
-	Ascending  SortOrder = 0
-	Descending SortOrder = 1
-)

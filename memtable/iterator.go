@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/INLOpen/skiplist"
 )
 
@@ -15,7 +16,7 @@ type MemtableIterator struct {
 	iter     *skiplist.Iterator[*MemtableKey, *MemtableEntry]
 	startKey []byte // For descending iteration check
 	endKey   []byte
-	order    core.SortOrder
+	order    types.SortOrder
 	valid    bool // Indicates if the iterator is currently at a valid position.
 	err      error
 }
@@ -41,7 +42,7 @@ func (it *MemtableIterator) Next() bool {
 		// --- First Call: Initial Positioning ---
 		it.valid = true // Tentatively set to true.
 		var found bool
-		if it.order == core.Ascending {
+		if it.order == types.Ascending {
 			if it.startKey != nil {
 				seekKey := KeyPool.Get()
 				seekKey.Key = it.startKey
@@ -74,12 +75,12 @@ func (it *MemtableIterator) Next() bool {
 			return false
 		}
 		// If found, fall through to the validation loop for the first element.
-		if it.order == core.Descending {
+		if it.order == types.Descending {
 			it.skipToLatestVersionOfCurrentKeyDescending()
 		}
 	} else { // Subsequent calls
 		lastKey := it.iter.Key().Key
-		if it.order == core.Ascending {
+		if it.order == types.Ascending {
 			for {
 				if !it.iter.Next() {
 					it.valid = false
@@ -107,7 +108,7 @@ func (it *MemtableIterator) Next() bool {
 	for {
 		// We are at a new candidate key. Check its bounds.
 		currentKey := it.iter.Key().Key
-		if it.order == core.Ascending {
+		if it.order == types.Ascending {
 			if it.endKey != nil && bytes.Compare(currentKey, it.endKey) >= 0 {
 				it.valid = false // Past the end key, so we are done.
 				return false

@@ -12,6 +12,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core" // For core.EntryType
+	"github.com/INLOpen/nexuscore/types"
 )
 
 func writeTestSSTable(t *testing.T, dir string, entries []testEntry, fileID uint64, compressor core.Compressor, blockSize int) (*SSTable, string, int64) {
@@ -283,7 +284,7 @@ func TestSSTable_Compression_WriteAndRead(t *testing.T) {
 				})
 			}
 			t.Run("Iterator_FullScan", func(t *testing.T) { // This sub-test is now inside the compressor loop
-				iter, err := tc.sst.NewIterator(nil, nil, nil, core.Ascending)
+				iter, err := tc.sst.NewIterator(nil, nil, nil, types.Ascending)
 				if err != nil {
 					t.Fatalf("NewIterator(nil, nil) failed: %v", err)
 				}
@@ -319,7 +320,7 @@ func TestSSTable_Compression_WriteAndRead(t *testing.T) {
 				startKey := []byte("snappyKeyB0010")
 				endKey := []byte("snappyKeyC0003")
 
-				iter, err := tc.sst.NewIterator(startKey, endKey, nil, core.Ascending)
+				iter, err := tc.sst.NewIterator(startKey, endKey, nil, types.Ascending)
 				if err != nil {
 					t.Fatalf("NewIterator(%s, %s) failed: %v", string(startKey), string(endKey), err)
 				}
@@ -475,7 +476,7 @@ func TestSSTable_Compression_IteratorEdgeCases(t *testing.T) {
 				}
 				defer os.Remove(sstOnlyDeletesPath)
 
-				iter, err := sstOnlyDeletes.NewIterator(nil, nil, nil, core.Ascending)
+				iter, err := sstOnlyDeletes.NewIterator(nil, nil, nil, types.Ascending)
 				if err != nil {
 					t.Fatalf("NewIterator failed for SSTable with only deletes: %v", err)
 				}
@@ -487,13 +488,13 @@ func TestSSTable_Compression_IteratorEdgeCases(t *testing.T) {
 			t.Run("Iterator_RangeOutsideData", func(t *testing.T) {
 				startKey := []byte("aaaaa")
 				endKey := []byte("bbbbb") // Before any actual data
-				iter, _ := tc.sst.NewIterator(startKey, endKey, nil, core.Ascending)
+				iter, _ := tc.sst.NewIterator(startKey, endKey, nil, types.Ascending)
 				defer iter.Close()
 				testIteratorRange(t, iter, []testEntry{})
 
 				startKey = []byte("zzzzz")
 				endKey = []byte("zzzzz_plus") // After all actual data
-				iter, _ = tc.sst.NewIterator(startKey, endKey, nil, core.Ascending)
+				iter, _ = tc.sst.NewIterator(startKey, endKey, nil, types.Ascending)
 				defer iter.Close()
 				testIteratorRange(t, iter, []testEntry{})
 			})
@@ -502,7 +503,7 @@ func TestSSTable_Compression_IteratorEdgeCases(t *testing.T) {
 			t.Run("Iterator_InvalidRange", func(t *testing.T) {
 				startKey := []byte("snappyKeyC0003")
 				endKey := []byte("snappyKeyB0000")
-				iter, _ := tc.sst.NewIterator(startKey, endKey, nil, core.Ascending)
+				iter, _ := tc.sst.NewIterator(startKey, endKey, nil, types.Ascending)
 				defer iter.Close()
 				testIteratorRange(t, iter, []testEntry{})
 			})

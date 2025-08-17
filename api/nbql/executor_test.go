@@ -8,7 +8,8 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
-	"github.com/INLOpen/nexusbase/utils"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -178,12 +179,12 @@ func (m *MockStorageEngine) GetWALPath() string {
 	return args.String(0)
 }
 
-func (m *MockStorageEngine) GetClock() utils.Clock {
+func (m *MockStorageEngine) GetClock() clock.Clock {
 	args := m.Called()
 	if args.Get(0) == nil {
 		return nil
 	}
-	return args.Get(0).(utils.Clock)
+	return args.Get(0).(clock.Clock)
 }
 
 func TestExecutor_SnapshotRestore(t *testing.T) {
@@ -191,8 +192,8 @@ func TestExecutor_SnapshotRestore(t *testing.T) {
 
 	t.Run("executeSnapshot success", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
-		executor := NewExecutor(mockEngine, &utils.SystemClock{})
-		cmd := &SnapshotStatement{}
+		executor := NewExecutor(mockEngine, clock.SystemClockDefault)
+		cmd := &corenbql.SnapshotStatement{}
 		expectedPath := "/var/data/nexus/snapshots/snap-123.nbb"
 
 		mockEngine.On("CreateSnapshot", ctx).Return(expectedPath, nil).Once()
@@ -208,8 +209,8 @@ func TestExecutor_SnapshotRestore(t *testing.T) {
 
 	t.Run("executeSnapshot engine error", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
-		executor := NewExecutor(mockEngine, &utils.SystemClock{})
-		cmd := &SnapshotStatement{}
+		executor := NewExecutor(mockEngine, clock.SystemClockDefault)
+		cmd := &corenbql.SnapshotStatement{}
 		expectedError := errors.New("disk is full")
 
 		mockEngine.On("CreateSnapshot", ctx).Return("", expectedError).Once()
@@ -222,8 +223,8 @@ func TestExecutor_SnapshotRestore(t *testing.T) {
 
 	t.Run("executeRestore success", func(t *testing.T) {
 		mockEngine := new(MockStorageEngine)
-		executor := NewExecutor(mockEngine, &utils.SystemClock{})
-		cmd := &RestoreStatement{Path: "/path/to/restore.nbb", Overwrite: true}
+		executor := NewExecutor(mockEngine, clock.SystemClockDefault)
+		cmd := &corenbql.RestoreStatement{Path: "/path/to/restore.nbb", Overwrite: true}
 
 		mockEngine.On("RestoreFromSnapshot", ctx, cmd.Path, cmd.Overwrite).Return(nil).Once()
 

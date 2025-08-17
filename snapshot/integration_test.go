@@ -21,8 +21,8 @@ import (
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
@@ -46,7 +46,7 @@ type testE2EProvider struct {
 	walDir             string
 	sstDir             string
 	logger             *slog.Logger
-	clock              utils.Clock
+	clock              clock.Clock
 	tracer             trace.Tracer
 	hooks              hooks.HookManager
 	levelsManager      levels.Manager
@@ -153,7 +153,7 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 		walDir:             walDir,
 		sstDir:             sstDir,
 		logger:             logger,
-		clock:              utils.NewMockClock(time.Now()),
+		clock:              clock.NewMockClock(time.Now()),
 		tracer:             tracer,
 		hooks:              hooks.NewHookManager(nil),
 		levelsManager:      lm,
@@ -167,7 +167,7 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 
 func (m *testE2EProvider) CheckStarted() error               { return nil }
 func (m *testE2EProvider) GetWAL() wal.WALInterface          { return m.wal }
-func (m *testE2EProvider) GetClock() utils.Clock             { return m.clock }
+func (m *testE2EProvider) GetClock() clock.Clock             { return m.clock }
 func (m *testE2EProvider) GetLogger() *slog.Logger           { return m.logger }
 func (m *testE2EProvider) GetTracer() trace.Tracer           { return m.tracer }
 func (m *testE2EProvider) GetHookManager() hooks.HookManager { return m.hooks }
@@ -409,7 +409,7 @@ func TestSnapshot_E2E_CreateIncrementalAndRestore(t *testing.T) {
 	provider := newTestE2EProvider(t, originalDataDir)
 	defer provider.Close(t)
 	manager := NewManager(provider)
-	mockClock, ok := provider.clock.(*utils.MockClock)
+	mockClock, ok := provider.clock.(*clock.MockClock)
 	require.True(t, ok)
 
 	// --- 2. Create Full Parent Snapshot ---
@@ -496,7 +496,7 @@ func TestSnapshot_E2E_RestoreFromIncrementalChain(t *testing.T) {
 	provider := newTestE2EProvider(t, originalDataDir)
 	defer provider.Close(t)
 	manager := NewManager(provider)
-	mockClock, ok := provider.clock.(*utils.MockClock)
+	mockClock, ok := provider.clock.(*clock.MockClock)
 	require.True(t, ok)
 
 	// --- 2. Create Full Parent Snapshot (State 1) ---
@@ -594,7 +594,7 @@ func TestSnapshot_E2E_RestoreFromLatest_WithChain(t *testing.T) {
 	provider := newTestE2EProvider(t, originalDataDir)
 	defer provider.Close(t)
 	manager := NewManager(provider)
-	mockClock, ok := provider.clock.(*utils.MockClock)
+	mockClock, ok := provider.clock.(*clock.MockClock)
 	require.True(t, ok)
 
 	// Create Full Snapshot
@@ -653,7 +653,7 @@ func TestSnapshot_E2E_RestoreFromBrokenChain(t *testing.T) {
 	provider := newTestE2EProvider(t, originalDataDir)
 	defer provider.Close(t)
 	manager := NewManager(provider)
-	mockClock, ok := provider.clock.(*utils.MockClock)
+	mockClock, ok := provider.clock.(*clock.MockClock)
 	require.True(t, ok)
 
 	// Create Full Snapshot
@@ -715,7 +715,7 @@ func TestSnapshot_E2E_ValidateChain(t *testing.T) {
 	provider := newTestE2EProvider(t, originalDataDir)
 	defer provider.Close(t)
 	manager := NewManager(provider)
-	mockClock, ok := provider.clock.(*utils.MockClock)
+	mockClock, ok := provider.clock.(*clock.MockClock)
 	require.True(t, ok)
 
 	// Create Full Snapshot
@@ -778,7 +778,7 @@ func TestSnapshot_E2E_Prune(t *testing.T) {
 	provider := newTestE2EProvider(t, originalDataDir)
 	defer provider.Close(t)
 	manager := NewManager(provider)
-	mockClock, ok := provider.clock.(*utils.MockClock)
+	mockClock, ok := provider.clock.(*clock.MockClock)
 	require.True(t, ok)
 
 	// --- Chain 1 (Oldest, to be pruned) ---
@@ -842,7 +842,7 @@ func TestSnapshot_E2E_Prune_ByAge(t *testing.T) {
 	provider := newTestE2EProvider(t, baseDir) // Use baseDir for dummy data
 	defer provider.Close(t)
 	manager := NewManager(provider)
-	mockClock, ok := provider.clock.(*utils.MockClock)
+	mockClock, ok := provider.clock.(*clock.MockClock)
 	require.True(t, ok)
 
 	// --- Chain 1 (Old, to be pruned by age) ---

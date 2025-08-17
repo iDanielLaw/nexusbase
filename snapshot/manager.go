@@ -16,7 +16,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/internal"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -722,7 +722,7 @@ func (pc *pruneContext) findBrokenSnapshots() map[string]struct{} {
 }
 
 // findPolicySnapshots identifies snapshots to prune based on KeepN and PruneOlderThan policies.
-func (pc *pruneContext) findPolicySnapshots(opts PruneOptions, clock utils.Clock, idsToIgnore map[string]struct{}) map[string]struct{} {
+func (pc *pruneContext) findPolicySnapshots(opts PruneOptions, clock clock.Clock, idsToIgnore map[string]struct{}) map[string]struct{} {
 	idsToPrune := make(map[string]struct{})
 
 	// Filter out roots that are already marked for pruning (i.e., broken).

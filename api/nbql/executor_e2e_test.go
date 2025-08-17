@@ -10,10 +10,12 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 )
 
 // getBaseOptsForE2ETest provides basic engine options for end-to-end testing.
@@ -30,7 +32,7 @@ func getBaseOptsForE2ETest(t *testing.T) engine.StorageEngineOptions {
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
 		WALSyncMode:                  wal.SyncDisabled,
 		WALMaxSegmentSize:            1 * 1024 * 1024, // 1MB
-		Clock:                        &utils.SystemClock{},
+		Clock:                        clock.SystemClockDefault,
 		CompactionIntervalSeconds:    1,
 		BlockCacheCapacity:           64 * 1024 * 1024, // 64MB
 		BloomFilterFalsePositiveRate: 0.01,
@@ -83,10 +85,10 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 	require.NoError(t, sourceEngine.Put(ctx, dp1))
 	require.NoError(t, sourceEngine.Put(ctx, dp2))
 
-	sourceExecutor := NewExecutor(sourceEngine, &utils.SystemClock{})
+	sourceExecutor := NewExecutor(sourceEngine, clock.SystemClockDefault)
 
 	// Execute SNAPSHOT command
-	snapshotCmd, err := Parse("SNAPSHOT")
+	snapshotCmd, err := corenbql.Parse("SNAPSHOT")
 	require.NoError(t, err)
 	result, err := sourceExecutor.Execute(ctx, snapshotCmd)
 	require.NoError(t, err)
@@ -112,11 +114,11 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 	dp3 := HelperDataPoint(t, "e2e.other", map[string]string{"id": "c"}, 300, map[string]interface{}{"value": 30.0})
 	require.NoError(t, destEngine.Put(ctx, dp3))
 
-	destExecutor := NewExecutor(destEngine, &utils.SystemClock{})
+	destExecutor := NewExecutor(destEngine, clock.SystemClockDefault)
 
 	// Execute RESTORE command
 	restoreQuery := fmt.Sprintf("RESTORE FROM '%s' WITH OVERWRITE", filepath.ToSlash(snapshotPath))
-	restoreCmd, err := Parse(restoreQuery)
+	restoreCmd, err := corenbql.Parse(restoreQuery)
 	require.NoError(t, err)
 	_, err = destExecutor.Execute(ctx, restoreCmd)
 	require.NoError(t, err)
@@ -173,9 +175,9 @@ func TestExecutor_E2E_RemoveSeries(t *testing.T) {
 	require.NoError(t, err, "Data point 3 should exist before removal")
 
 	// --- Phase 3: Execute REMOVE SERIES command ---
-	executor := NewExecutor(eng, &utils.SystemClock{})
+	executor := NewExecutor(eng, clock.SystemClockDefault)
 	removeQuery := `REMOVE SERIES "e2e.remove" TAGGED (host="a", dc="us-east")`
-	removeCmd, err := Parse(removeQuery)
+	removeCmd, err := corenbql.Parse(removeQuery)
 	require.NoError(t, err)
 
 	result, err := executor.Execute(ctx, removeCmd)
@@ -230,9 +232,9 @@ func TestExecutor_E2E_RemovePoint(t *testing.T) {
 	require.NoError(t, err, "Data point at t=200 should exist before removal")
 
 	// --- Phase 3: Execute REMOVE FROM ... AT ... command ---
-	executor := NewExecutor(eng, &utils.SystemClock{})
+	executor := NewExecutor(eng, clock.SystemClockDefault)
 	removeQuery := `REMOVE FROM "e2e.remove.point" TAGGED (host="c") AT 200`
-	removeCmd, err := Parse(removeQuery)
+	removeCmd, err := corenbql.Parse(removeQuery)
 	require.NoError(t, err)
 
 	result, err := executor.Execute(ctx, removeCmd)
@@ -291,9 +293,9 @@ func TestExecutor_E2E_RemoveRange(t *testing.T) {
 	require.NoError(t, err, "Data point at t=300 should exist before removal")
 
 	// --- Phase 3: Execute REMOVE FROM ... FROM ... TO ... command ---
-	executor := NewExecutor(eng, &utils.SystemClock{})
+	executor := NewExecutor(eng, clock.SystemClockDefault)
 	removeQuery := `REMOVE FROM "e2e.remove.range" TAGGED (host="d") FROM 200 TO 400`
-	removeCmd, err := Parse(removeQuery)
+	removeCmd, err := corenbql.Parse(removeQuery)
 	require.NoError(t, err)
 
 	result, err := executor.Execute(ctx, removeCmd)

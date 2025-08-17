@@ -13,6 +13,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/config"
+	corenbql "github.com/INLOpen/nexuscore/nbql"
 )
 
 // HTTPServer manages the HTTP server for metrics and debugging.
@@ -124,7 +125,7 @@ func handleNBQLQuery(executor *nbql.Executor, logger *slog.Logger) http.HandlerF
 			return
 		}
 
-		cmd, err := nbql.Parse(req.Query)
+		cmd, err := corenbql.Parse(req.Query)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Query parsing error: %v", err), http.StatusBadRequest)
 			return

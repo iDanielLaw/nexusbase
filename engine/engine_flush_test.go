@@ -17,8 +17,8 @@ import (
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/sys"
-	"github.com/INLOpen/nexusbase/utils"
 	"github.com/INLOpen/nexusbase/wal"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -170,11 +170,11 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 			opts:               opts,
 			mu:                 sync.RWMutex{},
 			immutableMemtables: make([]*memtable.Memtable, 0),
-			mutableMemtable:    memtable.NewMemtable(opts.MemtableThreshold, &utils.SystemClock{}),
+			mutableMemtable:    memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault),
 			flushChan:          make(chan struct{}, 1), // Buffered channel to avoid blocking
 			logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 			metrics:            NewEngineMetrics(false, "trigger_flush_isempty_success_"),
-			clock:              &utils.SystemClock{},
+			clock:              clock.SystemClockDefault,
 			tracer:             noop.NewTracerProvider().Tracer("test"),
 		}
 
@@ -222,11 +222,11 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 			opts:               opts,
 			mu:                 sync.RWMutex{},
 			immutableMemtables: make([]*memtable.Memtable, 0),
-			mutableMemtable:    memtable.NewMemtable(opts.MemtableThreshold, &utils.SystemClock{}),
+			mutableMemtable:    memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault),
 			flushChan:          make(chan struct{}, 1),
 			logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 			metrics:            NewEngineMetrics(false, "skip_mutableempty_"),
-			clock:              &utils.SystemClock{},
+			clock:              clock.SystemClockDefault,
 			tracer:             noop.NewTracerProvider().Tracer("test"),
 		}
 		originalMutable := concreteEngine.mutableMemtable
@@ -244,16 +244,16 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 			opts:               opts,
 			mu:                 sync.RWMutex{},
 			immutableMemtables: make([]*memtable.Memtable, 0),
-			mutableMemtable:    memtable.NewMemtable(opts.MemtableThreshold, &utils.SystemClock{}),
+			mutableMemtable:    memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault),
 			flushChan:          make(chan struct{}, 1),
 			logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 			metrics:            NewEngineMetrics(false, "skip_immutable_is_not_empty_"),
-			clock:              &utils.SystemClock{},
+			clock:              clock.SystemClockDefault,
 			tracer:             noop.NewTracerProvider().Tracer("test"),
 		}
 
 		// Manually create a backlogged state
-		backloggedMemtable := memtable.NewMemtable(opts.MemtableThreshold, &utils.SystemClock{})
+		backloggedMemtable := memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault)
 		backloggedMemtable.Put([]byte("backlog_key"), makeTestEventValue(t, "backlog_val"), core.EntryTypePutEvent, 1)
 		concreteEngine.immutableMemtables = append(concreteEngine.immutableMemtables, backloggedMemtable)
 
@@ -277,7 +277,7 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 		opts := getBaseOptsForFlushTest(t)
 		eng := setupEngineForFlushTest(t, opts)
 
-		mem := memtable.NewMemtable(opts.MemtableThreshold, &utils.SystemClock{})
+		mem := memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault)
 		// Use realistic TSDB keys
 		metricID1, _ := eng.stringStore.GetOrCreateID("dlq.metric.1")
 		tsdbKey1 := core.EncodeTSDBKey(metricID1, nil, 100)
@@ -313,7 +313,7 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 		// Setup
 		opts := getBaseOptsForFlushTest(t)
 		eng := setupEngineForFlushTest(t, opts)
-		mem := memtable.NewMemtable(opts.MemtableThreshold, &utils.SystemClock{})
+		mem := memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault)
 
 		// Action
 		err := eng.moveToDLQ(mem)
@@ -337,7 +337,7 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 		eng := setupEngineForFlushTest(t, opts)
 		eng.dlqDir = "" // Manually un-configure the DLQ directory
 
-		mem := memtable.NewMemtable(opts.MemtableThreshold, &utils.SystemClock{})
+		mem := memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault)
 		mem.Put([]byte("key"), makeTestEventValue(t, "value"), core.EntryTypePutEvent, 1)
 
 		// Action
@@ -402,7 +402,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		metricID, _ := eng.stringStore.GetOrCreateID("metric.test")
 		tsdbKey := core.EncodeTSDBKey(metricID, nil, 12345) // A simple key with no tags
 
-		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, &utils.SystemClock{})
+		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, clock.SystemClockDefault)
 		mem.Put(tsdbKey, makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
 		eng.immutableMemtables = append(eng.immutableMemtables, mem)
 
@@ -425,7 +425,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		metricID, _ := eng.stringStore.GetOrCreateID("metric.retry")
 		tsdbKey := core.EncodeTSDBKey(metricID, nil, 67890)
 
-		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, &utils.SystemClock{})
+		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, clock.SystemClockDefault)
 		mem.Put(tsdbKey, makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
 		eng.immutableMemtables = append(eng.immutableMemtables, mem)
 
@@ -449,7 +449,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		metricID, _ := eng.stringStore.GetOrCreateID("metric.dlq")
 		tsdbKey := core.EncodeTSDBKey(metricID, nil, 11111)
 
-		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, &utils.SystemClock{})
+		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, clock.SystemClockDefault)
 		mem.Put(tsdbKey, makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
 		eng.immutableMemtables = append(eng.immutableMemtables, mem)
 
@@ -477,7 +477,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 		metricID, _ := eng.stringStore.GetOrCreateID("metric.shutdown")
 		tsdbKey := core.EncodeTSDBKey(metricID, nil, 22222)
 
-		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, &utils.SystemClock{})
+		mem := memtable.NewMemtable(eng.opts.MemtableThreshold, clock.SystemClockDefault)
 		mem.Put(tsdbKey, makeTestEventValue(t, "val1"), core.EntryTypePutEvent, 1)
 		eng.immutableMemtables = append(eng.immutableMemtables, mem)
 

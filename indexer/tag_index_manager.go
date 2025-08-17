@@ -19,7 +19,8 @@ import (
 	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/utils"
+	"github.com/INLOpen/nexuscore/types"
+	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -110,7 +111,7 @@ type TagIndexManagerOptions struct {
 	MaxL0Files                 int // Number of L0 index files to trigger compaction.
 	MaxLevels                  int
 	BaseTargetSize             int64
-	Clock                      utils.Clock // Clock interface for time measurement, allows mocking in tests.
+	Clock                      clock.Clock // Clock interface for time measurement, allows mocking in tests.
 }
 
 // TagIndexManager manages the LSM-tree for the secondary tag index.
@@ -133,7 +134,7 @@ type TagIndexManager struct {
 	logger                *slog.Logger
 	deps                  *TagIndexDependencies
 	tracer                trace.Tracer
-	clock                 utils.Clock // Clock interface for time measurement, allows mocking in tests.
+	clock                 clock.Clock // Clock interface for time measurement, allows mocking in tests.
 }
 
 const (
@@ -145,11 +146,11 @@ const (
 
 // NewTagIndexManager creates a new manager for the tag index.
 func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies, logger *slog.Logger, tracer trace.Tracer) (*TagIndexManager, error) {
-	var clock utils.Clock
+	var clk clock.Clock
 	if opts.Clock == nil {
-		clock = &utils.SystemClock{}
+		clk = clock.SystemClockDefault
 	} else {
-		clock = opts.Clock
+		clk = opts.Clock
 	}
 	indexSstDir := filepath.Join(opts.DataDir, IndexSSTDirName)
 	if err := os.MkdirAll(indexSstDir, 0755); err != nil {
@@ -200,7 +201,7 @@ func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies,
 		tracer:                tracer,
 		deps:                  deps,
 		manifestPath:          filepath.Join(indexSstDir, IndexManifestFileName),
-		clock:                 clock,
+		clock:                 clk,
 	}
 
 	// Load existing state from the index manifest
@@ -554,7 +555,7 @@ func (tim *TagIndexManager) mergeIndexSSTables(tables []*sstable.SSTable, delete
 
 	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, table := range tables {
-		iter, err := table.NewIterator(nil, nil, tim.blockReadSemaphore, core.Ascending)
+		iter, err := table.NewIterator(nil, nil, tim.blockReadSemaphore, types.Ascending)
 		if err != nil {
 			for _, openedIter := range iters {
 				openedIter.Close()
