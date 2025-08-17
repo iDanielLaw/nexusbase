@@ -492,6 +492,35 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "With a fixed seed(1), rand.Intn(2) returns 1, so it should pick table B")
 	})
 
+	t.Run("Fallback_PicksLargestAvgKeySizeCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickLargestAvgKeySize)
+		defer lm.Close()
+
+		// Table A: Smaller total size, but many keys -> smaller avg size per key
+		tableA_entries := make([]struct{ key, value []byte }, 100)
+		for i := 0; i < 100; i++ {
+			tableA_entries[i] = struct{ key, value []byte }{
+				key:   []byte(fmt.Sprintf("key_a%02d", i)),
+				value: makeValue(5), // 100 keys, 5 byte values each
+			}
+		}
+		l1_tableA := newTestSSTable(t, 5, tableA_entries)
+		defer l1_tableA.Close()
+
+		// Table B: Larger total size, fewer keys -> larger avg size per key
+		tableB_entries := []struct{ key, value []byte }{
+			{[]byte("key_b1"), makeValue(1000)}, // 1 key, ~1000 byte value
+		}
+		l1_tableB := newTestSSTable(t, 10, tableB_entries)
+		defer l1_tableB.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the table with the largest average size per key")
+	})
+
 	t.Run("ReturnsNilForInvalidOrEmptyLevel", func(t *testing.T) {
 		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 		defer lm.Close()

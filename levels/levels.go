@@ -34,6 +34,8 @@ const (
 	PickFewestKeys
 	// PickRandom selects a random table to prevent starvation from other deterministic strategies.
 	PickRandom
+	// PickLargestAvgKeySize selects the table with the largest average data size per key.
+	PickLargestAvgKeySize
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -378,6 +380,23 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 				}
 			}
 			return smallestAvgSizeTable
+		case PickLargestAvgKeySize:
+			// Fallback: Pick the table with the largest average size per key.
+			// This can be useful for compacting tables with few, very large keys.
+			var largestAvgSizeTable *sstable.SSTable
+			maxAvgSize := -1.0
+
+			for _, table := range tables {
+				if table.KeyCount() == 0 {
+					continue // Avoid division by zero.
+				}
+				avgSize := float64(table.Size()) / float64(table.KeyCount())
+				if avgSize > maxAvgSize {
+					maxAvgSize = avgSize
+					largestAvgSizeTable = table
+				}
+			}
+			return largestAvgSizeTable
 		case PickOldestByTimestamp:
 			// Fallback: Pick the table with the smallest MinKey.
 			// Since tables in L1+ are already sorted by MinKey, this is the first table.
