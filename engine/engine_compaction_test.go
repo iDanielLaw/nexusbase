@@ -1536,12 +1536,8 @@ func TestCompactionManager_PerformCompactionCycle_ParallelExecution(t *testing.T
 		finishCompactionChan <- true
 	}
 
-	// Wait for all compaction goroutines to finish.
-	require.Eventually(t, func() bool {
-		// We can't access the waitgroup directly, but we can check the final state.
-		// The most reliable indicator is that l0CompactionActive is false and the levels are updated.
-		return !cm.l0CompactionActive.Load() && len(lm.GetTablesForLevel(0)) == 0
-	}, 2*time.Second, 20*time.Millisecond, "Timed out waiting for compactions to finish")
+	// Wait for all compaction goroutines to finish using the WaitGroup. This is the correct way to synchronize.
+	cm.compactionWg.Wait()
 
 	// Final state verification
 	assert.False(t, cm.l0CompactionActive.Load(), "l0CompactionActive should be false after compaction finishes")

@@ -85,9 +85,20 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	} else {
 		opts.Logger = opts.Logger.With("sstable_id", opts.ID)
 	}
+	// Ensure logger is not nil
+	if opts.Logger == nil {
+		opts.Logger = slog.Default().With("component", "SSTable_default")
+	} else {
+		opts.Logger = opts.Logger.With("sstable_id", opts.ID)
+	}
 	// FR6.1: Consider using a FileOpener interface for testability. For now, direct os.Open.
 	file, err := sys.Open(opts.FilePath)
 	if err != nil {
+		if span != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+
 		return nil, fmt.Errorf("failed to open sstable file %s: %w", opts.FilePath, err)
 	}
 	// Use defer with a named error return to ensure the file is closed on any error path.
