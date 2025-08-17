@@ -265,9 +265,9 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 }
 
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
-// The strategy is to pick the table that has the largest total size of overlapping tables in level N+1.
+// The primary strategy is to pick the table with the largest total size of overlapping tables in level N+1.
 // This helps reduce write amplification by compacting the "most problematic" file first.
-// If no tables have any overlap, it falls back to picking the first table in the level to ensure
+// If no tables have any overlap, it falls back to picking the largest table in the level to ensure
 // compaction can still proceed.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
@@ -282,10 +282,11 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 		return nil
 	}
 
+	tables := level.GetTables()
 	var bestTable *sstable.SSTable
-	maxOverlapSize := int64(-1) // Use -1 to ensure the first table with 0 overlap is chosen if no overlaps exist.
+	maxOverlapSize := int64(-1)
 
-	for _, table := range level.GetTables() {
+	for _, table := range tables {
 		minKey, maxKey := table.MinKey(), table.MaxKey()
 		overlappingTables := lm.getOverlappingTablesLocked(levelNum+1, minKey, maxKey)
 
@@ -300,9 +301,18 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 		}
 	}
 
-	// Fallback: If no table has any overlap, pick the first one to keep compaction moving.
-	if bestTable == nil && level.Size() > 0 {
-		return level.GetTables()[0]
+	// If no table had any overlap with the next level, trigger fallback logic.
+	if maxOverlapSize <= 0 {
+		// Fallback: Pick the largest table in the current level.
+		var largestTable *sstable.SSTable
+		var maxSize int64 = -1
+		for _, table := range tables {
+			if table.Size() > maxSize {
+				maxSize = table.Size()
+				largestTable = table
+			}
+		}
+		return largestTable
 	}
 
 	return bestTable

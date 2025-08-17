@@ -292,23 +292,28 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick Table A with the most overlap size")
 	})
 
-	t.Run("PicksFirstCandidateWhenNoOverlap", func(t *testing.T) {
+	t.Run("PicksLargestCandidateWhenNoOverlap", func(t *testing.T) {
 		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"))
 		defer lm.Close()
 
-		l1_tableA := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("key_a"), []byte("v")}})
+		// Table A is smaller
+		l1_tableA := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("key_a"), makeValue(10)}})
 		defer l1_tableA.Close()
-		l1_tableB := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("key_b"), []byte("v")}})
+		// Table B is larger
+		l1_tableB := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(100)}})
 		defer l1_tableB.Close()
+		// L2 table that does not overlap with L1 tables
 		l2_tableX := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_x"), []byte("v")}})
 		defer l2_tableX.Close()
 
+		// SetTables will sort them by minKey, so order is [A, B]
 		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
 		lm.levels[2].SetTables([]*sstable.SSTable{l2_tableX})
 
 		candidate := lm.PickCompactionCandidateForLevelN(1)
 		require.NotNil(t, candidate)
-		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick the first table when there is no overlap")
+		// When there is no overlap, it should pick the largest table (B)
+		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the largest table when there is no overlap")
 	})
 
 	t.Run("ReturnsNilForInvalidOrEmptyLevel", func(t *testing.T) {
