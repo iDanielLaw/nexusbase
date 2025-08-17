@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +43,7 @@ type MockSSTableWriter struct {
 	currentSizeFunc func() int64 // Function to return current size, for mocking dynamic size
 	failLoad        bool         // Simulate LoadSSTable failure after Finish
 
+	// --- Fields for parallel execution testing ---
 	entries []struct { // Track entries added to this mock writer
 		key       []byte
 		value     []byte
@@ -50,6 +52,31 @@ type MockSSTableWriter struct {
 	}
 	filePath string
 	id       uint64
+}
+
+// controllableMockSSTableWriter is a mock writer that signals when it starts
+// and waits for a signal to finish, allowing tests to control compaction duration.
+type controllableMockSSTableWriter struct {
+	// Embed a real writer to handle file creation and basic functionality.
+	core.SSTableWriterInterface
+	startSignal  chan bool // Signals that a writer has started
+	finishSignal chan bool // Waits for a signal to finish
+	signaled     atomic.Bool
+}
+
+func (m *controllableMockSSTableWriter) Add(key, value []byte, entryType core.EntryType, seqNum uint64) error {
+	// On the first Add, signal that we've started and then block.
+	if !m.signaled.Load() {
+		if m.signaled.CompareAndSwap(false, true) {
+			if m.startSignal != nil {
+				m.startSignal <- true
+			}
+			if m.finishSignal != nil {
+				<-m.finishSignal // Block until told to continue
+			}
+		}
+	}
+	return m.SSTableWriterInterface.Add(key, value, entryType, seqNum)
 }
 
 func (m *MockSSTableWriter) Add(key, value []byte, entryType core.EntryType, seqNum uint64) error {
@@ -1394,4 +1421,137 @@ func TestCompactionManager_RemoveAndCleanupSSTables(t *testing.T) {
 		assert.Equal(t, sst1.FilePath(), mockRemover.removedFiles[0])
 		assert.Equal(t, sst3.FilePath(), mockRemover.removedFiles[1])
 	})
+}
+
+func TestCompactionManager_PerformCompactionCycle_ParallelExecution(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil)) // Discard logs for cleaner test output
+
+	// Channels for coordinating the test
+	compactionStartedChan := make(chan bool, 5) // Buffered channel to receive signals from started compactions
+	finishCompactionChan := make(chan bool, 5)  // Channel to signal compactions to finish
+
+	// Create a dummy engine. The compactor is created via a factory inside the engine.
+	dummyEngine, err := NewStorageEngine(StorageEngineOptions{
+		DataDir:                    tempDir,
+		Logger:                     logger,
+		MaxLevels:                  5,
+		MaxL0Files:                 2,  // Trigger L0 compaction with 2 files
+		TargetSSTableSize:          10, // Small size to trigger LN compactions
+		LevelsTargetSizeMultiplier: 1,  // Any size > 0 will trigger
+		MaxConcurrentLNCompactions: 2,  // Allow 2 LN compactions in parallel
+		SSTableCompressor:          &compressors.NoCompressionCompressor{},
+		CompactionIntervalSeconds:  3600, // Disable auto compaction
+	})
+	require.NoError(t, err)
+
+	concreteEngine := dummyEngine.(*storageEngine)
+
+	// 2. Override the compactor factory to inject our mocks
+	concreteEngine.setCompactorFactory = func(seo StorageEngineOptions, se *storageEngine) (CompactionManagerInterface, error) {
+		cmParams := CompactionManagerParams{
+			LevelsManager: se.levelsManager,
+			DataDir:       se.sstDir,
+			Opts: CompactionOptions{
+				MaxL0Files:                 2,
+				L0CompactionTriggerSize:    1000,            // Don't trigger by size
+				TargetSSTableSize:          1 * 1024 * 1024, // 1MB, large enough to prevent rollovers during this test
+				LevelsTargetSizeMultiplier: 1,
+				CompactionIntervalSeconds:  3600, // Disable auto compaction
+				MaxConcurrentLNCompactions: 2,    // Allow 2 LN compactions in parallel
+				SSTableCompressor:          &compressors.NoCompressionCompressor{},
+			},
+			Logger:               se.logger,
+			Tracer:               trace.NewNoopTracerProvider().Tracer("test"),
+			IsSeriesDeleted:      func(b []byte, u uint64) bool { return false },
+			IsRangeDeleted:       func(b []byte, i int64, u uint64) bool { return false },
+			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			FileRemover:          &realFileRemover{},
+			SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) {
+				// This is the key part: create a real writer but wrap it in our controllable mock.
+				realWriter, err := sstable.NewSSTableWriter(opts)
+				if err != nil {
+					return nil, err
+				}
+				return &controllableMockSSTableWriter{
+					SSTableWriterInterface: realWriter,
+					startSignal:            compactionStartedChan,
+					finishSignal:           finishCompactionChan,
+				}, nil
+			},
+			Engine: se,
+		}
+		return NewCompactionManager(cmParams)
+	}
+
+	// 3. Start the engine, which initializes the compactor.
+	require.NoError(t, dummyEngine.Start())
+	t.Cleanup(func() { dummyEngine.Close() })
+
+	lm := concreteEngine.levelsManager
+	cm := concreteEngine.compactor.(*CompactionManager)
+
+	// 4. Setup the levels manager to trigger compactions
+	// L0 needs compaction (2 files, max is 2)
+	lm.AddL0Table(createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l0.a"}}))
+	lm.AddL0Table(createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l0.b"}}))
+
+	// L1 needs compaction (size > 10)
+	l1Table := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l1.a", value: "a_long_value_to_exceed_size"}})
+	lm.GetLevels()[1].SetTables([]*sstable.SSTable{l1Table})
+
+	// L2 needs compaction (size > 10)
+	l2Table := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l2.a", value: "a_long_value_to_exceed_size"}})
+	lm.GetLevels()[2].SetTables([]*sstable.SSTable{l2Table})
+
+	// L3 needs compaction, but should be skipped due to semaphore limit
+	l3Table := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l3.a", value: "a_long_value_to_exceed_size"}})
+	lm.GetLevels()[3].SetTables([]*sstable.SSTable{l3Table})
+
+	// 5. Execute the compaction cycle
+	t.Log("Performing compaction cycle...")
+	cm.performCompactionCycle()
+
+	// 6. Verification
+	startedCompactions := 0
+	timeout := time.After(2 * time.Second)
+
+	// Expect 3 compactions to start: L0->L1, L1->L2, L2->L3
+	for i := 0; i < 3; i++ {
+		select {
+		case <-compactionStartedChan:
+			startedCompactions++
+			t.Logf("Detected start of compaction #%d", startedCompactions)
+		case <-timeout:
+			t.Fatalf("Timed out waiting for compaction %d to start. Only %d started.", i+1, startedCompactions)
+		}
+	}
+	assert.Equal(t, 3, startedCompactions, "Expected 3 compactions to start in parallel (1 L0 + 2 LN)")
+	assert.True(t, cm.l0CompactionActive.Load(), "l0CompactionActive should be true while L0 compaction is running")
+
+	// Now, unblock the compactions
+	t.Log("Unblocking compactions...")
+	for i := 0; i < 3; i++ {
+		finishCompactionChan <- true
+	}
+
+	// Wait for all compaction goroutines to finish.
+	require.Eventually(t, func() bool {
+		// We can't access the waitgroup directly, but we can check the final state.
+		// The most reliable indicator is that l0CompactionActive is false and the levels are updated.
+		return !cm.l0CompactionActive.Load() && len(lm.GetTablesForLevel(0)) == 0
+	}, 2*time.Second, 20*time.Millisecond, "Timed out waiting for compactions to finish")
+
+	// Final state verification
+	assert.False(t, cm.l0CompactionActive.Load(), "l0CompactionActive should be false after compaction finishes")
+	assert.Empty(t, lm.GetTablesForLevel(0), "L0 should be empty after compaction")
+	assert.Len(t, lm.GetTablesForLevel(1), 1, "L1 should contain the newly compacted table from L0")
+	assert.Len(t, lm.GetTablesForLevel(2), 1, "L2 should contain the newly compacted table from L1")
+	// L3->L4 compaction was skipped due to semaphore limit.
+	// However, L2->L3 compaction *did* run, adding a new table to L3.
+	// So, L3 should now contain its original table plus the new one.
+	l3Tables := lm.GetTablesForLevel(3)
+	assert.Len(t, l3Tables, 2, "L3 should contain its original table plus the new one from L2 compaction")
+	assert.Contains(t, getTableIDs(l3Tables), l3Table.ID(), "The original l3Table should still be present in L3")
 }

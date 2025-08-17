@@ -63,6 +63,7 @@ type StorageEngineOptions struct {
 	TargetSSTableSize              int64
 	LevelsTargetSizeMultiplier     int
 	MaxLevels                      int
+	MaxConcurrentLNCompactions     int
 	BloomFilterFalsePositiveRate   float64
 	SSTableDefaultBlockSize        int
 	InitialSequenceNumber          uint64
@@ -907,7 +908,7 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 				TargetSSTableSize:          e.opts.TargetSSTableSize,
 				LevelsTargetSizeMultiplier: e.opts.LevelsTargetSizeMultiplier,
 				CompactionIntervalSeconds:  e.opts.CompactionIntervalSeconds,
-				MaxConcurrentLNCompactions: 1, // Default value, can be made configurable
+				MaxConcurrentLNCompactions: e.opts.MaxConcurrentLNCompactions, // Default value, can be made configurable
 				SSTableCompressor:          e.opts.SSTableCompressor,
 				RetentionPeriod:            e.opts.RetentionPeriod,
 			},
