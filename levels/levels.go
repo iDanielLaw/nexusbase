@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"sort"
 	"sync"
 
@@ -27,6 +28,12 @@ const (
 	PickMostKeys
 	// PickSmallestAvgKeySize selects the table with the smallest average data size per key.
 	PickSmallestAvgKeySize
+	// PickOldestByTimestamp selects the table with the smallest MinKey (representing the oldest timestamp).
+	PickOldestByTimestamp
+	// PickFewestKeys selects the table with the fewest keys, useful for cleaning up small, sparse tables.
+	PickFewestKeys
+	// PickRandom selects a random table to prevent starvation from other deterministic strategies.
+	PickRandom
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -371,6 +378,33 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 				}
 			}
 			return smallestAvgSizeTable
+		case PickOldestByTimestamp:
+			// Fallback: Pick the table with the smallest MinKey.
+			// Since tables in L1+ are already sorted by MinKey, this is the first table.
+			if len(tables) > 0 {
+				return tables[0]
+			}
+			return nil
+		case PickFewestKeys:
+			// Fallback: Pick the table with the fewest keys.
+			// Useful for cleaning up small, sparse tables.
+			var fewestKeysTable *sstable.SSTable
+			minKeyCount := uint64(math.MaxUint64)
+			for _, table := range tables {
+				if table.KeyCount() < minKeyCount {
+					minKeyCount = table.KeyCount()
+					fewestKeysTable = table
+				}
+			}
+			return fewestKeysTable
+		case PickRandom:
+			// Fallback: Pick a random table.
+			// This helps prevent starvation where the same tables are always
+			// ignored by other fallback strategies.
+			if len(tables) > 0 {
+				return tables[rand.Intn(len(tables))]
+			}
+			return nil
 		case PickOldest:
 			fallthrough // Fallthrough to the default case
 		default:

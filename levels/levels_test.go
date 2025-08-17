@@ -2,6 +2,7 @@ package levels
 
 import (
 	"fmt"
+	"math/rand"
 	"sync"
 	"testing"
 	"time"
@@ -419,6 +420,76 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 		candidate := lm.PickCompactionCandidateForLevelN(1)
 		require.NotNil(t, candidate)
 		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the table with the smallest average size per key")
+	})
+
+	t.Run("Fallback_PicksOldestByTimestampCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldestByTimestamp)
+		defer lm.Close()
+
+		// Table A has a larger MinKey ("key_c") but is older by ID (5)
+		l1_tableA := newTestSSTable(t, 5, []struct{ key, value []byte }{{[]byte("key_c"), makeValue(100)}})
+		defer l1_tableA.Close()
+		// Table B has a smaller MinKey ("key_b") but is newer by ID (10)
+		l1_tableB := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(10)}})
+		defer l1_tableB.Close()
+
+		// L2 table that does not overlap with L1 tables
+		l2_tableX := newTestSSTable(t, 20, []struct{ key, value []byte }{{[]byte("key_x"), []byte("v")}})
+		defer l2_tableX.Close()
+
+		// SetTables will sort them by minKey, so the order in lm.levels[1].tables will be [B, A]
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+		lm.levels[2].SetTables([]*sstable.SSTable{l2_tableX})
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the table with the smallest MinKey (oldest timestamp) when there is no overlap")
+	})
+
+	t.Run("Fallback_PicksFewestKeysCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickFewestKeys)
+		defer lm.Close()
+
+		// Table A has more keys (10)
+		tableA_entries := make([]struct{ key, value []byte }, 10)
+		for i := 0; i < 10; i++ {
+			tableA_entries[i] = struct{ key, value []byte }{key: []byte(fmt.Sprintf("key_a%02d", i)), value: makeValue(10)}
+		}
+		l1_tableA := newTestSSTable(t, 10, tableA_entries)
+		defer l1_tableA.Close()
+
+		// Table B has the fewest keys (3)
+		l1_tableB := newTestSSTable(t, 5, []struct{ key, value []byte }{
+			{[]byte("key_b1"), makeValue(10)},
+			{[]byte("key_b2"), makeValue(10)},
+			{[]byte("key_b3"), makeValue(10)},
+		})
+		defer l1_tableB.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the table with the fewest keys")
+	})
+
+	t.Run("Fallback_PicksRandomCandidateWhenNoOverlap", func(t *testing.T) {
+		// Seed for deterministic test result. In a real app, this is done once at startup.
+		rand.Seed(1)
+
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickRandom)
+		defer lm.Close()
+
+		l1_tableA := newTestSSTable(t, 5, []struct{ key, value []byte }{{[]byte("key_a"), makeValue(100)}})
+		defer l1_tableA.Close()
+		l1_tableB := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(10)}})
+		defer l1_tableB.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB}) // Sorted order will be [A, B]
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "With a fixed seed(1), rand.Intn(2) returns 1, so it should pick table B")
 	})
 
 	t.Run("ReturnsNilForInvalidOrEmptyLevel", func(t *testing.T) {
