@@ -8,7 +8,6 @@ import (
 	"hash/crc32"
 	"io"
 	"log/slog" // Import slog
-	"math"
 	"sync"
 	"sync/atomic"
 
@@ -69,15 +68,14 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	if opts.Tracer != nil {
 		// Assuming context.Background() for internal operations not tied to a specific request context
 		_, span = opts.Tracer.Start(context.Background(), "SSTable.LoadSSTable")
-		var sstableIDint64 int64
-		if opts.ID <= uint64(math.MaxInt64) {
-			sstableIDint64 = int64(opts.ID)
-		} else {
-			sstableIDint64 = math.MaxInt64
-			opts.Logger.Warn("SSTable ID exceeds int64 range, using MaxInt64 for tracing attribute.", "sstable_id", opts.ID)
-		}
-		span.SetAttributes(attribute.String("sstable.filepath", opts.FilePath), attribute.Int64("sstable.id", sstableIDint64))
+		span.SetAttributes(attribute.String("sstable.filepath", opts.FilePath), attribute.Int64("sstable.id", int64(opts.ID)))
 		defer span.End()
+	}
+	// Ensure logger is not nil
+	if opts.Logger == nil {
+		opts.Logger = slog.Default().With("component", "SSTable_default")
+	} else {
+		opts.Logger = opts.Logger.With("sstable_id", opts.ID)
 	}
 	// Ensure logger is not nil
 	if opts.Logger == nil {
@@ -88,6 +86,11 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	// FR6.1: Consider using a FileOpener interface for testability. For now, direct os.Open.
 	file, err := sys.Open(opts.FilePath)
 	if err != nil {
+		if opts.Tracer != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+
 		return nil, fmt.Errorf("failed to open sstable file %s: %w", opts.FilePath, err)
 	}
 	// Use defer with a named error return to ensure the file is closed on any error path.
