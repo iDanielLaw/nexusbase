@@ -460,6 +460,10 @@ func (cm *CompactionManager) performCompactionCycle() {
 			cm.logger.Info("L0 compaction needed, starting L0->L1 compaction task.", "max_l0_files", cm.opts.MaxL0Files)
 
 			go func(parentCtx context.Context) {
+				if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
+					cm.metrics.CompactionsInProgress.Add(1)
+					defer cm.metrics.CompactionsInProgress.Add(-1)
+				}
 				defer cm.l0CompactionActive.Store(false)
 				defer cm.compactionWg.Done()
 
@@ -509,6 +513,10 @@ func (cm *CompactionManager) performCompactionCycle() {
 				cm.logger.Info("LN compaction needed, starting task.", "source_level", levelN)
 
 				go func(lvl int, parentCtx context.Context) {
+					if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
+						cm.metrics.CompactionsInProgress.Add(1)
+						defer cm.metrics.CompactionsInProgress.Add(-1)
+					}
 					defer func() {
 						<-cm.lnCompactionSemaphore // Release the semaphore slot when done.
 						cm.compactionWg.Done()
