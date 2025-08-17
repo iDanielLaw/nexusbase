@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.10
 
 require (
-	github.com/INLOpen/nexuscore v0.0.0
+	github.com/INLOpen/nexuscore v0.0.0 
 	github.com/INLOpen/skiplist v1.2.1
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/antlr4-go/antlr/v4 v4.13.1
@@ -31,7 +31,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-replace github.com/INLOpen/nexuscore => ./shared/core/golang
+replace github.com/INLOpen/nexuscore => ./shared/core/golang // nexuscore is a submodule. Use `git submodule update --init` to fetch it.
 
 require (
 	github.com/bits-and-blooms/bitset v1.12.0 // indirect
