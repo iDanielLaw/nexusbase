@@ -93,7 +93,7 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	// FR6.1: Consider using a FileOpener interface for testability. For now, direct os.Open.
 	file, err := sys.Open(opts.FilePath)
 	if err != nil {
-		if opts.Tracer != nil {
+		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
