@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"io"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -101,8 +103,9 @@ type Config struct {
 	QueryServer    QueryServerConfig    `yaml:"query_server"`
 }
 
-// LoadConfig reads configuration from a YAML file.
-func LoadConfig(path string) (*Config, error) {
+// Load reads configuration from an io.Reader.
+// This is the core logic, separated for testability.
+func Load(r io.Reader) (*Config, error) {
 	// Set default values
 	cfg := &Config{
 		Server: ServerConfig{
@@ -176,15 +179,41 @@ func LoadConfig(path string) (*Config, error) {
 		},
 	}
 
-	data, err := os.ReadFile(path)
+	// If the reader is nil, it's like an empty file, return defaults.
+	if r == nil {
+		return cfg, nil
+	}
+
+	// Read all data from the reader
+	data, err := io.ReadAll(r)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		// If file doesn't exist, return default config
+		return nil, fmt.Errorf("failed to read config data: %w", err)
+	}
+
+	// If data is empty, return defaults.
+	if len(data) == 0 {
 		return cfg, nil
 	}
 
 	// Unmarshal YAML into the config struct, overwriting defaults
-	return cfg, yaml.Unmarshal(data, cfg)
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config yaml: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// LoadConfig reads configuration from a YAML file by path.
+func LoadConfig(path string) (*Config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// If file doesn't exist, return default config by calling Load with a nil reader.
+			return Load(nil)
+		}
+		return nil, fmt.Errorf("failed to open config file %s: %w", path, err)
+	}
+	defer file.Close()
+
+	return Load(file)
 }
