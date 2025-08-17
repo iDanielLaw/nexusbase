@@ -1555,3 +1555,95 @@ func TestCompactionManager_PerformCompactionCycle_ParallelExecution(t *testing.T
 	assert.Len(t, l3Tables, 2, "L3 should contain its original table plus the new one from L2 compaction")
 	assert.Contains(t, getTableIDs(l3Tables), l3Table.ID(), "The original l3Table should still be present in L3")
 }
+
+func TestCompactionManager_PerformCompactionCycle_LN_Failure(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// 1. Setup engine with a factory to inject a failing compactor
+	dummyEngine, err := NewStorageEngine(StorageEngineOptions{
+		DataDir:                    tempDir,
+		Logger:                     logger,
+		MaxLevels:                  5,
+		TargetSSTableSize:          10, // Small size to trigger LN compactions
+		LevelsTargetSizeMultiplier: 1,  // Any size > 0 will trigger
+		MaxConcurrentLNCompactions: 1,
+		SSTableCompressor:          &compressors.NoCompressionCompressor{},
+		CompactionIntervalSeconds:  3600, // Disable auto compaction
+	})
+	require.NoError(t, err)
+
+	concreteEngine := dummyEngine.(*storageEngine)
+
+	// This is the error we expect to see from the mock writer
+	simulatedError := errors.New("simulated writer finish error")
+
+	concreteEngine.setCompactorFactory = func(seo StorageEngineOptions, se *storageEngine) (CompactionManagerInterface, error) {
+		cmParams := CompactionManagerParams{
+			LevelsManager: se.levelsManager,
+			DataDir:       se.sstDir,
+			Opts: CompactionOptions{
+				TargetSSTableSize:          10,
+				LevelsTargetSizeMultiplier: 1,
+				CompactionIntervalSeconds:  3600,
+				MaxConcurrentLNCompactions: 1,
+				SSTableCompressor:          &compressors.NoCompressionCompressor{},
+			},
+			Logger:               se.logger,
+			Tracer:               trace.NewNoopTracerProvider().Tracer("test"),
+			IsSeriesDeleted:      func(b []byte, u uint64) bool { return false },
+			IsRangeDeleted:       func(b []byte, i int64, u uint64) bool { return false },
+			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			FileRemover:          &realFileRemover{},
+			SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) {
+				// This factory will produce a writer that fails on Finish()
+				return &MockSSTableWriter{
+					failFinish: true,
+					finishErr:  simulatedError,
+					filePath:   filepath.Join(se.sstDir, fmt.Sprintf("%d.sst.tmp", opts.ID)), // Provide a temp path
+				}, nil
+			},
+			Engine: se,
+		}
+		return NewCompactionManager(cmParams)
+	}
+
+	// 2. Start the engine, which initializes the compactor.
+	require.NoError(t, dummyEngine.Start())
+	t.Cleanup(func() { dummyEngine.Close() })
+
+	lm := concreteEngine.levelsManager
+	cm := concreteEngine.compactor.(*CompactionManager)
+	metrics := concreteEngine.metrics
+
+	// 3. Arrange state to trigger L1->L2 compaction
+	l1Table := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "l1.fail", value: "a_long_value_to_exceed_size"}})
+	lm.GetLevels()[1].SetTables([]*sstable.SSTable{l1Table})
+	require.Empty(t, lm.GetTablesForLevel(2), "L2 should be empty initially")
+	initialErrorCount := metrics.CompactionErrorsTotal.Value()
+
+	// 4. Act: Perform the compaction cycle
+	t.Log("Performing compaction cycle that is expected to fail...")
+	cm.performCompactionCycle()
+
+	// 5. Assert
+	// The compaction runs in a goroutine, so we need to wait for it to finish (and fail).
+	// The best way to check is to see if the error metric has been incremented.
+	require.Eventually(t, func() bool {
+		return metrics.CompactionErrorsTotal.Value() > initialErrorCount
+	}, 2*time.Second, 20*time.Millisecond, "Timed out waiting for compaction error metric to be incremented")
+
+	// Verify final state
+	assert.Equal(t, initialErrorCount+1, metrics.CompactionErrorsTotal.Value(), "CompactionErrorsTotal should be incremented by 1")
+
+	// The original table should still be in L1 because the compaction failed.
+	l1TablesAfter := lm.GetTablesForLevel(1)
+	require.Len(t, l1TablesAfter, 1, "L1 should still contain its original table after failed compaction")
+	assert.Equal(t, l1Table.ID(), l1TablesAfter[0].ID(), "The table in L1 should be the original one")
+
+	// L2 should remain empty.
+	assert.Empty(t, lm.GetTablesForLevel(2), "L2 should remain empty after failed compaction")
+
+	// The semaphore should have been released.
+	assert.Len(t, cm.lnCompactionSemaphore, 0, "LN compaction semaphore should be released after failure")
+}
