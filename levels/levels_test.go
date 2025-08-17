@@ -1,6 +1,7 @@
 package levels
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -386,6 +387,38 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 		require.NotNil(t, candidate)
 		// When there is no overlap, it should pick the table with the most keys (A)
 		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick the table with the most keys when there is no overlap")
+	})
+
+	t.Run("Fallback_PicksSmallestAvgKeySizeCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickSmallestAvgKeySize)
+		defer lm.Close()
+
+		// Table A: Larger size, fewer keys -> larger avg size per key
+		// Size is dominated by value size. Let's make it large.
+		tableA_entries := []struct{ key, value []byte }{
+			{[]byte("key_a1"), makeValue(1000)}, // 1 key, ~1000 byte value
+		}
+		l1_tableA := newTestSSTable(t, 10, tableA_entries)
+		defer l1_tableA.Close()
+		// Approx avg size: > 1000
+
+		// Table B: Smaller total size, but many more keys -> smaller avg size per key
+		tableB_entries := make([]struct{ key, value []byte }, 0, 100)
+		for i := 0; i < 100; i++ {
+			tableB_entries = append(tableB_entries, struct{ key, value []byte }{
+				key:   []byte(fmt.Sprintf("key_b%02d", i)),
+				value: makeValue(5), // 100 keys, 5 byte values each
+			})
+		}
+		l1_tableB := newTestSSTable(t, 5, tableB_entries)
+		defer l1_tableB.Close()
+		// Approx avg size: (100 * 5 + overhead) / 100 ~= 5 + overhead/100
+
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the table with the smallest average size per key")
 	})
 
 	t.Run("ReturnsNilForInvalidOrEmptyLevel", func(t *testing.T) {

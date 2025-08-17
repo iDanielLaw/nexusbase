@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
@@ -24,6 +25,8 @@ const (
 	PickSmallest
 	// PickMostKeys selects the table with the most keys.
 	PickMostKeys
+	// PickSmallestAvgKeySize selects the table with the smallest average data size per key.
+	PickSmallestAvgKeySize
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -351,6 +354,23 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 				}
 			}
 			return mostKeysTable
+		case PickSmallestAvgKeySize:
+			// Fallback: Pick the table with the smallest average size per key.
+			// This can be useful for compacting tables with many small, inefficiently stored keys.
+			var smallestAvgSizeTable *sstable.SSTable
+			minAvgSize := math.MaxFloat64
+
+			for _, table := range tables {
+				if table.KeyCount() == 0 {
+					continue // Avoid division by zero; tables with no keys are not candidates.
+				}
+				avgSize := float64(table.Size()) / float64(table.KeyCount())
+				if avgSize < minAvgSize {
+					minAvgSize = avgSize
+					smallestAvgSizeTable = table
+				}
+			}
+			return smallestAvgSizeTable
 		case PickOldest:
 			fallthrough // Fallthrough to the default case
 		default:
