@@ -49,8 +49,8 @@ func NewGRPCServer(eng engine.StorageEngineInterface, putPool *WorkerPool, batch
 	}
 
 	var opts []grpc.ServerOption
-	if cfg.TLSEnabled {
-		creds, err := s.loadTLSCredentials(cfg)
+	if cfg.TLS.Enabled {
+		creds, err := s.loadTLSCredentials(&cfg.TLS)
 		if err != nil {
 			return nil, fmt.Errorf("could not load TLS credentials: %w", err)
 		}
@@ -92,7 +92,7 @@ func (s *GRPCServer) Stop() {
 	s.logger.Info("gRPC server stopped.")
 }
 
-func (s *GRPCServer) loadTLSCredentials(cfg *config.ServerConfig) (credentials.TransportCredentials, error) {
+func (s *GRPCServer) loadTLSCredentials(cfg *config.TLSConfig) (credentials.TransportCredentials, error) {
 	serverCert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return nil, err

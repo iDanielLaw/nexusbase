@@ -1,129 +1,98 @@
-# config.yaml
+# Main server settings
 server:
   grpc_port: 50051
   tcp_port: 50052
+  health_check_interval: "5s"
 
-  # Enable or disable TLS for the gRPC server.
-  tls_enabled: false
+  # TLS configuration for the gRPC server
+  tls:
+    enabled: false
+    cert_file: "certs/server.crt"
+    key_file: "certs/server.key"
 
-  # Interval in seconds for the gRPC health check loop to run.
-  health_check_interval_seconds: 5
-
-  # Paths to the TLS certificate and key files.
-  cert_file: "certs/server.crt"
-  key_file: "certs/server.key"
-
-debug_mode:
-  enabled: true
-  listen_address: "0.0.0.0:6060"
-  enabled_pprof: true
-  enabled_metrics: true
-  enabled_tracing: true
-  enabled_profiling: true
-  enabled_monitor_ui: true
-
-security: # (FR4.6)
-  enabled: false
-  # Path to the binary user database file.
-  # Use the 'user-admin' utility to manage this file.
-  user_file_path: "data/users.db"
-
-logging:
-  level: "debug"   # ระดับการ Log: "debug", "info", "warn", "error"
-  output: "stdout" # ปลายทาง: "stdout", "file", "none"
-  # file: "nexusbase.log" # ตำแหน่งไฟล์ Log (เมื่อ output เป็น "file")
-
+# Engine configuration for the core database
 engine:
-  # Directory to store all database files.
+  # --- General ---
   data_dir: "./data"
+  retention_period: "" # e.g., "720h" (30 days), "365d". Empty means disabled.
+  metadata_sync_interval: "60s" # How often to sync metadata (manifest, etc.) to disk.
 
-  # Size in bytes at which a memtable is flushed to disk.
-  # Example: 4194304 (4 MiB)
-  memtable_threshold_bytes: 4194304
+  # --- Memtable ---
+  memtable:
+    size_threshold_bytes: 4194304 # 4 MiB
+    flush_interval: "1s" # Time-based flush interval. 0 to disable.
 
-  # Interval in milliseconds between memtable flushes to disk.
-  # Set to 0 to disable time-based flushing.
-  memtable_flush_interval_ms: 0
+  # --- SSTable ---
+  sstable:
+    block_size_bytes: 8192 # 8 KiB
+    compression: "snappy" # none, snappy, lz4, zstd
+    bloom_filter_fp_rate: 0.01
 
-  # Number of data blocks to keep in the LRU cache.
-  block_cache_capacity: 1024
+  # --- Cache ---
+  cache:
+    # Number of SSTable data blocks to keep in the LRU cache.
+    block_cache_capacity: 1024
 
-  # Total size in bytes of L0 files that triggers a compaction into L1.
-  # This is a secondary trigger to the file count.
-  # Example: 16777216 (16 MiB)
-  l0_compaction_trigger_size_bytes: 16777216
+  # --- Compaction ---
+  compaction:
+    l0_trigger_file_count: 4
+    l0_trigger_size_bytes: 16777216 # 16 MiB
+    target_sstable_size_bytes: 16777216 # 16 MiB
+    levels_size_multiplier: 5
+    max_levels: 7
+    check_interval: "120s"
+    fallback_strategy: "PickOldest"
 
-  # Number of L0 files that triggers a compaction into L1.
-  max_l0_files: 4
+  # --- Write-Ahead Log (WAL) ---
+  wal:
+    sync_mode: "interval" # "always", "batch", "interval", "disabled"
+    batch_size: 1
+    flush_interval: "1000ms"
+    max_segment_size_bytes: 33554432 # 32 MiB
+    purge_keep_segments: 4
 
-  # Target size in bytes for SSTables created during compaction.
-  # Example: 16777216 (16 MiB)
-  target_sstable_size_bytes: 16777216
+  # --- Tag Index ---
+  index:
+    memtable_threshold: 10000 # Number of unique tag pairs
+    flush_interval: "60s"
+    compaction_check_interval: "20s"
+    l0_trigger_file_count: 4
+    base_target_size_bytes: 2097152 # 2 MiB
 
-  # Multiplier for target size of the next level in compaction.
-  # TargetSize(L(N+1)) = TargetSize(LN) * multiplier.
-  levels_target_size_multiplier: 5
+# --- Other Services ---
 
-  # Maximum number of levels in the LSM tree.
-  max_levels: 7
+# Logging configuration
+logging:
+  level: "debug"   # "debug", "info", "warn", "error"
+  output: "stdout" # "stdout", "file", "none"
+  file: "nexusbase.log" # Path for 'file' output
 
-  # Fallback strategy for LN->LN+1 compaction when no table has clear overlap.
-  # Options: PickOldest, PickLargest, PickSmallest, PickRandom, etc.
-  compaction_fallback_strategy: "PickOldest"
-
-  # False positive rate for the Bloom filter in SSTables.
-  bloom_filter_false_positive_rate: 0.01
-
-  # Default size in bytes for data blocks within an SSTable.
-  # Example: 8192 (8 KiB)
-  sstable_default_block_size_bytes: 8192
-
-  # Interval in seconds to check if compaction is needed.
-  compaction_interval_seconds: 120
-
-  # (Optional) Interval in seconds to periodically sync metadata (manifest, tag index, series/string maps) to disk.
-  # This provides a guarantee on how up-to-date the persisted state is, independent of memtable flushes.
-  # Set to 0 or omit to disable. Default: 60
-  metadata_sync_interval_seconds: 60
-
-  # Compression algorithm for SSTable data blocks.
-  # Supported values: "none", "snappy", "lz4", "zstd".
-  sstable_compression: "snappy"
-
-  # WAL (Write-Ahead Log) configuration for durability and performance.
-  wal_sync_mode: "interval" # "always", "batch", "interval", "disabled"
-  wal_batch_size: 1       # Number of WAL entries to buffer before flushing (used with wal_sync_mode: "batch")
-  wal_flush_interval_ms: 1000 # Interval in milliseconds to flush WAL buffer (used with wal_sync_mode: "interval")
-  wal_max_segment_size: 33554432
-  wal_purge_keep_segments: 4
-  # Data retention period. Data older than this will be deleted during compaction.
-  # Format is a duration string like "720h" (30 days), "365d", "1y".
-  # Leave empty or omit to disable retention.
-  retention_period: ""
-
-  # --- Index Specific Configuration ---
-  # Number of unique tag pairs that triggers an index memtable flush.
-  index_memtable_threshold: 10000
-  # Interval in milliseconds to flush the index memtable.
-  index_flush_interval_ms: 60000
-  # Interval in seconds to check if index compaction is needed.
-  index_compaction_interval_seconds: 20
-  # Number of L0 index files that triggers a compaction.
-  index_max_l0_files: 4
-  # Target size in bytes for L1 index SSTables.
-  index_base_target_size_bytes: 2097152 # 2 MiB
+# Security settings (Authentication)
+security:
+  enabled: false
+  user_file_path: "data/users.db"
 
 # Self-monitoring settings
 self_monitoring:
-  enabled: true             # ตั้งเป็น true เพื่อเปิดใช้งาน
-  interval_seconds: 5      # ช่วงเวลาในการเก็บเมตริก (วินาที)
-  metric_prefix: "__" # คำนำหน้าชื่อเมตริกทั้งหมด
+  enabled: true
+  interval: "5s"
+  metric_prefix: "__"
 
+# Web-based Query UI
 query_server:
   enabled: true
   listen_address: "0.0.0.0:8088"
 
+# Distributed Tracing (OTLP)
 tracing:
   enabled: false
-  endpoint: "localhost:4317"
-  protocol: "grpc"
+  endpoint: "localhost:4317" # e.g., "otel-collector:4317"
+  protocol: "grpc" # "grpc" or "http"
+
+# Debugging endpoints (pprof, expvar)
+debug:
+  enabled: true
+  listen_address: "0.0.0.0:6060"
+  pprof_enabled: true
+  metrics_enabled: true # Exposes /debug/vars (expvar)
+  monitor_ui_enabled: true # Exposes /debug/statsviz
