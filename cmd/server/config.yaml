@@ -37,23 +37,28 @@ engine:
   # Directory to store all database files.
   data_dir: "./data"
 
-  # Size in Megabytes (MB) at which a memtable is flushed to disk.
-  memtable_threshold_mb: 4
+  # Size in bytes at which a memtable is flushed to disk.
+  # Example: 4194304 (4 MiB)
+  memtable_threshold_bytes: 4194304
 
   # Interval in milliseconds between memtable flushes to disk.
+  # Set to 0 to disable time-based flushing.
   memtable_flush_interval_ms: 0
 
   # Number of data blocks to keep in the LRU cache.
   block_cache_capacity: 1024
 
+  # Total size in bytes of L0 files that triggers a compaction into L1.
+  # This is a secondary trigger to the file count.
+  # Example: 16777216 (16 MiB)
+  l0_compaction_trigger_size_bytes: 16777216
+
   # Number of L0 files that triggers a compaction into L1.
   max_l0_files: 4
 
-  index_memtable_threshold_mb: 8 # ลดขนาด Memtable ของ Index
-  index_base_target_size_mb: 2   # ลดขนาด SSTable ของ Index
-
-  # Target size in Megabytes (MB) for SSTables created during compaction.
-  target_sstable_size_mb: 16
+  # Target size in bytes for SSTables created during compaction.
+  # Example: 16777216 (16 MiB)
+  target_sstable_size_bytes: 16777216
 
   # Multiplier for target size of the next level in compaction.
   # TargetSize(L(N+1)) = TargetSize(LN) * multiplier.
@@ -62,11 +67,16 @@ engine:
   # Maximum number of levels in the LSM tree.
   max_levels: 7
 
+  # Fallback strategy for LN->LN+1 compaction when no table has clear overlap.
+  # Options: PickOldest, PickLargest, PickSmallest, PickRandom, etc.
+  compaction_fallback_strategy: "PickOldest"
+
   # False positive rate for the Bloom filter in SSTables.
   bloom_filter_false_positive_rate: 0.01
 
-  # Default size in Kilobytes (KB) for data blocks within an SSTable.
-  sstable_default_block_size_kb: 8
+  # Default size in bytes for data blocks within an SSTable.
+  # Example: 8192 (8 KiB)
+  sstable_default_block_size_bytes: 8192
 
   # Interval in seconds to check if compaction is needed.
   compaction_interval_seconds: 120
@@ -77,7 +87,7 @@ engine:
   metadata_sync_interval_seconds: 60
 
   # Compression algorithm for SSTable data blocks.
-  # Supported values: "none", "snappy".
+  # Supported values: "none", "snappy", "lz4", "zstd".
   sstable_compression: "snappy"
 
   # WAL (Write-Ahead Log) configuration for durability and performance.
@@ -90,6 +100,18 @@ engine:
   # Format is a duration string like "720h" (30 days), "365d", "1y".
   # Leave empty or omit to disable retention.
   retention_period: ""
+
+  # --- Index Specific Configuration ---
+  # Number of unique tag pairs that triggers an index memtable flush.
+  index_memtable_threshold: 10000
+  # Interval in milliseconds to flush the index memtable.
+  index_flush_interval_ms: 60000
+  # Interval in seconds to check if index compaction is needed.
+  index_compaction_interval_seconds: 20
+  # Number of L0 index files that triggers a compaction.
+  index_max_l0_files: 4
+  # Target size in bytes for L1 index SSTables.
+  index_base_target_size_bytes: 2097152 # 2 MiB
 
 # Self-monitoring settings
 self_monitoring:

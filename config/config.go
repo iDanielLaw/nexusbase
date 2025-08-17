@@ -9,30 +9,32 @@ import (
 // EngineConfig mirrors engine.StorageEngineOptions for YAML unmarshaling.
 type EngineConfig struct {
 	DataDir                        string  `yaml:"data_dir"`
-	MemtableThresholdMB            int64   `yaml:"memtable_threshold_mb"` // Deprecated: use memtable_threshold_bytes
+	MemtableThresholdBytes         int64   `yaml:"memtable_threshold_bytes"`
 	MemtableFlushIntervalMs        int     `yaml:"memtable_flush_interval_ms"`
 	BlockCacheCapacity             int     `yaml:"block_cache_capacity"`
-	L0CompactionTriggerSizeMB      int64   `yaml:"l0_compaction_trigger_size_mb"` // New: Size-based trigger for L0 compaction
+	L0CompactionTriggerSizeBytes   int64   `yaml:"l0_compaction_trigger_size_bytes"`
 	MaxL0Files                     int     `yaml:"max_l0_files"`
-	TargetSSTableSizeMB            int64   `yaml:"target_sstable_size_mb"`
+	TargetSSTableSizeBytes         int64   `yaml:"target_sstable_size_bytes"`
 	LevelsTargetSizeMultiplier     int     `yaml:"levels_target_size_multiplier"`
 	MaxLevels                      int     `yaml:"max_levels"`
+	CompactionFallbackStrategy     string  `yaml:"compaction_fallback_strategy"`
 	BloomFilterFalsePositiveRate   float64 `yaml:"bloom_filter_false_positive_rate"`
-	SSTableDefaultBlockSizeKB      int     `yaml:"sstable_default_block_size_kb"`
+	SSTableDefaultBlockSizeBytes   int64   `yaml:"sstable_default_block_size_bytes"`
 	CompactionIntervalSeconds      int     `yaml:"compaction_interval_seconds"`
-	CheckpointIntervalSeconds      int     `yaml:"checkpoint_interval_seconds"` // New
+	CheckpointIntervalSeconds      int     `yaml:"checkpoint_interval_seconds"`
 	MetadataSyncIntervalSeconds    int     `yaml:"metadata_sync_interval_seconds"`
 	IndexMemtableThreshold         int64   `yaml:"index_memtable_threshold"`
 	IndexFlushIntervalMs           int     `yaml:"index_flush_interval_ms"`
 	IndexCompactionIntervalSeconds int     `yaml:"index_compaction_interval_seconds"`
 	IndexMaxL0Files                int     `yaml:"index_max_l0_files"`
+	IndexBaseTargetSizeBytes       int64   `yaml:"index_base_target_size_bytes"`
 	WALSyncMode                    string  `yaml:"wal_sync_mode"`
 	WALBatchSize                   int     `yaml:"wal_batch_size"`
 	WALFlushIntervalMs             int     `yaml:"wal_flush_interval_ms"`
 	WALMaxSegmentSize              int64   `yaml:"wal_max_segment_size"`
-	WALPurgeKeepSegments           int     `yaml:"wal_purge_keep_segments"` // New
-	SSTableCompression             string  `yaml:"sstable_compression"`     // "none" or "snappy"
-	RetentionPeriod                string  `yaml:"retention_period"`        // e.g., "30d", "1y". If empty, no retention.
+	WALPurgeKeepSegments           int     `yaml:"wal_purge_keep_segments"`
+	SSTableCompression             string  `yaml:"sstable_compression"`
+	RetentionPeriod                string  `yaml:"retention_period"`
 }
 
 // LoggingConfig holds logging-specific configurations.
@@ -122,29 +124,31 @@ func LoadConfig(path string) (*Config, error) {
 		},
 		Engine: EngineConfig{
 			DataDir:                        "./data",
-			MemtableThresholdMB:            4,
+			MemtableThresholdBytes:         4 * 1024 * 1024, // 4 MiB
 			MemtableFlushIntervalMs:        0,
-			BlockCacheCapacity:             100,
-			L0CompactionTriggerSizeMB:      16, // Default to 16MB
+			BlockCacheCapacity:             1024,
+			L0CompactionTriggerSizeBytes:   16 * 1024 * 1024, // 16 MiB
 			MaxL0Files:                     4,
-			TargetSSTableSizeMB:            4,
+			TargetSSTableSizeBytes:         16 * 1024 * 1024, // 16 MiB
 			LevelsTargetSizeMultiplier:     5,
 			MaxLevels:                      7,
+			CompactionFallbackStrategy:     "PickOldest",
 			BloomFilterFalsePositiveRate:   0.01,
-			SSTableDefaultBlockSizeKB:      4,
-			CompactionIntervalSeconds:      10,
-			CheckpointIntervalSeconds:      300, // Default to 5 minutes
+			SSTableDefaultBlockSizeBytes:   8 * 1024, // 8 KiB
+			CompactionIntervalSeconds:      120,
+			CheckpointIntervalSeconds:      300,
 			MetadataSyncIntervalSeconds:    60,
-			IndexMemtableThreshold:         10000, // Default to 10,000 unique tag pairs
-			IndexFlushIntervalMs:           60000, // Default to 60 seconds
-			IndexCompactionIntervalSeconds: 20,    // Default to 20 seconds
-			IndexMaxL0Files:                4,     // Default to 4 L0 index files
-			WALSyncMode:                    "always",
+			IndexMemtableThreshold:         10000,
+			IndexFlushIntervalMs:           60000,
+			IndexCompactionIntervalSeconds: 20,
+			IndexMaxL0Files:                4,
+			IndexBaseTargetSizeBytes:       2 * 1024 * 1024, // 2 MiB
+			WALSyncMode:                    "interval",
 			WALBatchSize:                   1,
-			WALFlushIntervalMs:             0,
-			WALMaxSegmentSize:              0,
-			WALPurgeKeepSegments:           2, // Default to keeping 2 segments as a safety buffer
-			SSTableCompression:             "none",
+			WALFlushIntervalMs:             1000,
+			WALMaxSegmentSize:              33554432,
+			WALPurgeKeepSegments:           4,
+			SSTableCompression:             "snappy",
 			RetentionPeriod:                "", // Default to no retention
 		},
 		Logging: LoggingConfig{
