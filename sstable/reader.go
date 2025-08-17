@@ -68,7 +68,14 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	if opts.Tracer != nil {
 		// Assuming context.Background() for internal operations not tied to a specific request context
 		_, span = opts.Tracer.Start(context.Background(), "SSTable.LoadSSTable")
-		span.SetAttributes(attribute.String("sstable.filepath", opts.FilePath), attribute.Int64("sstable.id", int64(opts.ID)))
+		var sstableIDint64 int64
+		if opts.ID <= uint64(math.MaxInt64) {
+			sstableIDint64 = int64(opts.ID)
+		} else {
+			sstableIDint64 = math.MaxInt64
+			opts.Logger.Warn("SSTable ID exceeds int64 range, using MaxInt64 for tracing attribute.", "sstable_id", opts.ID)
+		}
+		span.SetAttributes(attribute.String("sstable.filepath", opts.FilePath), attribute.Int64("sstable.id", sstableIDint64))
 		defer span.End()
 	}
 	// Ensure logger is not nil
