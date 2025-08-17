@@ -236,6 +236,7 @@ func main() {
 		SSTableDefaultBlockSize:        int(cfg.Engine.SSTableDefaultBlockSizeBytes),
 		CompactionIntervalSeconds:      cfg.Engine.CompactionIntervalSeconds,
 		TracerProvider:                 tp, // Pass the configured provider
+		MetadataSyncIntervalSeconds:    cfg.Engine.MetadataSyncIntervalSeconds,
 		CheckpointIntervalSeconds:      cfg.Engine.CheckpointIntervalSeconds,
 		SSTableCompressor:              sstCompressor,
 		WALSyncMode:                    wal.WALSyncMode(cfg.Engine.WALSyncMode),
