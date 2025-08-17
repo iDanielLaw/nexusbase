@@ -34,8 +34,9 @@ type SSTableWriter struct {
 	indexBuilder *IndexBuilder // To build the index (FR4.2) - IndexBuilder to be defined in index.go
 	bloomFilter  *BloomFilter  // To build the bloom filter (FR4.3) from sstable package
 
-	minKey []byte // Tracks the minimum key written (FR4.4)
-	maxKey []byte // Tracks the maximum key written (FR4.4)
+	minKey   []byte // Tracks the minimum key written (FR4.4)
+	maxKey   []byte // Tracks the maximum key written (FR4.4)
+	keyCount uint64 // Tracks the total number of entries written
 
 	// Configuration
 	bloomFilterFalsePositiveRate float64         // Config for Bloom Filter (FR4.3)
@@ -105,6 +106,7 @@ func NewSSTableWriter(opts core.SSTableWriterOptions) (core.SSTableWriterInterfa
 		bloomFilter:                  bf,
 		minKey:                       nil,
 		maxKey:                       nil,
+		keyCount:                     0, // Initialize key count
 		bloomFilterFalsePositiveRate: opts.BloomFilterFalsePositiveRate,
 		estimatedKeys:                opts.EstimatedKeys,
 		restartPointInterval:         DefaultRestartPointInterval, // Use a default for now
@@ -253,6 +255,8 @@ func (w *SSTableWriter) Add(key, value []byte, entryType core.EntryType, pointID
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	w.keyCount++ // Increment the key count for each entry added.
 
 	// --- Restart Point Logic ---
 	// The first entry in a block is always a restart point.
@@ -464,7 +468,7 @@ func (w *SSTableWriter) Finish() error {
 	// FR4.1: Construct and write the footer structure
 	footerBuf := core.BufferPool.Get()
 	defer core.BufferPool.Put(footerBuf)
-	// Order: IndexOffset, IndexLen, BloomFilterOffset, BloomFilterLen, MinKeyOffset, MinKeyLen, MaxKeyOffset, MaxKeyLen, MagicString
+	// Order: IndexOffset, IndexLen, BloomFilterOffset, BloomFilterLen, MinKeyOffset, MinKeyLen, MaxKeyOffset, MaxKeyLen, KeyCount, MagicString
 	binary.Write(footerBuf, binary.LittleEndian, uint64(indexOffset))       // Index offset
 	binary.Write(footerBuf, binary.LittleEndian, indexLen)                  // Index length
 	binary.Write(footerBuf, binary.LittleEndian, uint64(bloomFilterOffset)) // Bloom filter offset
@@ -473,6 +477,7 @@ func (w *SSTableWriter) Finish() error {
 	binary.Write(footerBuf, binary.LittleEndian, minKeyLen)                 // MinKey length
 	binary.Write(footerBuf, binary.LittleEndian, uint64(maxKeyOffset))      // MaxKey offset
 	binary.Write(footerBuf, binary.LittleEndian, maxKeyLen)                 // MaxKey length
+	binary.Write(footerBuf, binary.LittleEndian, w.keyCount)                // Key Count
 
 	footerBuf.WriteString(MagicString) // Magic String
 

@@ -28,6 +28,7 @@ const (
 	MinKeyLenSize         = 4 // uint32 for min key length
 	MaxKeyOffsetSize      = 8 // uint64 for max key offset
 	MaxKeyLenSize         = 4 // uint32 for max key length
+	KeyCountSize          = 8 // uint64 for the total number of entries
 	BlockLengthSize       = 4 // uint32 for block length (used in block index)
 	// MagicStringLen is already defined
 )
@@ -39,8 +40,8 @@ const DefaultBlockSize = 4 * 1024 // 4KB
 const DefaultRestartPointInterval = 16
 
 // FooterSize is the total fixed size of the footer excluding the magic string.
-// Index(12) + Bloom(12) + MinKey(12) + MaxKey(12)
-const FooterFixedComponentSize = IndexOffsetSize + IndexLenSize + BloomFilterOffsetSize + BloomFilterLenSize + MinKeyOffsetSize + MinKeyLenSize + MaxKeyOffsetSize + MaxKeyLenSize
+// Index(12) + Bloom(12) + MinKey(12) + MaxKey(12) + KeyCount(8)
+const FooterFixedComponentSize = IndexOffsetSize + IndexLenSize + BloomFilterOffsetSize + BloomFilterLenSize + MinKeyOffsetSize + MinKeyLenSize + MaxKeyOffsetSize + MaxKeyLenSize + KeyCountSize
 const FooterSize = FooterFixedComponentSize + MagicStringLen
 
 // ErrNotFound is returned by Get when a key is not found.

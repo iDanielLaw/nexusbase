@@ -22,6 +22,8 @@ const (
 	PickLargest
 	// PickSmallest selects the table with the smallest size.
 	PickSmallest
+	// PickMostKeys selects the table with the most keys.
+	PickMostKeys
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -340,6 +342,15 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 				}
 			}
 			return smallestTable
+		case PickMostKeys:
+			// Fallback: Pick the table with the most keys.
+			var mostKeysTable *sstable.SSTable
+			for _, table := range tables {
+				if mostKeysTable == nil || table.KeyCount() > mostKeysTable.KeyCount() {
+					mostKeysTable = table
+				}
+			}
+			return mostKeysTable
 		case PickOldest:
 			fallthrough // Fallthrough to the default case
 		default:

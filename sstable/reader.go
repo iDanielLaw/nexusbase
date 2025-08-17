@@ -33,11 +33,12 @@ type SSTable struct {
 	filePath string
 	id       uint64 // Unique identifier for the SSTable
 
-	index  *Index        // In-memory index for data blocks/entries (FR4.2), defined in index.go
-	filter filter.Filter // Bloom filter for fast existence checks (FR4.3)
-	minKey []byte        // Minimum key in this SSTable (FR4.4)
-	maxKey []byte        // Maximum key in this SSTable (FR4.4)
-	size   int64         // Size of the SSTable file on disk (FR4.5)
+	index    *Index        // In-memory index for data blocks/entries (FR4.2), defined in index.go
+	filter   filter.Filter // Bloom filter for fast existence checks (FR4.3)
+	minKey   []byte        // Minimum key in this SSTable (FR4.4)
+	maxKey   []byte        // Maximum key in this SSTable (FR4.4)
+	size     int64         // Size of the SSTable file on disk (FR4.5)
+	keyCount uint64        // Total number of entries in the SSTable
 
 	// dataEndOffset is the offset in the file where the actual key-value data blocks end
 	// and the footer (index, bloom filter, metadata) begins.
@@ -148,6 +149,7 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	footerReader := bytes.NewReader(footerFixedBytes)
 	var indexOffset, bloomFilterOffset uint64
 	var minKeyOffset, maxKeyOffset uint64
+	var keyCount uint64
 	var indexLen, bloomFilterLen uint32
 	var minKeyLen, maxKeyLen uint32
 
@@ -159,6 +161,7 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	binary.Read(footerReader, binary.LittleEndian, &minKeyLen)
 	binary.Read(footerReader, binary.LittleEndian, &maxKeyOffset)
 	binary.Read(footerReader, binary.LittleEndian, &maxKeyLen)
+	binary.Read(footerReader, binary.LittleEndian, &keyCount)
 
 	// Read and verify Magic String (FR4.1, FR7.2)
 	magicBytes := make([]byte, MagicStringLen)
@@ -260,6 +263,7 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 		minKey:        minKey,
 		maxKey:        maxKey,
 		size:          fileSize, // FR4.5
+		keyCount:      keyCount,
 		dataEndOffset: actualDataEndOffset,
 		blockCache:    opts.BlockCache, // FR4.8
 		tracer:        opts.Tracer,
@@ -526,6 +530,11 @@ func (s *SSTable) Size() int64 {
 // ID returns the unique identifier of the SSTable.
 func (s *SSTable) ID() uint64 {
 	return s.id
+}
+
+// KeyCount returns the total number of entries in the SSTable.
+func (s *SSTable) KeyCount() uint64 {
+	return s.keyCount
 }
 
 // FilePath returns the path to the SSTable file.

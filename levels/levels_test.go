@@ -363,6 +363,31 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 		assert.Equal(t, l1_tableB.ID(), candidate.ID(), "Should pick the smallest table when there is no overlap")
 	})
 
+	t.Run("Fallback_PicksMostKeysCandidateWhenNoOverlap", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickMostKeys)
+		defer lm.Close()
+
+		// Table A is smaller, older, but has the most keys (3)
+		l1_tableA := newTestSSTable(t, 5, []struct{ key, value []byte }{
+			{[]byte("key_a1"), makeValue(10)},
+			{[]byte("key_a2"), makeValue(10)},
+			{[]byte("key_a3"), makeValue(10)},
+		})
+		defer l1_tableA.Close()
+		// Table B is larger, newer, but has fewer keys (1)
+		l1_tableB := newTestSSTable(t, 10, []struct{ key, value []byte }{
+			{[]byte("key_b1"), makeValue(100)},
+		})
+		defer l1_tableB.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		require.NotNil(t, candidate)
+		// When there is no overlap, it should pick the table with the most keys (A)
+		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick the table with the most keys when there is no overlap")
+	})
+
 	t.Run("ReturnsNilForInvalidOrEmptyLevel", func(t *testing.T) {
 		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 		defer lm.Close()
