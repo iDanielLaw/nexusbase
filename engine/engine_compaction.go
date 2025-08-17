@@ -44,10 +44,13 @@ type CompactionManager struct {
 	dataDir       string
 	opts          CompactionOptions
 
-	compactionChan chan struct{}
-	shutdownChan   chan struct{}
-	compactionWg   sync.WaitGroup // Add WaitGroup for active compaction tasks
-	logger         *slog.Logger   // Structured logger
+	compactionChan        chan struct{}
+	shutdownChan          chan struct{}
+	compactionWg          sync.WaitGroup // Add WaitGroup for active compaction tasks
+	l0CompactionActive    atomic.Bool    // Tracks if an L0 compaction is currently active
+	lnCompactionSemaphore chan struct{}  // Limits concurrent LN compactions
+
+	logger *slog.Logger // Structured logger
 	// Metrics
 	compactionCount                   *expvar.Int     // Total compactions
 	compactionLatencyHist             *expvar.Map     // Histogram for compaction durations
@@ -55,15 +58,12 @@ type CompactionManager struct {
 	metricsCompactionDataWrittenBytes *expvar.Int     // Bytes written during compaction
 	metricsCompactionTablesMerged     *expvar.Int     // Number of tables merged in a compaction
 	blockCache                        cache.Interface // Reference to the shared block cache
-	blockReadSemaphore                chan struct{}   // NEW: Limits concurrent block reads during compaction
-	lnCompactionSemaphore             chan struct{}   // Limits concurrent LN compactions
 
 	// Dependency injection for file removal (for testing)
 	fileRemover core.FileRemover // Interface for file removal
 
 	// Dependency injection for SSTableWriter creation (for testing)
 	sstableWriterFactory core.SSTableWriterFactory
-	l0CompactionActive   atomic.Bool  // Tracks if an L0 compaction is currently active
 	tracer               trace.Tracer // For creating spans
 	// Functions passed from StorageEngine for tombstone checking during merge
 	isSeriesDeletedChecker      iterator.SeriesDeletedChecker
@@ -357,7 +357,6 @@ func NewCompactionManager(
 		sstableCompressor:           params.Opts.SSTableCompressor, // Store it
 		blockCache:                  params.BlockCache,             // Store the block cache
 	}
-	cm.blockReadSemaphore = make(chan struct{}, runtime.NumCPU()) // Initialize with number of CPUs
 
 	// Set the FileRemover. If not provided, use the default real implementation.
 	if params.FileRemover != nil {
@@ -368,7 +367,7 @@ func NewCompactionManager(
 
 	if params.Opts.MaxConcurrentLNCompactions <= 0 {
 		cm.logger.Info("MaxConcurrentLNCompactions not set or invalid, defaulting to 1.", "provided_value", params.Opts.MaxConcurrentLNCompactions)
-		params.Opts.MaxConcurrentLNCompactions = 1 // Default to 1 if not set or invalid
+		params.Opts.MaxConcurrentLNCompactions = runtime.NumCPU()
 	}
 	cm.lnCompactionSemaphore = make(chan struct{}, params.Opts.MaxConcurrentLNCompactions)
 
@@ -456,32 +455,33 @@ func (cm *CompactionManager) Trigger() {
 func (cm *CompactionManager) performCompactionCycle() {
 	ctx, span := cm.tracer.Start(context.Background(), "CompactionManager.performCompactionCycle")
 	defer span.End()
-	cm.logger.Debug("Checking for compaction...", "trace_id", span.SpanContext().TraceID().String())
-	var compactionInitiatedThisCycle bool // Tracks if any compaction (L0 or LN) was initiated
+	cm.logger.Debug("Checking for compaction needs...", "trace_id", span.SpanContext().TraceID().String())
+	var compactionInitiatedThisCycle bool
 
 	if cm.levelsManager.NeedsL0Compaction(cm.opts.MaxL0Files, cm.opts.L0CompactionTriggerSize) {
-		// Try to set L0 compaction active. If already active, skip this cycle for L0.
+		// Try to start an L0 compaction if one isn't already running.
 		if cm.l0CompactionActive.CompareAndSwap(false, true) {
 			compactionInitiatedThisCycle = true
-			cm.compactionWg.Add(1) // Increment compaction WaitGroup
-			cm.logger.Info("Attempting to start L0->L1 compaction.", "max_l0_files", cm.opts.MaxL0Files)
-			// Launch L0 compaction in a new goroutine
+			cm.compactionWg.Add(1)
+			cm.logger.Info("L0 compaction needed, starting L0->L1 compaction task.", "max_l0_files", cm.opts.MaxL0Files)
+
 			go func(parentCtx context.Context) {
-				defer cm.l0CompactionActive.Store(false) // Reset when done
-				defer cm.compactionWg.Done()             // Decrement compaction WaitGroup when finished
+				defer cm.l0CompactionActive.Store(false)
+				defer cm.compactionWg.Done()
 
 				l0Ctx, l0Span := cm.tracer.Start(parentCtx, "CompactionManager.L0CompactionWorker")
-				defer l0Span.End() // Ensure span is always ended
+				defer l0Span.End()
 				l0Span.SetAttributes(attribute.String("compaction.type", "L0->L1"))
-				clock := cm.Engine.GetClock()
 
+				clock := cm.Engine.GetClock()
 				startTime := clock.Now()
+
 				if err := cm.compactL0ToL1(l0Ctx); err == nil {
 					duration := clock.Now().Sub(startTime).Seconds()
 					if cm.compactionLatencyHist != nil {
 						observeLatency(cm.compactionLatencyHist, duration)
-						l0Span.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
 					}
+					l0Span.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
 					cm.logger.Info("L0->L1 compaction finished successfully.", "duration_seconds", duration)
 					if cm.compactionCount != nil {
 						cm.compactionCount.Add(1)
@@ -489,49 +489,50 @@ func (cm *CompactionManager) performCompactionCycle() {
 					l0Span.SetAttributes(attribute.Bool("compaction.performed", true))
 				} else {
 					cm.logger.Error("L0->L1 compaction failed.", "error", err)
-					l0Span.SetAttributes(attribute.Bool("compaction.performed", false))
 					l0Span.SetStatus(codes.Error, fmt.Sprintf("L0->L1 compaction failed: %v", err))
 					if cm.Engine != nil {
 						if concreteEngine, ok := cm.Engine.(*storageEngine); ok && concreteEngine.metrics.CompactionErrorsTotal != nil {
 							concreteEngine.metrics.CompactionErrorsTotal.Add(1)
 						}
 					}
-					// l0Span.End() is handled by defer
 				}
-			}(ctx) // Pass current context to goroutine
+			}(ctx)
 		} else {
 			cm.logger.Info("Skipping L0 compaction as one is already active.")
 			span.SetAttributes(attribute.String("compaction.skipped_reason", "l0_already_active"))
 		}
 	}
 
+	// Check other levels for compaction needs.
 	for levelN := 1; levelN < cm.levelsManager.MaxLevels()-1; levelN++ {
 		if cm.levelsManager.NeedsLevelNCompaction(levelN, cm.opts.LevelsTargetSizeMultiplier) {
-			// Try to acquire a semaphore slot for LN compaction
+			// Try to acquire a semaphore slot without blocking.
 			select {
 			case cm.lnCompactionSemaphore <- struct{}{}:
-				cm.compactionWg.Add(1)              // Increment compaction WaitGroup
-				compactionInitiatedThisCycle = true // Mark that at least one compaction was initiated
-				cm.logger.Info("Attempting to start LN->LN+1 compaction.", "source_level", levelN, "target_level", levelN+1)
-				// Launch LN compaction in a new goroutine
+				// Acquired a slot, start the compaction in a goroutine.
+				compactionInitiatedThisCycle = true
+				cm.compactionWg.Add(1)
+				cm.logger.Info("LN compaction needed, starting task.", "source_level", levelN)
+
 				go func(lvl int, parentCtx context.Context) {
 					defer func() {
-						cm.compactionWg.Done()     // Decrement compaction WaitGroup when finished
-						<-cm.lnCompactionSemaphore // Release semaphore slot
+						<-cm.lnCompactionSemaphore // Release the semaphore slot when done.
+						cm.compactionWg.Done()
 					}()
-					// Create a new span for this specific LN compaction goroutine
+
 					lnCtx, lnSpan := cm.tracer.Start(parentCtx, fmt.Sprintf("CompactionManager.LNCompactionWorker.L%d", lvl))
 					defer lnSpan.End()
-
 					lnSpan.SetAttributes(attribute.String("compaction.type", fmt.Sprintf("L%d->L%d", lvl, lvl+1)))
+
 					clock := cm.Engine.GetClock()
 					startTime := clock.Now()
+
 					if err := cm.compactLevelNToLevelNPlus1(lnCtx, lvl); err == nil {
 						duration := clock.Now().Sub(startTime).Seconds()
 						if cm.compactionLatencyHist != nil {
 							observeLatency(cm.compactionLatencyHist, duration)
-							lnSpan.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
 						}
+						lnSpan.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
 						cm.logger.Info("LN->LN+1 compaction finished successfully.", "source_level", lvl, "target_level", lvl+1, "duration_seconds", duration)
 						if cm.compactionCount != nil {
 							cm.compactionCount.Add(1)
@@ -539,28 +540,23 @@ func (cm *CompactionManager) performCompactionCycle() {
 						lnSpan.SetAttributes(attribute.Bool("compaction.performed", true))
 					} else {
 						cm.logger.Error("LN->LN+1 compaction failed.", "source_level", lvl, "target_level", lvl+1, "error", err)
-						lnSpan.SetAttributes(attribute.Bool("compaction.performed", false))
 						lnSpan.SetStatus(codes.Error, fmt.Sprintf("L%d->L%d compaction failed: %v", lvl, lvl+1, err))
 						if cm.Engine != nil {
 							if concreteEngine, ok := cm.Engine.(*storageEngine); ok && concreteEngine.metrics.CompactionErrorsTotal != nil {
 								concreteEngine.metrics.CompactionErrorsTotal.Add(1)
 							}
 						}
-						// lnSpan.End() is handled by defer
 					}
-				}(levelN, ctx) // Pass current context to goroutine
+				}(levelN, ctx)
 			default:
-				cm.logger.Info("Skipping LN compaction due to concurrency limit.", "level", levelN, "max_concurrent", cap(cm.lnCompactionSemaphore))
+				// Could not acquire a semaphore slot, so we skip this level for now.
+				cm.logger.Debug("Skipping LN compaction due to concurrency limit.", "level", levelN, "max_concurrent", cap(cm.lnCompactionSemaphore))
 				span.SetAttributes(attribute.String("compaction.skipped_reason", "concurrency_limit"), attribute.Int("compaction.skipped_level", levelN))
 			}
 		}
 	}
 
-	// The main span of performCompactionCycle will end.
-	// Individual LN compaction goroutines will continue in the background.
-	// The 'compactedInCycle' for the main span reflects if L0 was done OR any LN was initiated.
 	span.SetAttributes(attribute.Bool("compaction.any_initiated", compactionInitiatedThisCycle))
-
 	if !compactionInitiatedThisCycle {
 		cm.logger.Debug("No compaction needed or initiated in this cycle.")
 	}
@@ -673,7 +669,7 @@ func (cm *CompactionManager) createMergingIterator(ctx context.Context, tables [
 
 	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, table := range tables {
-		iter, err := table.NewIterator(nil, nil, cm.blockReadSemaphore, types.Ascending)
+		iter, err := table.NewIterator(nil, nil, nil, types.Ascending)
 		if err != nil {
 			// Close already opened iterators before returning
 			for _, openedIter := range iters {
