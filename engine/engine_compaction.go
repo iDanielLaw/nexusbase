@@ -366,9 +366,13 @@ func NewCompactionManager(
 	}
 
 	if params.Opts.MaxConcurrentLNCompactions <= 0 {
-		cm.logger.Info("MaxConcurrentLNCompactions not set or invalid, defaulting to 1.", "provided_value", params.Opts.MaxConcurrentLNCompactions)
+		cm.logger.Info("MaxConcurrentLNCompactions not set or invalid, defaulting to number of CPUs.", "provided_value", params.Opts.MaxConcurrentLNCompactions, "default_value", runtime.NumCPU())
 		params.Opts.MaxConcurrentLNCompactions = runtime.NumCPU()
+	} else if params.Opts.MaxConcurrentLNCompactions > runtime.NumCPU() {
+		cm.logger.Warn("MaxConcurrentLNCompactions is set higher than the number of available CPUs. This may not improve performance and could lead to increased resource consumption.", "provided_value", params.Opts.MaxConcurrentLNCompactions, "num_cpu", runtime.NumCPU())
+		params.Opts.MaxConcurrentLNCompactions = runtime.NumCPU() // Set to NumCPU if it's higher
 	}
+
 	cm.lnCompactionSemaphore = make(chan struct{}, params.Opts.MaxConcurrentLNCompactions)
 
 	// Set the SSTableWriterFactory. If not provided, use the default real implementation.
