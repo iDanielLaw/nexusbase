@@ -1219,6 +1219,10 @@ func (e *storageEngine) Query(ctx context.Context, params core.QueryParams) (ite
 		// For a final aggregation over multiple series, the result key should be synthetic
 		// and represent the query, not a specific series. We'll use just the metric.
 		syntheticSeriesKey := core.EncodeSeriesKey(metricID, nil)
+		const maxSeriesKeyLen = 64 * 1024 // 64KB, adjust as appropriate
+		if len(syntheticSeriesKey) > maxSeriesKeyLen {
+			return nil, fmt.Errorf("series key too large (%d bytes), max allowed is %d", len(syntheticSeriesKey), maxSeriesKeyLen)
+		}
 		syntheticQueryStartKey := make([]byte, len(syntheticSeriesKey)+8)
 		copy(syntheticQueryStartKey, syntheticSeriesKey)
 		binary.BigEndian.PutUint64(syntheticQueryStartKey[len(syntheticSeriesKey):], uint64(params.StartTime))
