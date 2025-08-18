@@ -34,14 +34,14 @@ type SSTable struct {
 	filePath string
 	id       uint64 // Unique identifier for the SSTable
 
-	index    *Index        // In-memory index for data blocks/entries (FR4.2), defined in index.go
-	filter   filter.Filter // Bloom filter for fast existence checks (FR4.3)
-	minKey   []byte        // Minimum key in this SSTable (FR4.4)
-	maxKey   []byte        // Maximum key in this SSTable (FR4.4)
-	size     int64         // Size of the SSTable file on disk (FR4.5)
-	keyCount uint64 // Total number of entries in the SSTable
-	tombstoneCount uint64 // Total number of tombstone entries
-	
+	index          *Index        // In-memory index for data blocks/entries (FR4.2), defined in index.go
+	filter         filter.Filter // Bloom filter for fast existence checks (FR4.3)
+	minKey         []byte        // Minimum key in this SSTable (FR4.4)
+	maxKey         []byte        // Maximum key in this SSTable (FR4.4)
+	size           int64         // Size of the SSTable file on disk (FR4.5)
+	keyCount       uint64        // Total number of entries in the SSTable
+	tombstoneCount uint64        // Total number of tombstone entries
+
 	// dataEndOffset is the offset in the file where the actual key-value data blocks end
 	// and the footer (index, bloom filter, metadata) begins.
 	dataEndOffset int64
@@ -128,11 +128,11 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 		return nil, fmt.Errorf("failed to parse sstable header from bytes: %w", err) // Return err directly
 	}
 
-	if header.Magic != core.SSTableMagic {
-		return nil, fmt.Errorf("invalid sstable magic number in %s. Got: %x, Want: %x", opts.FilePath, header.Magic, core.SSTableMagic)
+	if header.Magic != core.SSTableMagicNumber {
+		return nil, fmt.Errorf("invalid sstable magic number in %s. Got: %x, Want: %x", opts.FilePath, header.Magic, core.SSTableMagicNumber)
 	}
-	if header.Version != core.CurrentVersion {
-		return nil, fmt.Errorf("unsupported sstable version in %s. Got: %d, Want: %d", opts.FilePath, header.Version, core.CurrentVersion)
+	if header.Version != core.FormatVersion {
+		return nil, fmt.Errorf("unsupported sstable version in %s. Got: %d, Want: %d", opts.FilePath, header.Version, core.FormatVersion)
 	}
 
 	stat, err := file.Stat()
@@ -185,20 +185,20 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	binary.Read(footerReader, binary.LittleEndian, &tombstoneCount)
 
 	// Read and verify Magic String (FR4.1, FR7.2)
-	magicBytes := make([]byte, MagicStringLen)
-	if _, err = file.ReadAt(magicBytes, fileSize-int64(MagicStringLen)); err != nil {
+	magicBytes := make([]byte, core.SSTableMagicStringLen)
+	if _, err = file.ReadAt(magicBytes, fileSize-int64(core.SSTableMagicStringLen)); err != nil {
 		if span != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
 		return nil, fmt.Errorf("failed to read magic string from %s: %w", opts.FilePath, err)
 	}
-	if string(magicBytes) != MagicString {
+	if string(magicBytes) != core.SSTableMagicString {
 		if span != nil {
 			span.RecordError(ErrCorrupted)
 			span.SetStatus(codes.Error, ErrCorrupted.Error())
 		}
-		return nil, fmt.Errorf("invalid magic string in sstable file %s: got %s, want %s: %w", opts.FilePath, string(magicBytes), MagicString, ErrCorrupted)
+		return nil, fmt.Errorf("invalid magic string in sstable file %s: got %s, want %s: %w", opts.FilePath, string(magicBytes), core.SSTableMagicString, ErrCorrupted)
 	}
 
 	// Read and deserialize Bloom Filter (FR4.3)
@@ -276,20 +276,20 @@ func LoadSSTable(opts LoadSSTableOptions) (sst *SSTable, err error) {
 	actualDataEndOffset := int64(indexOffset)
 
 	sst = &SSTable{
-		file:          file,
-		filePath:      opts.FilePath,
-		id:            opts.ID,
-		index:         idx,
-		filter:        filter,
-		minKey:        minKey,
-		maxKey:        maxKey,
-		size:          fileSize, // FR4.5
-		keyCount:      keyCount,
+		file:           file,
+		filePath:       opts.FilePath,
+		id:             opts.ID,
+		index:          idx,
+		filter:         filter,
+		minKey:         minKey,
+		maxKey:         maxKey,
+		size:           fileSize, // FR4.5
+		keyCount:       keyCount,
 		tombstoneCount: tombstoneCount,
-		dataEndOffset: actualDataEndOffset,
-		blockCache:    opts.BlockCache, // FR4.8
-		tracer:        opts.Tracer,
-		logger:        opts.Logger,
+		dataEndOffset:  actualDataEndOffset,
+		blockCache:     opts.BlockCache, // FR4.8
+		tracer:         opts.Tracer,
+		logger:         opts.Logger,
 	}
 
 	return sst, nil

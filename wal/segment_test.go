@@ -26,19 +26,19 @@ func TestSegmentFileNameFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			fileName := formatSegmentFileName(tt.index)
+			fileName := core.FormatSegmentFileName(tt.index)
 			assert.Equal(t, tt.expected, fileName)
 
-			parsedIndex, err := parseSegmentFileName(fileName)
+			parsedIndex, err := core.ParseSegmentFileName(fileName)
 			require.NoError(t, err)
 			assert.Equal(t, tt.index, parsedIndex)
 		})
 	}
 
 	t.Run("ParseError", func(t *testing.T) {
-		_, err := parseSegmentFileName("not_a_segment.log")
+		_, err := core.ParseSegmentFileName("not_a_segment.log")
 		assert.Error(t, err)
-		_, err = parseSegmentFileName("00000001.wal_backup")
+		_, err = core.ParseSegmentFileName("00000001.wal_backup")
 		assert.Error(t, err)
 	})
 }
@@ -111,7 +111,7 @@ func TestSegment_WriteAndReadRecord(t *testing.T) {
 
 func TestSegmentReader_CorruptedData(t *testing.T) {
 	tempDir := t.TempDir()
-	segmentPath := filepath.Join(tempDir, formatSegmentFileName(1)) // Use a valid filename format
+	segmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(1)) // Use a valid filename format
 
 	// Helper to write a valid record and then corrupt the file
 	writeAndCorrupt := func(t *testing.T, corruption func([]byte) []byte) {
@@ -130,7 +130,7 @@ func TestSegmentReader_CorruptedData(t *testing.T) {
 		// Write to file with a valid header
 		file, err := os.Create(segmentPath)
 		require.NoError(t, err)
-		header := core.NewFileHeader(core.WALMagic, core.CompressionNone)
+		header := core.NewFileHeader(core.WALMagicNumber, core.CompressionNone)
 		require.NoError(t, binary.Write(file, binary.LittleEndian, &header))
 		_, err = file.Write(corruptedBytes)
 		require.NoError(t, err)
@@ -179,7 +179,7 @@ func TestOpenSegmentForRead_ErrorCases(t *testing.T) {
 	})
 
 	t.Run("InvalidMagicNumber", func(t *testing.T) {
-		path := filepath.Join(tempDir, formatSegmentFileName(2)) // Use a valid filename format
+		path := filepath.Join(tempDir, core.FormatSegmentFileName(2)) // Use a valid filename format
 		file, err := os.Create(path)
 		require.NoError(t, err)
 		// Write a bad header
@@ -193,7 +193,7 @@ func TestOpenSegmentForRead_ErrorCases(t *testing.T) {
 	})
 
 	t.Run("TruncatedHeader", func(t *testing.T) {
-		path := filepath.Join(tempDir, formatSegmentFileName(3)) // Use a valid filename format
+		path := filepath.Join(tempDir, core.FormatSegmentFileName(3)) // Use a valid filename format
 		err := os.WriteFile(path, []byte{0x01, 0x02, 0x03}, 0644)
 		require.NoError(t, err)
 

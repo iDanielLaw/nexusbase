@@ -73,7 +73,7 @@ type StorageEngineOptions struct {
 	ErrorOnSSTableLoadFailure      bool
 	SSTableCompressor              core.Compressor
 	TestingOnlyInjectWALCloseError error // For testing purposes, allows injection of errors during WAL close or recover
-	WALSyncMode                    wal.WALSyncMode
+	WALSyncMode                    core.WALSyncMode
 	WALBatchSize                   int
 	WALFlushIntervalMs             int
 	WALPurgeKeepSegments           int // New: Number of WAL segments to keep behind the last checkpointed one.
@@ -100,7 +100,7 @@ type StorageEngineOptions struct {
 	CompactionFallbackStrategy levels.CompactionFallbackStrategy
 
 	// New fields for Intra-L0 Compaction
-	IntraL0CompactionTriggerFiles    int   // Number of small files in L0 to trigger an intra-L0 compaction.
+	IntraL0CompactionTriggerFiles     int   // Number of small files in L0 to trigger an intra-L0 compaction.
 	IntraL0CompactionMaxFileSizeBytes int64 // Max size of a file to be considered for intra-L0 compaction.
 }
 
@@ -170,12 +170,6 @@ type storageEngine struct {
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
 }
-
-const (
-	CURRENT_FILE_NAME    = "CURRENT"
-	MANIFEST_FILE_PREFIX = "MANIFEST" // Prefix for manifest files, e.g., MANIFEST_12345.json
-	NEXTID_FILE_NAME     = "NEXTID"
-)
 
 var _ StorageEngineInterface = (*storageEngine)(nil)
 
@@ -450,7 +444,7 @@ func (e *storageEngine) Close() error {
 	if e.wal != nil {
 		lastFlushedSegment := e.wal.ActiveSegmentIndex()
 		if lastFlushedSegment > 0 {
-			cp := checkpoint.Checkpoint{LastSafeSegmentIndex: lastFlushedSegment}
+			cp := core.Checkpoint{LastSafeSegmentIndex: lastFlushedSegment}
 			if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
 				e.logger.Error("Failed to write final checkpoint during close.", "error", writeErr)
 				closeErr = errors.Join(closeErr, writeErr)
@@ -501,8 +495,8 @@ func (e *storageEngine) wipeDataDirectory() error {
 		e.sstDir,
 		e.dlqDir,
 		filepath.Join(e.opts.DataDir, "wal"),
-		filepath.Join(e.opts.DataDir, CURRENT_FILE_NAME),
-		filepath.Join(e.opts.DataDir, "CHECKPOINT"),
+		filepath.Join(e.opts.DataDir, core.CurrentFileName),
+		filepath.Join(e.opts.DataDir, core.CheckpointFileName),
 		filepath.Join(e.opts.DataDir, "string_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series.log"),
@@ -796,7 +790,7 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 				RetentionPeriod:            e.opts.RetentionPeriod,
 
 				// Pass Intra-L0 compaction options to the compactor
-				IntraL0CompactionTriggerFiles:    e.opts.IntraL0CompactionTriggerFiles,
+				IntraL0CompactionTriggerFiles:     e.opts.IntraL0CompactionTriggerFiles,
 				IntraL0CompactionMaxFileSizeBytes: e.opts.IntraL0CompactionMaxFileSizeBytes,
 			},
 			LevelsManager:        lm,

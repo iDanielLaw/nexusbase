@@ -20,11 +20,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-const (
-	CURRENT_FILE_NAME    = "CURRENT"
-	MANIFEST_FILE_PREFIX = "MANIFEST"
-)
-
 // manager implements the ManagerInterface.
 type manager struct {
 	provider                    EngineProvider
@@ -896,7 +891,7 @@ func findNewestTimeInChain(rootID string, infoMap map[string]Info, childrenMap m
 
 // writeManifestAndCurrent finalizes a snapshot by writing the manifest and CURRENT file.
 func (m *manager) writeManifestAndCurrent(snapshotDir string, manifest *core.SnapshotManifest) (string, error) {
-	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, manifest.CreatedAt.UnixNano())
+	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", core.ManifestFilePrefix, manifest.CreatedAt.UnixNano())
 	manifestPath := filepath.Join(snapshotDir, uniqueManifestFileName) // Local variable, not a field
 	manifestFile, createErr := m.wrapper.Create(manifestPath)
 	if createErr != nil {
@@ -908,7 +903,7 @@ func (m *manager) writeManifestAndCurrent(snapshotDir string, manifest *core.Sna
 	}
 	manifestFile.Close()
 
-	if err := m.wrapper.WriteFile(filepath.Join(snapshotDir, CURRENT_FILE_NAME), []byte(uniqueManifestFileName), 0644); err != nil {
+	if err := m.wrapper.WriteFile(filepath.Join(snapshotDir, core.CurrentFileName), []byte(uniqueManifestFileName), 0644); err != nil {
 		return "", fmt.Errorf("failed to write CURRENT file to snapshot directory: %w", err)
 	}
 	m.provider.GetLogger().Info("Snapshot manifest created successfully.", "snapshot_dir", snapshotDir, "manifest_file", uniqueManifestFileName)
@@ -1071,7 +1066,7 @@ func (r *restorer) walkAndCollectChainData() (map[string]string, *core.SnapshotM
 			// We will create a new, consolidated one. This check should NOT apply to files
 			// in subdirectories (like the tag index's MANIFEST file).
 			isInRoot := !strings.Contains(relPath, string(filepath.Separator))
-			if isInRoot && (strings.HasPrefix(filepath.Base(relPath), MANIFEST_FILE_PREFIX) || filepath.Base(relPath) == CURRENT_FILE_NAME) {
+			if isInRoot && (strings.HasPrefix(filepath.Base(relPath), core.ManifestFilePrefix) || filepath.Base(relPath) == core.CurrentFileName) {
 				return nil
 			}
 
@@ -1145,7 +1140,7 @@ func (r *restorer) walkAndCollectChainData() (map[string]string, *core.SnapshotM
 
 // writeConsolidatedManifestAndCurrent finalizes a restore by writing the manifest and CURRENT file.
 func (r *restorer) writeConsolidatedManifestAndCurrent(manifest *core.SnapshotManifest) (string, error) {
-	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, manifest.CreatedAt.UnixNano())
+	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", core.ManifestFilePrefix, manifest.CreatedAt.UnixNano())
 	manifestPath := filepath.Join(r.tempRestoreDir, uniqueManifestFileName)
 	manifestFile, createErr := r.wrapper.Create(manifestPath)
 	if createErr != nil {
@@ -1161,7 +1156,7 @@ func (r *restorer) writeConsolidatedManifestAndCurrent(manifest *core.SnapshotMa
 		return "", fmt.Errorf("failed to close consolidated manifest file: %w", err)
 	}
 
-	if err := r.wrapper.WriteFile(filepath.Join(r.tempRestoreDir, CURRENT_FILE_NAME), []byte(uniqueManifestFileName), 0644); err != nil {
+	if err := r.wrapper.WriteFile(filepath.Join(r.tempRestoreDir, core.CurrentFileName), []byte(uniqueManifestFileName), 0644); err != nil {
 		return "", fmt.Errorf("failed to write CURRENT file to restored directory: %w", err)
 	}
 	r.logger.Info("Consolidated manifest created successfully.", "restore_dir", r.tempRestoreDir, "manifest_file", uniqueManifestFileName)
@@ -1248,7 +1243,7 @@ func findLatestSnapshot(snapshotsBaseDir string, wrapper internal.PrivateSnapsho
 
 // readManifestFromDir is a helper to read the manifest from a specific snapshot directory.
 func readManifestFromDir(dir string, wrapper internal.PrivateSnapshotHelper) (*core.SnapshotManifest, string, error) {
-	currentFilePath := filepath.Join(dir, CURRENT_FILE_NAME)
+	currentFilePath := filepath.Join(dir, core.CurrentFileName)
 	manifestFileNameBytes, err := wrapper.ReadFile(currentFilePath)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to read CURRENT file from %s: %w", dir, err)

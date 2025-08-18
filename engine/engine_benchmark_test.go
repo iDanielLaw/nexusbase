@@ -15,7 +15,6 @@ import (
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/require"
 )
@@ -45,7 +44,7 @@ func BenchmarkStorageEngine_Put(b *testing.B) {
 		SSTableCompressor:         &compressors.LZ4Compressor{},
 		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
 	}
-	opts.WALSyncMode = wal.SyncAlways
+	opts.WALSyncMode = core.WALSyncAlways
 	opts.WALBatchSize = 1
 	opts.WALFlushIntervalMs = 0
 	eng, err := NewStorageEngine(opts) // Use NewStorageEngine
@@ -92,7 +91,7 @@ func BenchmarkStorageEngine_PutLargeDataPoint(b *testing.B) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		CompactionIntervalSeconds:    5, // Allow some background activity
 		SSTableCompressor:            &compressors.LZ4Compressor{},
-		WALSyncMode:                  wal.SyncAlways, // Ensure WAL sync is enabled for realistic Put performance
+		WALSyncMode:                  core.WALSyncAlways, // Ensure WAL sync is enabled for realistic Put performance
 		WALBatchSize:                 1,
 		WALFlushIntervalMs:           0,
 		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
@@ -154,7 +153,7 @@ func BenchmarkStorageEngine_Get_Sequential(b *testing.B) {
 		// Metrics:                      NewEngineMetrics(false, "bench_get_seq_"),
 		CompactionIntervalSeconds: 3600, // Minimize compaction during Get benchmark
 		SSTableCompressor:         &compressors.LZ4Compressor{},
-		WALSyncMode:               wal.SyncDisabled, // Disable WAL Sync for faster pre-population in benchmark
+		WALSyncMode:               core.WALSyncDisabled, // Disable WAL Sync for faster pre-population in benchmark
 		WALBatchSize:              1,
 		WALFlushIntervalMs:        0,
 		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
@@ -236,7 +235,7 @@ func BenchmarkStorageEngine_Get_Random(b *testing.B) {
 		// Metrics:                      NewEngineMetrics(false, "bench_get_rand_"),
 		CompactionIntervalSeconds: 3600, // Minimize compaction
 		SSTableCompressor:         &compressors.LZ4Compressor{},
-		WALSyncMode:               wal.SyncDisabled, // Disable WAL Sync for faster pre-population in benchmark
+		WALSyncMode:               core.WALSyncDisabled, // Disable WAL Sync for faster pre-population in benchmark
 		WALBatchSize:              1,
 		WALFlushIntervalMs:        0,
 		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
@@ -312,7 +311,7 @@ func BenchmarkStorageEngine_Delete(b *testing.B) {
 		LevelsTargetSizeMultiplier: 10,
 		MaxLevels:                  7,
 		SSTableCompressor:          &compressors.LZ4Compressor{},
-		WALSyncMode:                wal.SyncAlways,
+		WALSyncMode:                core.WALSyncAlways,
 		WALBatchSize:               1,
 		WALFlushIntervalMs:         0,
 		Logger:                     slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
@@ -381,7 +380,7 @@ func BenchmarkStorageEngine_RangeScan(b *testing.B) {
 		// Metrics:                      NewEngineMetrics(false, "bench_scan_"),
 		CompactionIntervalSeconds: 3600, // Minimize compaction during benchmark
 		SSTableCompressor:         &compressors.LZ4Compressor{},
-		WALSyncMode:               wal.SyncDisabled, // Disable WAL Sync for faster pre-population in benchmark
+		WALSyncMode:               core.WALSyncDisabled, // Disable WAL Sync for faster pre-population in benchmark
 		WALBatchSize:              1,
 		WALFlushIntervalMs:        0,
 		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
@@ -474,7 +473,7 @@ func BenchmarkStorageEngine_Query_DownsampleAndAggregate(b *testing.B) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		CompactionIntervalSeconds:    3600, // Disable compaction during benchmark
 		SSTableCompressor:            &compressors.LZ4Compressor{},
-		WALSyncMode:                  wal.SyncDisabled, // Disable WAL for faster setup
+		WALSyncMode:                  core.WALSyncDisabled, // Disable WAL for faster setup
 		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
 	}
 
@@ -584,7 +583,7 @@ func BenchmarkStorageEngine_Query_MultiSeries_DownsampleAndAggregate(b *testing.
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		CompactionIntervalSeconds:    3600,
 		SSTableCompressor:            &compressors.LZ4Compressor{},
-		WALSyncMode:                  wal.SyncDisabled,
+		WALSyncMode:                  core.WALSyncDisabled,
 		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
 	}
 
@@ -684,7 +683,7 @@ func BenchmarkStorageEngine_ConcurrentWrites_SameDataPoint(b *testing.B) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		CompactionIntervalSeconds:    1, // Frequent compaction
 		SSTableCompressor:            &compressors.LZ4Compressor{},
-		WALSyncMode:                  wal.SyncAlways, // Ensure durability
+		WALSyncMode:                  core.WALSyncAlways, // Ensure durability
 		WALBatchSize:                 1,
 		WALFlushIntervalMs:           0,
 		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
@@ -747,7 +746,7 @@ func BenchmarkStorageEngine_StressTest_MixedWorkload(b *testing.B) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		CompactionIntervalSeconds:    1, // Allow frequent compaction
 		SSTableCompressor:            &compressors.LZ4Compressor{},
-		WALSyncMode:                  wal.SyncDisabled, // Disable WAL Sync for faster writes during stress test
+		WALSyncMode:                  core.WALSyncDisabled, // Disable WAL Sync for faster writes during stress test
 		WALBatchSize:                 1,
 		WALFlushIntervalMs:           0,
 		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
@@ -925,7 +924,7 @@ func BenchmarkStorageEngine_ReadHeavy_MixedWorkload(b *testing.B) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		CompactionIntervalSeconds:    5, // Allow compactions to run in the background
 		SSTableCompressor:            &compressors.LZ4Compressor{},
-		WALSyncMode:                  wal.SyncDisabled, // Disable WAL Sync for faster writes during stress test
+		WALSyncMode:                  core.WALSyncDisabled, // Disable WAL Sync for faster writes during stress test
 		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
 	}
 
@@ -1038,7 +1037,7 @@ func setupBenchmarkEngineWithData(b *testing.B, numSeries int, dataDuration time
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		CompactionIntervalSeconds:    3600, // Disable background compaction to prevent race conditions during read benchmarks
 		SSTableCompressor:            &compressors.LZ4Compressor{},
-		WALSyncMode:                  wal.SyncDisabled, // Disable WAL Sync for faster writes during stress test
+		WALSyncMode:                  core.WALSyncDisabled, // Disable WAL Sync for faster writes during stress test
 		Logger:                       slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{})),
 		Clock:                        mockClock,
 	}

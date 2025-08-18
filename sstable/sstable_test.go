@@ -401,12 +401,12 @@ func TestLoadSSTable_TruncatedFile(t *testing.T) {
 		},
 		{
 			name:         "truncated_in_bloom_filter_data",
-			truncateSize: originalFileSize - int64(MagicStringLen) - 10, // Just before magic string, in bloom filter data
-			expectedErr:  ErrCorrupted,                                  // Or io.EOF/io.ErrUnexpectedEOF
+			truncateSize: originalFileSize - int64(core.SSTableMagicStringLen) - 10, // Just before magic string, in bloom filter data
+			expectedErr:  ErrCorrupted,                                              // Or io.EOF/io.ErrUnexpectedEOF
 		},
 		{
 			name:         "truncated_just_before_magic_string",
-			truncateSize: originalFileSize - int64(MagicStringLen) + 1,
+			truncateSize: originalFileSize - int64(core.SSTableMagicStringLen) + 1,
 			expectedErr:  ErrCorrupted, // Should fail magic string check
 		},
 	}
@@ -1506,7 +1506,7 @@ func TestSSTable_TombstoneCount(t *testing.T) {
 
 		entriesWithTombstones := []testEntry{
 			{Key: []byte("key1"), Value: []byte("v1"), EntryType: core.EntryTypePutEvent, PointID: 1},
-			{Key: []byte("key2"), Value: nil, EntryType: core.EntryTypeDelete, PointID: 2},         // Tombstone 1
+			{Key: []byte("key2"), Value: nil, EntryType: core.EntryTypeDelete, PointID: 2}, // Tombstone 1
 			{Key: []byte("key3"), Value: []byte("v3"), EntryType: core.EntryTypePutEvent, PointID: 3},
 			{Key: []byte("key4"), Value: nil, EntryType: core.EntryTypeDeleteSeries, PointID: 4}, // Tombstone 2
 			{Key: []byte("key5"), Value: nil, EntryType: core.EntryTypeDeleteRange, PointID: 5},  // Tombstone 3

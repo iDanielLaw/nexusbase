@@ -62,7 +62,7 @@ type mockEngineProvider struct {
 
 func newMockEngineProvider(t *testing.T, dataDir string) *mockEngineProvider {
 	t.Helper()
-	lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer(""), levels.PickOldest,1.5,1.0)
+	lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer(""), levels.PickOldest, 1.5, 1.0)
 	require.NoError(t, err)
 
 	return &mockEngineProvider{
@@ -75,8 +75,8 @@ func newMockEngineProvider(t *testing.T, dataDir string) *mockEngineProvider {
 		hooks:              hooks.NewHookManager(nil),
 		levelsManager:      lm,
 		tagIndexManager:    new(mockTagIndexManager),
-		stringStore:        newMockPrivateManagerStore(filepath.Join(dataDir, indexer.StringMappingLogName)),
-		seriesIDStore:      newMockPrivateManagerStore(filepath.Join(dataDir, indexer.SeriesMappingLogName)),
+		stringStore:        newMockPrivateManagerStore(filepath.Join(dataDir, core.StringMappingLogName)),
+		seriesIDStore:      newMockPrivateManagerStore(filepath.Join(dataDir, core.SeriesMappingLogName)),
 		sstableCompression: "none",
 		wal:                new(mockWAL),
 		isStarted:          true,
@@ -200,7 +200,7 @@ func (m *mockTagIndexManager) CreateSnapshot(snapshotDir string) error {
 	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(snapshotDir, indexer.IndexManifestFileName), []byte(`{"levels":[]}`), 0644)
+	return os.WriteFile(filepath.Join(snapshotDir, core.IndexManifestFileName), []byte(`{"levels":[]}`), 0644)
 }
 func (m *mockTagIndexManager) RestoreFromSnapshot(snapshotDir string) error {
 	args := m.Called(snapshotDir)
@@ -452,8 +452,8 @@ func setupRestorerTest(t *testing.T) (r *restorer, snapshotDir, targetDataDir st
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("data"), 0644))
 	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "wal"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "wal", "000001.wal"), []byte("wal"), 0644))
-	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, indexer.IndexDirName), 0755)) // index dir
-	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, indexer.IndexDirName, "index.sst"), []byte("index"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, core.IndexDirName), 0755)) // index dir
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, core.IndexDirName, "index.sst"), []byte("index"), 0644))
 
 	manifestFileName, err := writeTestManifest(snapshotDir, manifest)
 	require.NoError(t, err)
@@ -598,7 +598,7 @@ func TestManager_CreateFull(t *testing.T) {
 
 	// ตรวจสอบว่า tag index snapshot ถูกสร้างขึ้น
 	provider.tagIndexManager.AssertCalled(t, "CreateSnapshot", filepath.Join(snapshotDir, "index"))
-	require.FileExists(t, filepath.Join(snapshotDir, "index", indexer.IndexManifestFileName))
+	require.FileExists(t, filepath.Join(snapshotDir, "index", core.IndexManifestFileName))
 
 	// The assertion for flushing memtables is removed because this responsibility
 	// has been moved to the engine layer, which calls the snapshot manager.
@@ -1590,7 +1590,7 @@ func TestRestoreFromFull_MissingFiles(t *testing.T) {
 		require.NoError(t, err, "Restore should succeed even when the index directory is missing")
 
 		// 3. Verification
-		assert.NoFileExists(t, filepath.Join(targetDataDir, indexer.IndexSSTDirName))
+		assert.NoFileExists(t, filepath.Join(targetDataDir, core.IndexSSTDirName))
 	})
 }
 
@@ -1629,7 +1629,7 @@ func TestManager_CreateFull_WriteCurrentFileError(t *testing.T) {
 	// 2. Simulate the error condition
 	expectedErr := fmt.Errorf("simulated write CURRENT error")
 	helper.InterceptWriteFile = func(name string, data []byte, perm os.FileMode) error {
-		if strings.HasSuffix(name, CURRENT_FILE_NAME) {
+		if strings.HasSuffix(name, core.CurrentFileName) {
 			return expectedErr
 		}
 		return helper.helperSnapshot.WriteFile(name, data, perm)
@@ -1659,7 +1659,7 @@ func TestRestoreFromFull(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("sst1"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "wal", "000001.wal"), []byte("wal1"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "index", "index1.sst"), []byte("index1"), 0644)) // A file inside the index dir
-	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "index", indexer.IndexManifestFileName), []byte("{}"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "index", core.IndexManifestFileName), []byte("{}"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "deleted_series.json"), []byte("{}"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "string_mapping.log"), []byte("str"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "series_mapping.log"), []byte("ser"), 0644))
@@ -1703,7 +1703,7 @@ func TestRestoreFromFull(t *testing.T) {
 	assert.FileExists(t, filepath.Join(targetDataDir, "sst", "1.sst"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "wal", "000001.wal"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "index", "index1.sst"))
-	assert.FileExists(t, filepath.Join(targetDataDir, "index", indexer.IndexManifestFileName))
+	assert.FileExists(t, filepath.Join(targetDataDir, "index", core.IndexManifestFileName))
 	assert.FileExists(t, filepath.Join(targetDataDir, "deleted_series.json"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "string_mapping.log"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "series_mapping.log"))

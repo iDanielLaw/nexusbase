@@ -16,7 +16,6 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/sys"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,7 +44,7 @@ func TestStorageEngine_WALRecovery_CrashSimulation(t *testing.T) {
 		BloomFilterFalsePositiveRate: 0.01,
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		Metrics:                      NewEngineMetrics(false, "wal_crash_"),
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		WALBatchSize:                 1,
 		CompactionIntervalSeconds:    3600, // Prevent compaction
 	}
@@ -99,7 +98,7 @@ func TestStorageEngine_WALRecovery_WithDeletes(t *testing.T) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		MaxLevels:                    3,
 		Metrics:                      NewEngineMetrics(false, "wal_delete_"),
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		WALBatchSize:                 1,
 		BloomFilterFalsePositiveRate: 0.01,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
@@ -165,7 +164,7 @@ func TestStorageEngine_WALRecovery_AdvancedCorruption(t *testing.T) {
 		t.Helper()
 		opts := getBaseOptsForFlushTest(t) // Use the helper to get standard options
 		opts.DataDir = dir
-		opts.WALSyncMode = wal.SyncAlways // Ensure data is on disk
+		opts.WALSyncMode = core.WALSyncAlways // Ensure data is on disk
 
 		crashEngine(t, opts, func(e StorageEngineInterface) {
 			for _, entry := range entries {
@@ -325,7 +324,7 @@ func TestStorageEngine_Recovery_CorruptedWALWithValidManifest(t *testing.T) {
 		MaxLevels:                    3,
 		BloomFilterFalsePositiveRate: 0.01,
 		Metrics:                      NewEngineMetrics(false, "wal_manifest_inconsistent_"),
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
 	}
 
@@ -349,7 +348,7 @@ func TestStorageEngine_Recovery_CorruptedWALWithValidManifest(t *testing.T) {
 	}
 
 	// --- Phase 2: Create a new WAL with newer data, then crash ---
-	opts.WALSyncMode = wal.SyncAlways
+	opts.WALSyncMode = core.WALSyncAlways
 
 	var walDir string
 	crashEngine(t, opts, func(e StorageEngineInterface) {
@@ -422,7 +421,7 @@ func TestStorageEngine_WALRecovery_TagIndex(t *testing.T) {
 		MaxLevels:                    3,
 		BloomFilterFalsePositiveRate: 0.01,
 		Metrics:                      NewEngineMetrics(false, "wal_tag_index_"),
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		WALBatchSize:                 1,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
 	}
@@ -499,7 +498,7 @@ func TestStorageEngine_WALRecovery_RangeTombstones(t *testing.T) {
 		MaxLevels:                    3,
 		BloomFilterFalsePositiveRate: 0.01,
 		Metrics:                      NewEngineMetrics(false, "wal_range_tombstone_"),
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		WALBatchSize:                 1,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
 	}

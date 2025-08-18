@@ -70,7 +70,7 @@ func (e *storageEngine) processImmutableMemtables(writeCheckpoint bool) {
 				safeSegmentToCheckpoint := lastActiveSegment - 1
 
 				if safeSegmentToCheckpoint > 0 {
-					cp := checkpoint.Checkpoint{LastSafeSegmentIndex: safeSegmentToCheckpoint}
+					cp := core.Checkpoint{LastSafeSegmentIndex: safeSegmentToCheckpoint}
 					if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
 						e.logger.Error("Failed to write checkpoint after memtable flush. WAL files will not be purged.", "error", writeErr)
 					} else {

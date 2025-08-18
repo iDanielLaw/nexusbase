@@ -116,7 +116,7 @@ func TestStateLoader_Load_FallbackScan(t *testing.T) {
 	require.NoError(t, engine1.Close())
 
 	// Now, remove the manifest to force a fallback scan
-	require.NoError(t, os.Remove(filepath.Join(dataDir, CURRENT_FILE_NAME)))
+	require.NoError(t, os.Remove(filepath.Join(dataDir, core.CurrentFileName)))
 	files, _ := os.ReadDir(dataDir)
 	for _, f := range files {
 		if strings.HasPrefix(f.Name(), "MANIFEST") {
@@ -249,7 +249,7 @@ func TestStateLoader_Load_CorruptedManifest(t *testing.T) {
 	require.NoError(t, engine1.Close())
 
 	// Get the name of the manifest file
-	currentBytes, err := os.ReadFile(filepath.Join(dataDir, CURRENT_FILE_NAME))
+	currentBytes, err := os.ReadFile(filepath.Join(dataDir, core.CurrentFileName))
 	require.NoError(t, err)
 	manifestFileName = string(currentBytes)
 

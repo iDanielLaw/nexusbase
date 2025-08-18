@@ -16,7 +16,6 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -133,7 +132,7 @@ func TestStorageEngine_VerifyDataConsistency(t *testing.T) {
 		BloomFilterFalsePositiveRate: 0.01,
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{}, // เพิ่ม NoCompressionCompressor
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		WALBatchSize:                 1,
 		WALFlushIntervalMs:           0,
 		CompactionIntervalSeconds:    3600, // Disable compaction for manual setup
@@ -559,7 +558,7 @@ func TestStorageEngine_Recovery_FallbackScan(t *testing.T) {
 		// To properly test the fallback recovery path (`scanDataDirAndLoadToL0`), we must
 		// remove the CURRENT file. This makes the primary recovery path (from MANIFEST)
 		// fail with os.ErrNotExist, which correctly triggers the fallback logic.
-		require.NoError(t, os.Remove(filepath.Join(dataDir, CURRENT_FILE_NAME)))
+		require.NoError(t, os.Remove(filepath.Join(dataDir, core.CurrentFileName)))
 	}
 
 	// --- Phase 2: Create a new engine, which should load the state via fallback scan ---

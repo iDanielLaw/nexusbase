@@ -44,7 +44,7 @@ func TestStorageEngine_PeriodicFlush_Success(t *testing.T) {
 		BloomFilterFalsePositiveRate: 0.01,
 		Metrics:                      testMetrics,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
-		WALSyncMode:                  wal.SyncDisabled, // Disable for speed in test
+		WALSyncMode:                  core.WALSyncDisabled, // Disable for speed in test
 	}
 
 	engine, err := NewStorageEngine(opts)
@@ -95,7 +95,7 @@ func TestStorageEngine_PeriodicFlush_NoData(t *testing.T) {
 		BloomFilterFalsePositiveRate: 0.01,
 		Metrics:                      testMetrics,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
-		WALSyncMode:                  wal.SyncDisabled,
+		WALSyncMode:                  core.WALSyncDisabled,
 	}
 
 	engine, err := NewStorageEngine(opts)
@@ -126,7 +126,7 @@ func TestStorageEngine_PeriodicFlush_SizeTriggerFirst(t *testing.T) {
 		BloomFilterFalsePositiveRate: 0.01,
 		Metrics:                      testMetrics,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
-		WALSyncMode:                  wal.SyncDisabled,
+		WALSyncMode:                  core.WALSyncDisabled,
 	}
 
 	engine, err := NewStorageEngine(opts)
@@ -185,7 +185,7 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 		walOpts := wal.Options{
 			Dir:      walDir,
 			Logger:   concreteEngine.logger,
-			SyncMode: wal.SyncDisabled,
+			SyncMode: core.WALSyncDisabled,
 		}
 		testWal, _, err := wal.Open(walOpts)
 		require.NoError(t, err)

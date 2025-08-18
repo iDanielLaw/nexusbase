@@ -10,7 +10,6 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,7 +29,7 @@ func getBaseOptsForE2ETest(t *testing.T) engine.StorageEngineOptions {
 		LevelsTargetSizeMultiplier:   10,
 		MaxLevels:                    7,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
-		WALSyncMode:                  wal.SyncDisabled,
+		WALSyncMode:                  core.WALSyncDisabled,
 		WALMaxSegmentSize:            1 * 1024 * 1024, // 1MB
 		Clock:                        clock.SystemClockDefault,
 		CompactionIntervalSeconds:    1,

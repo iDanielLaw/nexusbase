@@ -34,9 +34,9 @@ type SSTableWriter struct {
 	indexBuilder *IndexBuilder // To build the index (FR4.2) - IndexBuilder to be defined in index.go
 	bloomFilter  *BloomFilter  // To build the bloom filter (FR4.3) from sstable package
 
-	minKey   []byte // Tracks the minimum key written (FR4.4)
-	maxKey   []byte // Tracks the maximum key written (FR4.4)
-	keyCount uint64 // Tracks the total number of entries written
+	minKey         []byte // Tracks the minimum key written (FR4.4)
+	maxKey         []byte // Tracks the maximum key written (FR4.4)
+	keyCount       uint64 // Tracks the total number of entries written
 	tombstoneCount uint64 // Tracks the number of tombstones written
 
 	// Configuration
@@ -83,7 +83,7 @@ func NewSSTableWriter(opts core.SSTableWriterOptions) (core.SSTableWriterInterfa
 	}
 
 	// Write the header at the beginning of the file.
-	header := core.NewFileHeader(core.SSTableMagic, opts.Compressor.Type())
+	header := core.NewFileHeader(core.SSTableMagicNumber, opts.Compressor.Type())
 	if err := binary.Write(file, binary.LittleEndian, &header); err != nil {
 		file.Close()
 		os.Remove(tempFilePath)
@@ -485,7 +485,7 @@ func (w *SSTableWriter) Finish() error {
 	binary.Write(footerBuf, binary.LittleEndian, w.keyCount)                // Key Count
 	binary.Write(footerBuf, binary.LittleEndian, w.tombstoneCount)          // Tombstone Count
 
-	footerBuf.WriteString(MagicString) // Magic String
+	footerBuf.WriteString(core.SSTableMagicString) // Magic String
 
 	if _, err := w.file.Write(footerBuf.Bytes()); err != nil {
 		return handleErrorAndAbort(err, "failed to write footer")

@@ -19,15 +19,6 @@ import (
 	"github.com/INLOpen/nexusbase/hooks"
 )
 
-// WALSyncMode defines how frequently the WAL is synced to disk.
-type WALSyncMode string
-
-const (
-	SyncAlways   WALSyncMode = "always"   // Sync after every append (highest durability, lowest performance)
-	SyncInterval WALSyncMode = "interval" // Sync periodically (not handled by WAL anymore, but by engine)
-	SyncDisabled WALSyncMode = "disabled" // No sync (for testing/benchmarking, high risk of data loss)
-)
-
 // WAL (Write-Ahead Log) provides durability by logging operations before they are applied to memtable.
 // It manages a directory of segment files.
 type WAL struct {
@@ -53,7 +44,7 @@ var _ WALInterface = (*WAL)(nil)
 // Options holds configuration for the WAL.
 type Options struct {
 	Dir            string
-	SyncMode       WALSyncMode
+	SyncMode       core.WALSyncMode
 	MaxSegmentSize int64
 	BytesWritten   *expvar.Int
 	EntriesWritten *expvar.Int
@@ -72,7 +63,7 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 		opts.Logger = opts.Logger.With("component", "WAL")
 	}
 	if opts.MaxSegmentSize == 0 {
-		opts.MaxSegmentSize = MaxSegmentSize
+		opts.MaxSegmentSize = core.WALMaxSegmentSize
 	}
 
 	if err := os.MkdirAll(opts.Dir, 0755); err != nil {
@@ -127,7 +118,7 @@ func (w *WAL) loadSegments() error {
 		if file.IsDir() {
 			continue
 		}
-		index, err := parseSegmentFileName(file.Name())
+		index, err := core.ParseSegmentFileName(file.Name())
 		if err == nil {
 			w.segmentIndexes = append(w.segmentIndexes, index)
 		}
@@ -211,7 +202,7 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 		return err
 	}
 
-	if w.opts.SyncMode == SyncAlways {
+	if w.opts.SyncMode == core.WALSyncAlways {
 		return w.activeSegment.Sync()
 	}
 	return nil
@@ -275,7 +266,7 @@ func (w *WAL) Purge(upToIndex uint64) error {
 				remainingIndexes = append(remainingIndexes, index)
 				continue
 			}
-			path := filepath.Join(w.dir, formatSegmentFileName(index))
+			path := filepath.Join(w.dir, core.FormatSegmentFileName(index))
 			if err := os.Remove(path); err != nil {
 				// Log error but continue trying to delete others
 				w.logger.Error("Failed to purge WAL segment", "path", path, "error", err)
@@ -384,7 +375,6 @@ func decodeEntryData(r io.Reader) (*core.WALEntry, error) {
 		return nil, fmt.Errorf("failed to read sequence number: %w", err)
 	}
 
-
 	var err error
 	entry.Key, err = readUvarintPrefixed(byteReader)
 	if err != nil {
@@ -405,7 +395,7 @@ func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 		if index <= startRecoveryIndex {
 			continue // Skip segments that are already covered by a checkpoint
 		}
-		path := filepath.Join(w.dir, formatSegmentFileName(index))
+		path := filepath.Join(w.dir, core.FormatSegmentFileName(index))
 		entries, err := recoverFromSegment(path, w.logger)
 		if len(entries) > 0 {
 			allEntries = append(allEntries, entries...)
@@ -469,7 +459,7 @@ func (w *WAL) openForAppend() error {
 
 	// Open the last known segment for writing.
 	lastIndex := w.segmentIndexes[len(w.segmentIndexes)-1]
-	path := filepath.Join(w.dir, formatSegmentFileName(lastIndex))
+	path := filepath.Join(w.dir, core.FormatSegmentFileName(lastIndex))
 
 	// To avoid appending to a potentially corrupt/partially written file after a crash,
 	// we start a new segment. A more advanced implementation could truncate the last

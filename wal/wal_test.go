@@ -20,8 +20,8 @@ func testWALOptions(t *testing.T, dir string) Options {
 	t.Helper()
 	return Options{
 		Dir:            dir,
-		SyncMode:       SyncDisabled, // Use SyncDisabled for performance in tests
-		MaxSegmentSize: 64 * 1024,    // 64KB, small for testing rotation
+		SyncMode:       core.WALSyncDisabled, // Use SyncDisabled for performance in tests
+		MaxSegmentSize: 64 * 1024,            // 64KB, small for testing rotation
 		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
@@ -207,19 +207,19 @@ func TestWAL_Purge(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check that segment files 1 and 2 are gone, but 3 and 4 remain
-	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(1)))
+	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(1)))
 	assert.True(t, os.IsNotExist(err), "Segment 1 should be purged")
-	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(2)))
+	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(2)))
 	assert.True(t, os.IsNotExist(err), "Segment 2 should be purged")
-	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(3)))
+	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(3)))
 	assert.NoError(t, err, "Segment 3 should not be purged")
-	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(4)))
+	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(4)))
 	assert.NoError(t, err, "Segment 4 (active) should not be purged")
 
 	// Try to purge the active segment - it should be skipped
 	err = wal.Purge(activeSegmentIdx)
 	require.NoError(t, err)
-	_, err = os.Stat(filepath.Join(tempDir, formatSegmentFileName(activeSegmentIdx)))
+	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(activeSegmentIdx)))
 	assert.NoError(t, err, "Active segment should not be purged even if requested")
 
 	wal.Close()
@@ -293,7 +293,7 @@ func TestWAL_StartRecoveryIndex(t *testing.T) {
 func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
 	tempDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	segmentPath := filepath.Join(tempDir, formatSegmentFileName(1))
+	segmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(1))
 
 	// 1. Manually construct a batch payload where one of the inner entries is corrupted.
 	// The overall record will have a valid checksum, but parsing the batch will fail.

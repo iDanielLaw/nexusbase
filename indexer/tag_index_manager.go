@@ -112,8 +112,8 @@ type TagIndexManagerOptions struct {
 	MaxL0Files                 int // Number of L0 index files to trigger compaction.
 	MaxLevels                  int
 	BaseTargetSize             int64
-	CompactionTombstoneWeight      float64 // New: Weight for tombstone score
-	CompactionOverlapWeight        float64 // New: Weight for overlap penalty
+	CompactionTombstoneWeight  float64     // New: Weight for tombstone score
+	CompactionOverlapWeight    float64     // New: Weight for overlap penalty
 	Clock                      clock.Clock // Clock interface for time measurement, allows mocking in tests.
 }
 
@@ -140,13 +140,6 @@ type TagIndexManager struct {
 	clock                 clock.Clock // Clock interface for time measurement, allows mocking in tests.
 }
 
-const (
-	// IndexManifestFileName is the name of the manifest file for the tag index.
-	IndexManifestFileName = "MANIFEST"
-	IndexDirName          = "index"
-	IndexSSTDirName       = "index_sst"
-)
-
 // NewTagIndexManager creates a new manager for the tag index.
 func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies, logger *slog.Logger, tracer trace.Tracer) (*TagIndexManager, error) {
 	var clk clock.Clock
@@ -155,7 +148,7 @@ func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies,
 	} else {
 		clk = opts.Clock
 	}
-	indexSstDir := filepath.Join(opts.DataDir, IndexSSTDirName)
+	indexSstDir := filepath.Join(opts.DataDir, core.IndexSSTDirName)
 	if err := os.MkdirAll(indexSstDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create index sst directory %s: %w", indexSstDir, err)
 	}
@@ -211,7 +204,7 @@ func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies,
 		logger:                logger.With("component", "TagIndexManager"),
 		tracer:                tracer,
 		deps:                  deps,
-		manifestPath:          filepath.Join(indexSstDir, IndexManifestFileName),
+		manifestPath:          filepath.Join(indexSstDir, core.IndexManifestFileName),
 		clock:                 clk,
 	}
 
@@ -986,7 +979,7 @@ func (tim *TagIndexManager) CreateSnapshot(snapshotDir string) error {
 	}
 
 	// 4. Write the manifest file for the index snapshot.
-	manifestPath := filepath.Join(snapshotDir, IndexManifestFileName)
+	manifestPath := filepath.Join(snapshotDir, core.IndexManifestFileName)
 	file, err := os.Create(manifestPath)
 	if err != nil {
 		return fmt.Errorf("failed to create index snapshot manifest file: %w", err)
@@ -1009,7 +1002,7 @@ func (tim *TagIndexManager) RestoreFromSnapshot(snapshotDir string) error {
 	tim.logger.Info("Restoring tag index from snapshot.", "snapshot_dir", snapshotDir)
 
 	// 1. Read the manifest from the snapshot directory.
-	manifestPath := filepath.Join(snapshotDir, IndexManifestFileName)
+	manifestPath := filepath.Join(snapshotDir, core.IndexManifestFileName)
 	file, err := os.Open(manifestPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1048,8 +1041,8 @@ func (tim *TagIndexManager) RestoreFromSnapshot(snapshotDir string) error {
 // LoadFromFile loads the index's state (SSTables) from its manifest file in the given data directory.
 // This method is crucial for the engine's fallback recovery mechanism.
 func (tim *TagIndexManager) LoadFromFile(dataDir string) error {
-	indexSstDir := filepath.Join(dataDir, IndexSSTDirName)
-	manifestPath := filepath.Join(indexSstDir, IndexManifestFileName)
+	indexSstDir := filepath.Join(dataDir, core.IndexSSTDirName)
+	manifestPath := filepath.Join(indexSstDir, core.IndexManifestFileName)
 
 	file, err := os.Open(manifestPath)
 	if err != nil {

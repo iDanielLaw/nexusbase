@@ -38,10 +38,6 @@ type SeriesIDStore struct {
 	closeFunc    func() error
 }
 
-const (
-	SeriesMappingLogName = "series_mapping.log"
-)
-
 // NewSeriesIDStore creates a new SeriesIDStore.
 func NewSeriesIDStore(logger *slog.Logger, hookManager hooks.HookManager) *SeriesIDStore {
 	s := &SeriesIDStore{
@@ -61,7 +57,7 @@ func NewSeriesIDStore(logger *slog.Logger, hookManager hooks.HookManager) *Serie
 // It now includes validation of the file header and per-record checksums
 // to ensure integrity and compatibility.
 func (s *SeriesIDStore) LoadFromFile(dataDir string) (err error) {
-	logPath := filepath.Join(dataDir, SeriesMappingLogName)
+	logPath := filepath.Join(dataDir, core.SeriesMappingLogName)
 	var maxId uint64 = 0
 
 	file, openErr := sys.OpenFile(logPath, os.O_RDWR|os.O_CREATE, 0644)
@@ -76,7 +72,7 @@ func (s *SeriesIDStore) LoadFromFile(dataDir string) (err error) {
 		if err == io.EOF {
 			// File is new or empty, write a new header.
 			s.logger.Info("Series mapping file is new or empty, writing header.", "path", logPath)
-			newHeader := core.NewFileHeader(core.SeriesStoreMagic, core.CompressionNone)
+			newHeader := core.NewFileHeader(core.SeriesStoreMagicNumber, core.CompressionNone)
 			if _, err := file.Seek(0, 0); err != nil {
 				return fmt.Errorf("failed to seek to start of new series mapping file: %w", err)
 			}
@@ -88,11 +84,11 @@ func (s *SeriesIDStore) LoadFromFile(dataDir string) (err error) {
 		return fmt.Errorf("failed to read series mapping header: %w", err)
 	}
 
-	if header.Magic != core.SeriesStoreMagic {
-		return fmt.Errorf("invalid series mapping file magic number: got %x, want %x", header.Magic, core.SeriesStoreMagic)
+	if header.Magic != core.SeriesStoreMagicNumber {
+		return fmt.Errorf("invalid series mapping file magic number: got %x, want %x", header.Magic, core.SeriesStoreMagicNumber)
 	}
-	if header.Version > core.CurrentVersion {
-		return fmt.Errorf("unsupported series mapping file version: got %d, want <= %d", header.Version, core.CurrentVersion)
+	if header.Version > core.FormatVersion {
+		return fmt.Errorf("unsupported series mapping file version: got %d, want <= %d", header.Version, core.FormatVersion)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
