@@ -294,9 +294,9 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 }
 
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
-// The primary strategy is to pick the table with the largest total size of overlapping tables in level N+1.
-// This helps reduce write amplification by compacting the "most problematic" file first.
-// If no tables have any overlap, it falls back to a configurable strategy (e.g., oldest or largest) to ensure
+// The primary strategy is to pick the table with the smallest total size of overlapping tables in level N+1.
+// This helps reduce write amplification by minimizing the amount of data that needs to be re-written from the next level.
+// If one or more tables have no overlap (the ideal case), it falls back to a configurable strategy (e.g., oldest or largest) to ensure
 // compaction can still proceed.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
@@ -312,8 +312,10 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 	}
 
 	tables := level.GetTables()
-	var bestTable *sstable.SSTable
-	maxOverlapSize := int64(-1) // Use -1 to ensure a table with 0 overlap is chosen if no overlaps exist.
+	var bestTableByOverlap *sstable.SSTable
+	// Initialize minOverlapSize to a value that's guaranteed to be larger than any possible overlap.
+	minOverlapSize := int64(math.MaxInt64)
+	foundACandidate := false
 
 	for _, table := range tables {
 		minKey, maxKey := table.MinKey(), table.MaxKey()
@@ -324,14 +326,24 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 			currentOverlapSize += overlapTable.Size()
 		}
 
-		if currentOverlapSize > maxOverlapSize {
-			maxOverlapSize = currentOverlapSize
-			bestTable = table
+		if !foundACandidate || currentOverlapSize < minOverlapSize {
+			minOverlapSize = currentOverlapSize
+			bestTableByOverlap = table
+			foundACandidate = true
 		}
 	}
 
-	// If no table had any overlap with the next level, trigger fallback logic.
-	if maxOverlapSize <= 0 {
+	// If the best candidate we could find based on overlap still has some overlap (> 0), we choose it
+	// as it minimizes write amplification for this compaction.
+	if minOverlapSize > 0 {
+		return bestTableByOverlap
+	}
+
+	// If we are here, it means minOverlapSize is 0. This is the ideal case for write amplification.
+	// It implies one or more tables have no overlap with the next level.
+	// We can now use a fallback strategy to choose among ALL tables in the level to address
+	// other concerns like age, size, or fragmentation, without a write amplification penalty.
+	{
 		// Fallback logic is now configurable
 		switch lm.fallbackStrategy {
 		case PickLargest:
@@ -438,7 +450,10 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 		}
 	}
 
-	return bestTable
+	// This part is reached only if the fallback strategy doesn't have a default return,
+	// or if minOverlapSize was 0. Returning the first-found table with minimum overlap
+	// is a reasonable default.
+	return bestTableByOverlap
 }
 
 // ApplyCompactionResults updates the levels structure after a compaction.

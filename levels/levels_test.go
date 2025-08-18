@@ -255,36 +255,36 @@ func TestLevelsManager_NeedsLevelNCompaction(t *testing.T) {
 }
 
 func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
-	t.Run("PicksCandidateWithMostOverlap", func(t *testing.T) {
+	t.Run("PicksCandidateWithLeastOverlap", func(t *testing.T) {
 		// 1. Setup
 		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
 		defer lm.Close()
 
 		// 2. Arrange: Create SSTables
 		// L1 Tables
-		// Table A overlaps with a very large table in L2
-		l1_tableA := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("key_a"), []byte("v")}, {[]byte("key_c"), []byte("v")}}) // Range a-c
-		defer l1_tableA.Close()
+		// Table A overlaps with a large table in L2
+		l1_tableA_large_overlap := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("key_a"), []byte("v")}, {[]byte("key_c"), []byte("v")}}) // Range a-c
+		defer l1_tableA_large_overlap.Close()
 		// Table B overlaps with two small tables in L2
-		l1_tableB := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("key_m"), []byte("v")}, {[]byte("key_p"), []byte("v")}}) // Range m-p
-		defer l1_tableB.Close()
+		l1_tableB_small_overlap := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("key_m"), []byte("v")}, {[]byte("key_p"), []byte("v")}}) // Range m-p
+		defer l1_tableB_small_overlap.Close()
 
 		// L2 Tables
 		// Create Table X to be very large to maximize its overlap size
-		l2_tableX_large := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(2048)}}) // Overlaps with l1_tableA
+		l2_tableX_large := newTestSSTable(t, 10, []struct{ key, value []byte }{{[]byte("key_b"), makeValue(2048)}}) // Overlaps with l1_tableA_large_overlap
 		defer l2_tableX_large.Close()
 
 		// Create Table Y and Z to be small
-		l2_tableY := newTestSSTable(t, 11, []struct{ key, value []byte }{{[]byte("key_n"), makeValue(10)}}) // Overlaps with l1_tableB
+		l2_tableY := newTestSSTable(t, 11, []struct{ key, value []byte }{{[]byte("key_n"), makeValue(10)}}) // Overlaps with l1_tableB_small_overlap
 		defer l2_tableY.Close()
-		l2_tableZ := newTestSSTable(t, 12, []struct{ key, value []byte }{{[]byte("key_o"), makeValue(10)}}) // Overlaps with l1_tableB
+		l2_tableZ := newTestSSTable(t, 12, []struct{ key, value []byte }{{[]byte("key_o"), makeValue(10)}}) // Overlaps with l1_tableB_small_overlap
 		defer l2_tableZ.Close()
 
 		// Set up the levels
 		// Overlap(A) = Size(X_large) = ~2KB+
 		// Overlap(B) = Size(Y) + Size(Z) = ~20 bytes + overhead
-		// We expect Table A to be chosen.
-		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA, l1_tableB})
+		// We expect Table B to be chosen because it has the LEAST overlap.
+		lm.levels[1].SetTables([]*sstable.SSTable{l1_tableA_large_overlap, l1_tableB_small_overlap})
 		lm.levels[2].SetTables([]*sstable.SSTable{l2_tableX_large, l2_tableY, l2_tableZ})
 
 		// 3. Act
@@ -292,7 +292,7 @@ func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {
 
 		// 4. Assert
 		require.NotNil(t, candidate)
-		assert.Equal(t, l1_tableA.ID(), candidate.ID(), "Should pick Table A with the most overlap size")
+		assert.Equal(t, l1_tableB_small_overlap.ID(), candidate.ID(), "Should pick Table B with the least overlap size")
 	})
 
 	t.Run("Fallback_PicksOldestCandidateWhenNoOverlap", func(t *testing.T) {
