@@ -1726,7 +1726,7 @@ func TestCompactionManager_PerformCompactionCycle_L0_Failure(t *testing.T) {
 func TestCompactionManager_IntraL0Compaction(t *testing.T) {
 	// 1. Setup
 	tempDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil)) // Discard logs for cleaner test output
 
 	// Configure engine to trigger Intra-L0 compaction
 	opts := StorageEngineOptions{
