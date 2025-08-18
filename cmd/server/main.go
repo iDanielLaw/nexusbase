@@ -269,6 +269,8 @@ func main() {
 		CompactionFallbackStrategy:     fallbackStrategy,
 		CompactionTombstoneWeight:      cfg.Engine.Compaction.TombstoneWeight,
 		CompactionOverlapWeight:        cfg.Engine.Compaction.OverlapPenaltyWeight,
+		IntraL0CompactionTriggerFiles:    cfg.Engine.Compaction.IntraL0TriggerFileCount,
+		IntraL0CompactionMaxFileSizeBytes: cfg.Engine.Compaction.IntraL0MaxFileSizeBytes,
 		Logger:                         logger,
 	}
 

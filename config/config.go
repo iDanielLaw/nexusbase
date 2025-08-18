@@ -54,6 +54,8 @@ type CompactionConfig struct {
 	FallbackStrategy     string  `yaml:"fallback_strategy"`
 	TombstoneWeight      float64 `yaml:"tombstone_weight"`
 	OverlapPenaltyWeight float64 `yaml:"overlap_penalty_weight"`
+	IntraL0TriggerFileCount int   `yaml:"intra_l0_trigger_file_count"`
+	IntraL0MaxFileSizeBytes int64 `yaml:"intra_l0_max_file_size_bytes"`
 }
 // WALConfig holds Write-Ahead Log specific configurations.
 type WALConfig struct {
@@ -197,6 +199,8 @@ func Load(r io.Reader) (*Config, error) {
 				FallbackStrategy:         "PickOldest",
 				TombstoneWeight:          1.5, // Default weight for tombstone priority
 				OverlapPenaltyWeight:     1.0, // Default weight for overlap penalty
+				IntraL0TriggerFileCount: 8, // Default to triggering with 8 small files
+				IntraL0MaxFileSizeBytes: 2 * 1024 * 1024, // Default to 2MB for "small" files
 			},
 			WAL: WALConfig{
 				SyncMode:            "interval",
