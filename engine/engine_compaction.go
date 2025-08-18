@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,8 @@ type CompactionManager struct {
 	isRangeDeletedChecker       iterator.RangeDeletedChecker
 	extractSeriesKeyFuncForIter iterator.SeriesKeyExtractorFunc
 	sstableCompressor           core.Compressor // Changed to use the interface
+
+	metrics *EngineMetrics
 }
 
 var _ CompactionManagerInterface = (*CompactionManager)(nil)
@@ -97,23 +100,8 @@ func (cm *CompactionManager) runCompactionTask(task *compactionTask) ([]*sstable
 	if err != nil {
 		// Handle unrecoverable corruption errors by quarantining input tables.
 		if errors.Is(err, sstable.ErrCorrupted) {
-			span.SetStatus(codes.Error, "unrecoverable_corruption")
-			span.RecordError(err)
-			cm.logger.Error("Unrecoverable corruption error during compaction. Quarantining all input tables.", "source_level", task.sourceLevel, "input_tables", getTableIDs(task.inputTables))
-			// For L0->L1, inputTables can be from L0 and L1.
-			// This logic correctly removes tables from their respective levels if they exist.
-			ids := levels.GetTableIDs(task.inputTables)
-			if err := cm.levelsManager.RemoveTables(task.sourceLevel, ids); err != nil {
-				cm.logger.Error("Failed to remove corrupted tables from source level manager state.", "error", err)
-			}
-			if task.isL0Compaction {
-				if err := cm.levelsManager.RemoveTables(task.targetLevel, ids); err != nil {
-					cm.logger.Error("Failed to remove overlapping corrupted L1 tables from levels manager state.", "error", err)
-				}
-			}
-			if cleanupErr := cm.removeAndCleanupSSTables(ctx, task.inputTables); cleanupErr != nil {
-				cm.logger.Error("Failed to cleanup all quarantined SSTable files. Some may become orphans.", "input_tables", getTableIDs(task.inputTables), "error", cleanupErr)
-			}
+			cm.logger.Warn("Unrecoverable corruption during compaction. Quarantining source tables.", "source_level", task.sourceLevel, "error", err)
+			cm.quarantineSSTables(ctx, task.inputTables)
 			return nil, nil // Handled by quarantine, do not propagate error to stop the compactor loop.
 		}
 		return nil, err // Return other types of errors.
@@ -129,9 +117,9 @@ func (cm *CompactionManager) runCompactionTask(task *compactionTask) ([]*sstable
 			Path:  oldTable.FilePath(),
 			Size:  oldTable.Size(),
 		}
-		if err := cm.Engine.GetHookManager().Trigger(ctx, hooks.NewPreSSTableDeleteEvent(preSSTableDeletePayload)); err != nil {
-			cm.logger.Error("PreSSTableDelete hook failed, aborting compaction task.", "table_id", oldTable.ID(), "error", err)
-			return nil, fmt.Errorf("PreSSTableDelete hook failed for table %d: %w", oldTable.ID(), err)
+		if hookErr := cm.Engine.GetHookManager().Trigger(ctx, hooks.NewPreSSTableDeleteEvent(preSSTableDeletePayload)); hookErr != nil {
+			cm.logger.Error("PreSSTableDelete hook failed, aborting compaction task.", "table_id", oldTable.ID(), "error", hookErr, "trace_id", span.SpanContext().TraceID().String())
+			return nil, fmt.Errorf("PreSSTableDelete hook failed for table %d: %w", oldTable.ID(), hookErr)
 		}
 	}
 
@@ -176,6 +164,7 @@ type CompactionManagerParams struct {
 	IsRangeDeleted       iterator.RangeDeletedChecker
 	ExtractSeriesKeyFunc iterator.SeriesKeyExtractorFunc
 	BlockCache           cache.Interface // Add BlockCache to parameters
+	Metrics              *EngineMetrics
 
 	// Dependency injection for file removal.
 	FileRemover core.FileRemover
@@ -227,9 +216,9 @@ func (cm *CompactionManager) compactL0ToL1(ctx context.Context) error {
 
 	newTables, err := cm.runCompactionTask(task)
 	if err != nil {
-		cm.logger.Error("L0->L1 compaction failed.", "error", err)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "l0_compaction_failed")
+		// runCompactionTask handles corruption by quarantining and returning nil.
+		// Any error returned here is a non-corruption, retryable error.
+		cm.logger.Error("L0->L1 compaction failed during merge", "error", err)
 		return err
 	}
 
@@ -356,6 +345,7 @@ func NewCompactionManager(
 		extractSeriesKeyFuncForIter: params.ExtractSeriesKeyFunc,
 		sstableCompressor:           params.Opts.SSTableCompressor, // Store it
 		blockCache:                  params.BlockCache,             // Store the block cache
+		metrics:                     params.Metrics,
 	}
 
 	// Set the FileRemover. If not provided, use the default real implementation.
@@ -470,6 +460,10 @@ func (cm *CompactionManager) performCompactionCycle() {
 			cm.logger.Info("L0 compaction needed, starting L0->L1 compaction task.", "max_l0_files", cm.opts.MaxL0Files)
 
 			go func(parentCtx context.Context) {
+				if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
+					cm.metrics.CompactionsInProgress.Add(1)
+					defer cm.metrics.CompactionsInProgress.Add(-1)
+				}
 				defer cm.l0CompactionActive.Store(false)
 				defer cm.compactionWg.Done()
 
@@ -519,6 +513,10 @@ func (cm *CompactionManager) performCompactionCycle() {
 				cm.logger.Info("LN compaction needed, starting task.", "source_level", levelN)
 
 				go func(lvl int, parentCtx context.Context) {
+					if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
+						cm.metrics.CompactionsInProgress.Add(1)
+						defer cm.metrics.CompactionsInProgress.Add(-1)
+					}
 					defer func() {
 						<-cm.lnCompactionSemaphore // Release the semaphore slot when done.
 						cm.compactionWg.Done()
@@ -584,6 +582,11 @@ func (cm *CompactionManager) removeAndCleanupSSTables(ctx context.Context, table
 			cm.logger.Error("Error deleting old SSTable file.", "path", oldTable.FilePath(), "error", err)
 			// Log the error but continue trying to clean up other files.
 			allErrors = append(allErrors, fmt.Errorf("failed to delete old SSTable file %s: %w", oldTable.FilePath(), err))
+		} else {
+			// Successfully removed the file, so increment the metric.
+			if cm.metrics != nil && cm.metrics.SSTablesDeletedTotal != nil {
+				cm.metrics.SSTablesDeletedTotal.Add(1)
+			}
 		}
 	}
 	err := errors.Join(allErrors...)
@@ -592,6 +595,53 @@ func (cm *CompactionManager) removeAndCleanupSSTables(ctx context.Context, table
 		span.SetStatus(codes.Error, "one_or_more_files_failed_to_cleanup")
 	}
 	return err
+}
+
+// quarantineSSTables moves corrupted or problematic SSTables to a quarantine directory
+// and removes them from the level manager's state. This is a recovery mechanism
+// to prevent a single bad file from halting all future compactions.
+func (cm *CompactionManager) quarantineSSTables(ctx context.Context, tables []*sstable.SSTable) {
+	_, span := cm.tracer.Start(ctx, "CompactionManager.quarantineSSTables")
+	defer span.End()
+
+	if len(tables) == 0 {
+		return
+	}
+
+	// Increment the error metric once for the quarantine event.
+	if cm.Engine != nil {
+		if concreteEngine, ok := cm.Engine.(*storageEngine); ok && concreteEngine.metrics.CompactionErrorsTotal != nil {
+			concreteEngine.metrics.CompactionErrorsTotal.Add(1)
+		}
+	}
+
+	dlqDir := filepath.Join(filepath.Dir(cm.dataDir), "dlq")
+	if err := os.MkdirAll(dlqDir, 0755); err != nil {
+		cm.logger.Error("Failed to create quarantine directory. Corrupted files will remain in sst dir.", "path", dlqDir, "error", err)
+		return
+	}
+
+	tableIDs := levels.GetTableIDs(tables)
+	cm.logger.Warn("Quarantining SSTables.", "count", len(tables), "ids", tableIDs)
+
+	// Remove from level manager state first.
+	// For L0 compaction, tables can be in L0 or L1. We attempt removal from both.
+	if err := cm.levelsManager.RemoveTables(0, tableIDs); err != nil {
+		cm.logger.Error("Failed to remove quarantined tables from L0 state.", "error", err)
+	}
+	if err := cm.levelsManager.RemoveTables(1, tableIDs); err != nil {
+		cm.logger.Error("Failed to remove quarantined tables from L1 state.", "error", err)
+	}
+
+	// Now move the physical files.
+	for _, table := range tables {
+		table.Close() // Close the file handle before moving.
+		destPath := filepath.Join(dlqDir, filepath.Base(table.FilePath()))
+		cm.logger.Info("Moving corrupted SSTable to quarantine.", "from", table.FilePath(), "to", destPath)
+		if err := os.Rename(table.FilePath(), destPath); err != nil {
+			cm.logger.Error("Failed to move SSTable to quarantine directory.", "path", table.FilePath(), "error", err)
+		}
+	}
 }
 
 // startNewSSTableWriter creates a new SSTable writer and updates the provided fileID.
@@ -644,6 +694,10 @@ func (cm *CompactionManager) writeCompactedEntry(
 		if loadErr != nil {
 			return fmt.Errorf("failed to load newly created sstable %s: %w", finalPath, loadErr)
 		}
+		if cm.metrics != nil && cm.metrics.SSTablesCreatedTotal != nil {
+			cm.metrics.SSTablesCreatedTotal.Add(1)
+		}
+
 		*newSSTables = append(*newSSTables, loadedTable)
 
 		// Start a new writer for subsequent entries.
@@ -781,8 +835,14 @@ func (cm *CompactionManager) finalizeCompactionWriter(
 		Tracer:     cm.tracer,
 		Logger:     cm.logger,
 	})
+
 	if loadErr != nil {
 		return nil, fmt.Errorf("failed to load final newly created sstable %s: %w", finalPath, loadErr)
+	}
+
+	// Increment the metric for SSTable creation
+	if cm.metrics != nil && cm.metrics.SSTablesCreatedTotal != nil {
+		cm.metrics.SSTablesCreatedTotal.Add(1)
 	}
 
 	// --- Post-SSTable-Create Hook ---

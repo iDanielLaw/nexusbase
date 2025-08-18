@@ -78,11 +78,13 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 
 			cfg := &config.Config{
 				Server: config.ServerConfig{
-					GRPCPort:   grpcPort,
-					TCPPort:    tcpPort,
-					TLSEnabled: tc.tlsEnabled,
-					CertFile:   certFile,
-					KeyFile:    keyFile,
+					GRPCPort: grpcPort,
+					TCPPort:  tcpPort,
+					TLS: config.TLSConfig{
+						Enabled:  tc.tlsEnabled,
+						CertFile: certFile,
+						KeyFile:  keyFile,
+					},
 				},
 			}
 
@@ -178,9 +180,11 @@ func setupTestGRPCServer(t *testing.T) (tsdb.TSDBServiceClient, *MockStorageEngi
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			GRPCPort:   grpcPort,
-			TCPPort:    0, // Disable TCP for this test
-			TLSEnabled: false,
+			GRPCPort: grpcPort,
+			TCPPort:  0, // Disable TCP for this test
+			TLS: config.TLSConfig{
+				Enabled: false,
+			},
 		},
 	}
 
@@ -486,10 +490,12 @@ func TestAppServer_HealthCheck_Failure(t *testing.T) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			GRPCPort:                   grpcPort,
-			TCPPort:                    tcpPort,
-			TLSEnabled:                 false,
-			HealthCheckIntervalSeconds: 1,
+			GRPCPort:            grpcPort,
+			TCPPort:             tcpPort,
+			HealthCheckInterval: "1s",
+			TLS: config.TLSConfig{
+				Enabled: false,
+			},
 		},
 	}
 
@@ -543,11 +549,13 @@ func TestAppServer_TLS_BadCert(t *testing.T) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			GRPCPort:   grpcPort,
-			TCPPort:    tcpPort,
-			TLSEnabled: true,
-			CertFile:   certFile,
-			KeyFile:    keyFile,
+			GRPCPort: grpcPort,
+			TCPPort:  tcpPort,
+			TLS: config.TLSConfig{
+				Enabled:  true,
+				CertFile: certFile,
+				KeyFile:  keyFile,
+			},
 		},
 	}
 

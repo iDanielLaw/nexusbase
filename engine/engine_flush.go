@@ -329,6 +329,11 @@ func (e *storageEngine) _flushMemtableToL0SSTable(memToFlush *memtable.Memtable,
 		return nil, fmt.Errorf("failed to load newly created SSTable %s: %w", writer.FilePath(), err)
 	}
 
+	// Increment the metric for SSTable creation
+	if e.metrics != nil && e.metrics.SSTablesCreatedTotal != nil {
+		e.metrics.SSTablesCreatedTotal.Add(1)
+	}
+
 	e.logger.Debug("SSTable flushed and loaded (helper)",
 		"id", newSST.ID(),
 		"path", newSST.FilePath())

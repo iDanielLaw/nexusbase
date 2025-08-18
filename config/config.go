@@ -1,38 +1,89 @@
 package config
 
 import (
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// EngineConfig mirrors engine.StorageEngineOptions for YAML unmarshaling.
+// TLSConfig holds TLS-specific configurations.
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
+// ServerConfig holds server-specific configurations.
+type ServerConfig struct {
+	GRPCPort            int       `yaml:"grpc_port"`
+	TCPPort             int       `yaml:"tcp_port"`
+	HealthCheckInterval string    `yaml:"health_check_interval"`
+	TLS                 TLSConfig `yaml:"tls"`
+}
+
+// MemtableConfig holds memtable-specific configurations.
+type MemtableConfig struct {
+	SizeThresholdBytes int64  `yaml:"size_threshold_bytes"`
+	FlushInterval      string `yaml:"flush_interval"`
+}
+
+// SSTableConfig holds sstable-specific configurations.
+type SSTableConfig struct {
+	BlockSizeBytes    int64   `yaml:"block_size_bytes"`
+	Compression       string  `yaml:"compression"`
+	BloomFilterFPRate float64 `yaml:"bloom_filter_fp_rate"`
+}
+
+// CacheConfig holds cache-specific configurations.
+type CacheConfig struct {
+	BlockCacheCapacity int `yaml:"block_cache_capacity"`
+}
+
+// CompactionConfig holds compaction-specific configurations.
+type CompactionConfig struct {
+	L0TriggerFileCount     int    `yaml:"l0_trigger_file_count"`
+	L0TriggerSizeBytes     int64  `yaml:"l0_trigger_size_bytes"`
+	TargetSSTableSizeBytes int64  `yaml:"target_sstable_size_bytes"`
+	LevelsSizeMultiplier   int    `yaml:"levels_size_multiplier"`
+	MaxLevels              int    `yaml:"max_levels"`
+	CheckInterval          string `yaml:"check_interval"`
+	FallbackStrategy       string `yaml:"fallback_strategy"`
+}
+
+// WALConfig holds Write-Ahead Log specific configurations.
+type WALConfig struct {
+	SyncMode            string `yaml:"sync_mode"`
+	BatchSize           int    `yaml:"batch_size"`
+	FlushInterval       string `yaml:"flush_interval"`
+	MaxSegmentSizeBytes int64  `yaml:"max_segment_size_bytes"`
+	PurgeKeepSegments   int    `yaml:"purge_keep_segments"`
+}
+
+// IndexConfig holds tag index specific configurations.
+type IndexConfig struct {
+	MemtableThreshold       int64  `yaml:"memtable_threshold"`
+	FlushInterval           string `yaml:"flush_interval"`
+	CompactionCheckInterval string `yaml:"compaction_check_interval"`
+	L0TriggerFileCount      int    `yaml:"l0_trigger_file_count"`
+	BaseTargetSizeBytes     int64  `yaml:"base_target_size_bytes"`
+}
+
+// EngineConfig holds all engine-related configurations, grouped logically.
 type EngineConfig struct {
-	DataDir                        string  `yaml:"data_dir"`
-	MemtableThresholdMB            int64   `yaml:"memtable_threshold_mb"` // Deprecated: use memtable_threshold_bytes
-	MemtableFlushIntervalMs        int     `yaml:"memtable_flush_interval_ms"`
-	BlockCacheCapacity             int     `yaml:"block_cache_capacity"`
-	L0CompactionTriggerSizeMB      int64   `yaml:"l0_compaction_trigger_size_mb"` // New: Size-based trigger for L0 compaction
-	MaxL0Files                     int     `yaml:"max_l0_files"`
-	TargetSSTableSizeMB            int64   `yaml:"target_sstable_size_mb"`
-	LevelsTargetSizeMultiplier     int     `yaml:"levels_target_size_multiplier"`
-	MaxLevels                      int     `yaml:"max_levels"`
-	BloomFilterFalsePositiveRate   float64 `yaml:"bloom_filter_false_positive_rate"`
-	SSTableDefaultBlockSizeKB      int     `yaml:"sstable_default_block_size_kb"`
-	CompactionIntervalSeconds      int     `yaml:"compaction_interval_seconds"`
-	CheckpointIntervalSeconds      int     `yaml:"checkpoint_interval_seconds"` // New
-	MetadataSyncIntervalSeconds    int     `yaml:"metadata_sync_interval_seconds"`
-	IndexMemtableThreshold         int64   `yaml:"index_memtable_threshold"`
-	IndexFlushIntervalMs           int     `yaml:"index_flush_interval_ms"`
-	IndexCompactionIntervalSeconds int     `yaml:"index_compaction_interval_seconds"`
-	IndexMaxL0Files                int     `yaml:"index_max_l0_files"`
-	WALSyncMode                    string  `yaml:"wal_sync_mode"`
-	WALBatchSize                   int     `yaml:"wal_batch_size"`
-	WALFlushIntervalMs             int     `yaml:"wal_flush_interval_ms"`
-	WALMaxSegmentSize              int64   `yaml:"wal_max_segment_size"`
-	WALPurgeKeepSegments           int     `yaml:"wal_purge_keep_segments"` // New
-	SSTableCompression             string  `yaml:"sstable_compression"`     // "none" or "snappy"
-	RetentionPeriod                string  `yaml:"retention_period"`        // e.g., "30d", "1y". If empty, no retention.
+	DataDir              string           `yaml:"data_dir"`
+	RetentionPeriod      string           `yaml:"retention_period"`
+	MetadataSyncInterval string           `yaml:"metadata_sync_interval"`
+	CheckpointInterval   string           `yaml:"checkpoint_interval"` // Added for completeness
+	Memtable             MemtableConfig   `yaml:"memtable"`
+	SSTable              SSTableConfig    `yaml:"sstable"`
+	Cache                CacheConfig      `yaml:"cache"`
+	Compaction           CompactionConfig `yaml:"compaction"`
+	WAL                  WALConfig        `yaml:"wal"`
+	Index                IndexConfig      `yaml:"index"`
 }
 
 // LoggingConfig holds logging-specific configurations.
@@ -48,15 +99,13 @@ type SecurityConfig struct {
 	UserFilePath string `yaml:"user_file_path"`
 }
 
-// ServerConfig holds server-specific configurations.
-type ServerConfig struct {
-	GRPCPort int `yaml:"grpc_port"`
-	// Port for the plain TCP server (NBQL).
-	TCPPort                    int    `yaml:"tcp_port"`
-	TLSEnabled                 bool   `yaml:"tls_enabled"`
-	HealthCheckIntervalSeconds int    `yaml:"health_check_interval_seconds"`
-	CertFile                   string `yaml:"cert_file"`
-	KeyFile                    string `yaml:"key_file"`
+// DebugConfig holds debugging-related configurations.
+type DebugConfig struct {
+	Enabled          bool   `yaml:"enabled"`
+	ListenAddress    string `yaml:"listen_address"`
+	PProfEnabled     bool   `yaml:"pprof_enabled"`
+	MetricsEnabled   bool   `yaml:"metrics_enabled"`
+	MonitorUIEnabled bool   `yaml:"monitor_ui_enabled"`
 }
 
 type QueryServerConfig struct {
@@ -64,20 +113,10 @@ type QueryServerConfig struct {
 	ListenAddress string `yaml:"listen_address"`
 }
 
-type DebugMode struct {
-	Enabled          bool   `yaml:"enabled"`
-	ListenAddress    string `yaml:"listen_address"`
-	EnabledPProf     bool   `yaml:"enabled_pprof"`
-	EnabledMetrics   bool   `yaml:"enabled_metrics"`
-	EnabledTracing   bool   `yaml:"enabled_tracing"`
-	EnabledProfiling bool   `yaml:"enabled_profiling"`
-	EnabledMonitorUI bool   `yaml:"enabled_monitor_ui"`
-}
-
 type SelfMonitoringConfig struct {
-	Enabled         bool   `yaml:"enabled"`
-	IntervalSeconds int    `yaml:"interval_seconds"`
-	MetricPrefix    string `yaml:"metric_prefix"`
+	Enabled      bool   `yaml:"enabled"`
+	Interval     string `yaml:"interval"`
+	MetricPrefix string `yaml:"metric_prefix"`
 }
 
 // TracingConfig holds configuration for distributed tracing.
@@ -90,7 +129,7 @@ type TracingConfig struct {
 // Config is the top-level configuration struct.
 type Config struct {
 	Server         ServerConfig         `yaml:"server"`
-	DebugMode      DebugMode            `yaml:"debug_mode"`
+	Debug          DebugConfig          `yaml:"debug"`
 	Engine         EngineConfig         `yaml:"engine"`
 	Logging        LoggingConfig        `yaml:"logging"`
 	Security       SecurityConfig       `yaml:"security"`
@@ -99,88 +138,145 @@ type Config struct {
 	QueryServer    QueryServerConfig    `yaml:"query_server"`
 }
 
-// LoadConfig reads configuration from a YAML file.
-func LoadConfig(path string) (*Config, error) {
+// ParseDuration parses a duration string. Returns the default duration if the string is empty or invalid.
+// Logs a warning if the string is invalid but not empty.
+func ParseDuration(durationStr string, defaultDuration time.Duration, logger *slog.Logger) time.Duration {
+	if durationStr == "" || durationStr == "0" {
+		return defaultDuration
+	}
+	d, err := time.ParseDuration(durationStr)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("Invalid duration format, using default", "input", durationStr, "default", defaultDuration.String(), "error", err)
+		}
+		return defaultDuration
+	}
+	return d
+}
+
+// Load reads configuration from an io.Reader.
+// This is the core logic, separated for testability.
+func Load(r io.Reader) (*Config, error) {
 	// Set default values
 	cfg := &Config{
 		Server: ServerConfig{
-			GRPCPort:                   50051,
-			TCPPort:                    50052, // Default NBQL port
-			TLSEnabled:                 false, // Default to disabled for ease of local testing
-			HealthCheckIntervalSeconds: 5,     // Default to 5 seconds
-			CertFile:                   "certs/server.crt",
-			KeyFile:                    "certs/server.key",
-		},
-		DebugMode: DebugMode{
-			Enabled:          false,
-			ListenAddress:    ":8080",
-			EnabledPProf:     false,
-			EnabledMetrics:   false,
-			EnabledTracing:   false,
-			EnabledProfiling: false,
-			EnabledMonitorUI: false, // Default to disabled
+			GRPCPort:            50051,
+			TCPPort:             50052,
+			HealthCheckInterval: "5s",
+			TLS: TLSConfig{
+				Enabled:  false,
+				CertFile: "certs/server.crt",
+				KeyFile:  "certs/server.key",
+			},
 		},
 		Engine: EngineConfig{
-			DataDir:                        "./data",
-			MemtableThresholdMB:            4,
-			MemtableFlushIntervalMs:        0,
-			BlockCacheCapacity:             100,
-			L0CompactionTriggerSizeMB:      16, // Default to 16MB
-			MaxL0Files:                     4,
-			TargetSSTableSizeMB:            4,
-			LevelsTargetSizeMultiplier:     5,
-			MaxLevels:                      7,
-			BloomFilterFalsePositiveRate:   0.01,
-			SSTableDefaultBlockSizeKB:      4,
-			CompactionIntervalSeconds:      10,
-			CheckpointIntervalSeconds:      300, // Default to 5 minutes
-			MetadataSyncIntervalSeconds:    60,
-			IndexMemtableThreshold:         10000, // Default to 10,000 unique tag pairs
-			IndexFlushIntervalMs:           60000, // Default to 60 seconds
-			IndexCompactionIntervalSeconds: 20,    // Default to 20 seconds
-			IndexMaxL0Files:                4,     // Default to 4 L0 index files
-			WALSyncMode:                    "always",
-			WALBatchSize:                   1,
-			WALFlushIntervalMs:             0,
-			WALMaxSegmentSize:              0,
-			WALPurgeKeepSegments:           2, // Default to keeping 2 segments as a safety buffer
-			SSTableCompression:             "none",
-			RetentionPeriod:                "", // Default to no retention
+			DataDir:              "./data",
+			RetentionPeriod:      "",
+			MetadataSyncInterval: "60s",
+			CheckpointInterval:   "300s", // Default to 5 minutes
+			Memtable: MemtableConfig{
+				SizeThresholdBytes: 4 * 1024 * 1024, // 4 MiB
+				FlushInterval:      "1s",
+			},
+			SSTable: SSTableConfig{
+				BlockSizeBytes:    8 * 1024, // 8 KiB
+				Compression:       "snappy",
+				BloomFilterFPRate: 0.01,
+			},
+			Cache: CacheConfig{
+				BlockCacheCapacity: 1024,
+			},
+			Compaction: CompactionConfig{
+				L0TriggerFileCount:     4,
+				L0TriggerSizeBytes:     16 * 1024 * 1024, // 16 MiB
+				TargetSSTableSizeBytes: 16 * 1024 * 1024, // 16 MiB
+				LevelsSizeMultiplier:   5,
+				MaxLevels:              7,
+				CheckInterval:          "120s",
+				FallbackStrategy:       "PickOldest",
+			},
+			WAL: WALConfig{
+				SyncMode:            "interval",
+				BatchSize:           1,
+				FlushInterval:       "1000ms",
+				MaxSegmentSizeBytes: 32 * 1024 * 1024, // 32 MiB
+				PurgeKeepSegments:   4,
+			},
+			Index: IndexConfig{
+				MemtableThreshold:       10000,
+				FlushInterval:           "60s",
+				CompactionCheckInterval: "20s",
+				L0TriggerFileCount:      4,
+				BaseTargetSizeBytes:     2 * 1024 * 1024, // 2 MiB
+			},
 		},
 		Logging: LoggingConfig{
-			Level:  "info",
+			Level:  "debug",
 			Output: "stdout",
 			File:   "nexusbase.log",
 		},
 		Security: SecurityConfig{
-			Enabled:      false, // Default to disabled for ease of use
+			Enabled:      false,
 			UserFilePath: "users.db",
 		},
 		SelfMonitoring: SelfMonitoringConfig{
-			Enabled:         true,
-			IntervalSeconds: 15,
-			MetricPrefix:    "__",
+			Enabled:      true,
+			Interval:     "15s",
+			MetricPrefix: "__",
 		},
 		QueryServer: QueryServerConfig{
-			Enabled:       false,
+			Enabled:       true,
 			ListenAddress: ":8088",
 		},
 		Tracing: TracingConfig{
-			Enabled:  false, // Disabled by default
+			Enabled:  false,
 			Endpoint: "localhost:4317",
 			Protocol: "grpc",
 		},
+		Debug: DebugConfig{
+			Enabled:          true,
+			ListenAddress:    "0.0.0.0:6060",
+			PProfEnabled:     true,
+			MetricsEnabled:   true,
+			MonitorUIEnabled: true,
+		},
 	}
 
-	data, err := os.ReadFile(path)
+	// If the reader is nil, it's like an empty file, return defaults.
+	if r == nil {
+		return cfg, nil
+	}
+
+	// Read all data from the reader
+	data, err := io.ReadAll(r)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		// If file doesn't exist, return default config
+		return nil, fmt.Errorf("failed to read config data: %w", err)
+	}
+
+	// If data is empty, return defaults.
+	if len(data) == 0 {
 		return cfg, nil
 	}
 
 	// Unmarshal YAML into the config struct, overwriting defaults
-	return cfg, yaml.Unmarshal(data, cfg)
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config yaml: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// LoadConfig reads configuration from a YAML file by path.
+func LoadConfig(path string) (*Config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// If file doesn't exist, return default config by calling Load with a nil reader.
+			return Load(nil)
+		}
+		return nil, fmt.Errorf("failed to open config file %s: %w", path, err)
+	}
+	defer file.Close()
+
+	return Load(file)
 }

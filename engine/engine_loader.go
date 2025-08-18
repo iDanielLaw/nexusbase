@@ -273,6 +273,7 @@ func (sl *StateLoader) scanDataDirAndLoadToL0() error {
 	}
 
 	var loadedSSTables []*sstable.SSTable
+	var maxID uint64 = 0
 	for _, entry := range dirEntries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sst") {
 			continue
@@ -283,6 +284,9 @@ func (sl *StateLoader) scanDataDirAndLoadToL0() error {
 		if parseErr != nil {
 			sl.logger.Warn("Error parsing SSTable ID from filename, skipping file.", "filename", entry.Name(), "error", parseErr)
 			continue
+		}
+		if tableID > maxID {
+			maxID = tableID
 		}
 
 		sl.logger.Debug("Attempting to load SSTable.", "path", filePath, "id", tableID)
@@ -316,6 +320,10 @@ func (sl *StateLoader) scanDataDirAndLoadToL0() error {
 			sl.logger.Debug("Added SSTable to L0.", "id", tbl.ID())
 		}
 	}
+	// After loading all existing tables, set the next ID to be one greater than the max found.
+	// This prevents ID collisions after a fallback recovery.
+	sl.engine.nextSSTableID.Store(maxID)
+	sl.logger.Info("Next SSTable ID set from fallback scan.", "next_id", maxID+1)
 	// When falling back to L0, reset sequence number to 0 or a safe default.
 	sl.engine.sequenceNumber.Store(0)
 	sl.logger.Info("Database state initialized by scanning sst directory. Sequence number reset to 0.")

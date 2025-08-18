@@ -118,33 +118,46 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 	}
 
 	engineCfg := config.EngineConfig{
-		DataDir:                      t.TempDir(),
-		MemtableThresholdMB:          1,
-		BlockCacheCapacity:           1000,
-		MaxL0Files:                   4,
-		TargetSSTableSizeMB:          2,
-		LevelsTargetSizeMultiplier:   5,
-		MaxLevels:                    7,
-		BloomFilterFalsePositiveRate: 0.01,
-		SSTableDefaultBlockSizeKB:    4,
-		CompactionIntervalSeconds:    5,
-		MetadataSyncIntervalSeconds:  10,
-		SSTableCompression:           "snappy",
-		WALSyncMode:                  "interval",
-		WALFlushIntervalMs:           1000,
+		DataDir: t.TempDir(),
+		Memtable: config.MemtableConfig{
+			SizeThresholdBytes: 1 * 1024 * 1024,
+			FlushInterval:      "1s",
+		},
+		Cache: config.CacheConfig{
+			BlockCacheCapacity: 1000,
+		},
+		Compaction: config.CompactionConfig{
+			L0TriggerFileCount:     4,
+			TargetSSTableSizeBytes: 2 * 1024 * 1024,
+			LevelsSizeMultiplier:   5,
+			MaxLevels:              7,
+			CheckInterval:          "5s",
+		},
+		SSTable: config.SSTableConfig{
+			BloomFilterFPRate: 0.01,
+			BlockSizeBytes:    4 * 1024,
+			Compression:       "snappy",
+		},
+		WAL: config.WALConfig{
+			SyncMode:      "interval",
+			FlushInterval: "1000ms",
+		},
+		MetadataSyncInterval: "10s",
 	}
 
 	serverCfg := config.ServerConfig{
-		GRPCPort:   grpcPort,
-		TCPPort:    0,
-		TLSEnabled: false,
+		GRPCPort: grpcPort,
+		TCPPort:  0,
+		TLS: config.TLSConfig{
+			Enabled: false,
+		},
 	}
 
 	if e2eOpts.WithSecure {
-		serverCfg.TLSEnabled = true
+		serverCfg.TLS.Enabled = true
 		certFile, keyFile = generateTestCerts(t)
-		serverCfg.CertFile = certFile
-		serverCfg.KeyFile = keyFile
+		serverCfg.TLS.CertFile = certFile
+		serverCfg.TLS.KeyFile = keyFile
 	}
 
 	appCfg := &config.Config{
@@ -168,7 +181,7 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 
 	// Select compressor based on config
 	var sstCompressor core.Compressor
-	switch appCfg.Engine.SSTableCompression {
+	switch appCfg.Engine.SSTable.Compression {
 	case "lz4":
 		sstCompressor = &compressors.LZ4Compressor{}
 		logger.Info("Using LZ4 compression for SSTables.")
@@ -182,28 +195,35 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 		sstCompressor = &compressors.NoCompressionCompressor{}
 		logger.Info("Using no compression for SSTables.")
 	default:
-		logger.Error("Invalid sstable_compression value in config.", "value", appCfg.Engine.SSTableCompression)
+		logger.Error("Invalid sstable_compression value in config.", "value", appCfg.Engine.SSTable.Compression)
 		os.Exit(1)
 	}
+
+	// Parse durations from config strings for engine options
+	memtableFlushInterval := config.ParseDuration(appCfg.Engine.Memtable.FlushInterval, 0, logger)
+	compactionInterval := config.ParseDuration(appCfg.Engine.Compaction.CheckInterval, 120*time.Second, logger)
+	walFlushInterval := config.ParseDuration(appCfg.Engine.WAL.FlushInterval, 1000*time.Millisecond, logger)
+	metadataSyncInterval := config.ParseDuration(appCfg.Engine.MetadataSyncInterval, 60*time.Second, logger)
 
 	// Configure StorageEngine options
 	opts := engine.StorageEngineOptions{
 		DataDir:                      appCfg.Engine.DataDir,
-		MemtableThreshold:            appCfg.Engine.MemtableThresholdMB * 1024 * 1024,
-		MemtableFlushIntervalMs:      appCfg.Engine.MemtableFlushIntervalMs,
-		BlockCacheCapacity:           appCfg.Engine.BlockCacheCapacity,
-		MaxL0Files:                   appCfg.Engine.MaxL0Files,
-		TargetSSTableSize:            appCfg.Engine.TargetSSTableSizeMB * 1024 * 1024,
-		LevelsTargetSizeMultiplier:   appCfg.Engine.LevelsTargetSizeMultiplier,
-		MaxLevels:                    appCfg.Engine.MaxLevels,
-		BloomFilterFalsePositiveRate: appCfg.Engine.BloomFilterFalsePositiveRate,
-		SSTableDefaultBlockSize:      appCfg.Engine.SSTableDefaultBlockSizeKB * 1024,
-		CompactionIntervalSeconds:    appCfg.Engine.CompactionIntervalSeconds,
-		Metrics:                      engine.NewEngineMetrics(true, "engine_"),
+		MemtableThreshold:            appCfg.Engine.Memtable.SizeThresholdBytes,
+		MemtableFlushIntervalMs:      int(memtableFlushInterval.Milliseconds()),
+		BlockCacheCapacity:           appCfg.Engine.Cache.BlockCacheCapacity,
+		MaxL0Files:                   appCfg.Engine.Compaction.L0TriggerFileCount,
+		TargetSSTableSize:            appCfg.Engine.Compaction.TargetSSTableSizeBytes,
+		LevelsTargetSizeMultiplier:   appCfg.Engine.Compaction.LevelsSizeMultiplier,
+		MaxLevels:                    appCfg.Engine.Compaction.MaxLevels,
+		BloomFilterFalsePositiveRate: appCfg.Engine.SSTable.BloomFilterFPRate,
+		SSTableDefaultBlockSize:      int(appCfg.Engine.SSTable.BlockSizeBytes),
+		CompactionIntervalSeconds:    int(compactionInterval.Seconds()),
+		MetadataSyncIntervalSeconds:  int(metadataSyncInterval.Seconds()),
+		Metrics:                      engine.NewEngineMetrics(true, "engine_"), // This might need adjustment if metrics are handled differently
 		SSTableCompressor:            sstCompressor,
-		WALSyncMode:                  wal.WALSyncMode(appCfg.Engine.WALSyncMode),
-		WALBatchSize:                 appCfg.Engine.WALBatchSize,
-		WALFlushIntervalMs:           appCfg.Engine.WALFlushIntervalMs,
+		WALSyncMode:                  wal.WALSyncMode(appCfg.Engine.WAL.SyncMode),
+		WALBatchSize:                 appCfg.Engine.WAL.BatchSize,
+		WALFlushIntervalMs:           int(walFlushInterval.Milliseconds()),
 		RetentionPeriod:              appCfg.Engine.RetentionPeriod,
 		Logger:                       logger,
 	}

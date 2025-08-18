@@ -19,6 +19,8 @@ type EngineMetrics struct {
 	FlushTotal            *expvar.Int
 	CompactionTotal       *expvar.Int
 	CompactionErrorsTotal *expvar.Int // New
+	SSTablesCreatedTotal  *expvar.Int // New: Total number of SSTables created
+	SSTablesDeletedTotal  *expvar.Int // New: Total number of SSTables deleted
 
 	FlushDataPointsFlushedTotal *expvar.Int // New: Total data points flushed
 	FlushBytesFlushedTotal      *expvar.Int // New: Total bytes flushed
@@ -114,6 +116,8 @@ func NewEngineMetrics(publishGlobally bool, prefix string) *EngineMetrics {
 		FlushTotal:            newIntFunc(prefix + "flush_total"),
 		CompactionTotal:       newIntFunc(prefix + "compaction_total"),
 		CompactionErrorsTotal: newIntFunc(prefix + "compaction_errors_total"),
+		SSTablesCreatedTotal:  newIntFunc(prefix + "sstables_created_total"),
+		SSTablesDeletedTotal:  newIntFunc(prefix + "sstables_deleted_total"),
 
 		FlushDataPointsFlushedTotal:    newIntFunc(prefix + "flush_data_points_flushed_total"),
 		FlushBytesFlushedTotal:         newIntFunc(prefix + "flush_bytes_flushed_total"),
