@@ -1496,3 +1496,49 @@ func TestSSTable_Contains(t *testing.T) {
 		assert.True(t, tableWithoutFilter.Contains(keyNotExists), "Should always return true when no filter is present")
 	})
 }
+
+func TestSSTable_TombstoneCount(t *testing.T) {
+	logger := slog.Default()
+
+	t.Run("WithTombstones", func(t *testing.T) {
+		tempDir := t.TempDir() // Create a unique temp dir for this subtest
+		fileID := uint64(505)
+
+		entriesWithTombstones := []testEntry{
+			{Key: []byte("key1"), Value: []byte("v1"), EntryType: core.EntryTypePutEvent, PointID: 1},
+			{Key: []byte("key2"), Value: nil, EntryType: core.EntryTypeDelete, PointID: 2},         // Tombstone 1
+			{Key: []byte("key3"), Value: []byte("v3"), EntryType: core.EntryTypePutEvent, PointID: 3},
+			{Key: []byte("key4"), Value: nil, EntryType: core.EntryTypeDeleteSeries, PointID: 4}, // Tombstone 2
+			{Key: []byte("key5"), Value: nil, EntryType: core.EntryTypeDeleteRange, PointID: 5},  // Tombstone 3
+		}
+		expectedTombstoneCount := uint64(3)
+
+		// Use the existing helper to write the SSTable
+		sst, sstPath := writeTestSSTableGeneral(t, tempDir, entriesWithTombstones, fileID, logger)
+		defer sst.Close()
+
+		// Assert the count on the loaded SSTable
+		assert.Equal(t, expectedTombstoneCount, sst.TombstoneCount(), "TombstoneCount should match the number of delete entries")
+
+		// Also verify by loading it again
+		loadOpts := LoadSSTableOptions{FilePath: sstPath, ID: fileID, Logger: logger}
+		reloadedSST, err := LoadSSTable(loadOpts)
+		require.NoError(t, err)
+		defer reloadedSST.Close()
+
+		assert.Equal(t, expectedTombstoneCount, reloadedSST.TombstoneCount(), "TombstoneCount on reloaded SSTable should also match")
+		assert.Equal(t, uint64(len(entriesWithTombstones)), reloadedSST.KeyCount(), "KeyCount should be correct")
+	})
+
+	t.Run("WithoutTombstones", func(t *testing.T) {
+		tempDir := t.TempDir() // Create a unique temp dir for this subtest
+		fileID := uint64(506)
+		entriesWithoutTombstones := []testEntry{
+			{Key: []byte("keyA"), Value: []byte("vA"), EntryType: core.EntryTypePutEvent, PointID: 1},
+			{Key: []byte("keyB"), Value: []byte("vB"), EntryType: core.EntryTypePutEvent, PointID: 2},
+		}
+		sst, _ := writeTestSSTableGeneral(t, tempDir, entriesWithoutTombstones, fileID, logger)
+		defer sst.Close()
+		assert.Equal(t, uint64(0), sst.TombstoneCount(), "TombstoneCount should be zero when there are no delete entries")
+	})
+}

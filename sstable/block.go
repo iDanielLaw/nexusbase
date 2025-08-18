@@ -38,6 +38,44 @@ func NewBlock(blockData []byte) *Block {
 	}
 }
 
+// decodeKeyAtRestartPoint efficiently decodes only the key from a restart point offset.
+// It avoids creating a full BlockIterator, making it ideal for use within a binary search.
+// A restart point entry always has sharedPrefixLen = 0.
+func (b *Block) decodeKeyAtRestartPoint(blockData []byte, offset uint32) ([]byte, bool) {
+	if int(offset) >= len(blockData) {
+		return nil, false
+	}
+	reader := bytes.NewReader(blockData[offset:])
+
+	// At a restart point, sharedLen must be 0.
+	if sharedLen, err := binary.ReadUvarint(reader); err != nil || sharedLen != 0 {
+		return nil, false
+	}
+	unsharedLen, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return nil, false
+	}
+
+	// We need to skip over value_len, entry_type, and point_id to get to the key data.
+	// Read and discard value_len
+	if _, err := binary.ReadUvarint(reader); err != nil {
+		return nil, false
+	}
+	// Read and discard entry_type
+	if _, err := reader.ReadByte(); err != nil {
+		return nil, false
+	}
+	// Read and discard point_id
+	if _, err := binary.ReadUvarint(reader); err != nil {
+		return nil, false
+	}
+
+	// We only need the key, so we can read just the unshared part and return.
+	key := make([]byte, unsharedLen)
+	_, err = io.ReadFull(reader, key)
+	return key, err == nil
+}
+
 // Find searches for a key within the block using restart points for efficiency. (FR4.8)
 // Returns value, entryType, sequence number, and an error. If not found, returns ErrNotFound.
 // Assumes entries within the block are sorted by Key, then by PointID descending.
@@ -74,13 +112,11 @@ func (b *Block) Find(keyToFind []byte) ([]byte, core.EntryType, uint64, error) {
 	// This is the "insertion point" for keyToFind in the sorted list of restart point keys.
 	searchIndex := sort.Search(int(numRestartPoints), func(i int) bool {
 		offset := binary.LittleEndian.Uint32(b.data[restartPointsStartOffset+(i*4):])
-		// Create a temporary iterator to read just the first key at this restart point.
-		tempIter := NewBlockIterator(entriesData[offset:])
-		if tempIter.Next() {
-			// The predicate is true if the key at the restart point is >= the key we're looking for.
-			return bytes.Compare(tempIter.Key(), keyToFind) >= 0
+		key, ok := b.decodeKeyAtRestartPoint(entriesData, offset)
+		if !ok {
+			return false // Treat as corruption or end of block
 		}
-		return false // Should not happen in a valid block
+		return bytes.Compare(key, keyToFind) >= 0
 	})
 
 	// After sort.Search, `searchIndex` is the index of the first restart point with a key >= keyToFind.

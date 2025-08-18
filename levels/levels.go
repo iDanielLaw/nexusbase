@@ -36,6 +36,10 @@ const (
 	PickRandom
 	// PickLargestAvgKeySize selects the table with the largest average data size per key.
 	PickLargestAvgKeySize
+	// PickNewest selects the table with the largest ID (newest).
+	PickNewest
+	// PickHighestTombstoneDensity selects the table with the highest ratio of tombstones to keys.
+	PickHighestTombstoneDensity
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -59,13 +63,23 @@ type LevelsManager struct {
 	tracer         trace.Tracer  // For creating spans
 	// fallbackStrategy defines the logic to use when no table has a clear overlap advantage.
 	fallbackStrategy CompactionFallbackStrategy
+	tombstoneWeight  float64
+	overlapWeight    float64
 }
 
 var _ Manager = (*LevelsManager)(nil)
 
 // NewLevelsManager creates a new LevelsManager.
 // Corresponds to FR5.1, FR5.2.
-func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, tracer trace.Tracer, fallbackStrategy CompactionFallbackStrategy) (*LevelsManager, error) {
+func NewLevelsManager(
+	maxLevels int,
+	maxL0Files int,
+	baseTargetSize int64,
+	tracer trace.Tracer,
+	fallbackStrategy CompactionFallbackStrategy,
+	tombstoneWeight float64,
+	overlapWeight float64,
+) (*LevelsManager, error) {
 	lm := &LevelsManager{
 		levels:           make([]*LevelState, maxLevels),
 		maxLevels:        maxLevels,
@@ -73,6 +87,8 @@ func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, trace
 		baseTargetSize:   baseTargetSize,
 		tracer:           tracer,
 		fallbackStrategy: fallbackStrategy,
+		tombstoneWeight:  tombstoneWeight,
+		overlapWeight:    overlapWeight,
 	}
 	for i := 0; i < maxLevels; i++ {
 		lm.levels[i] = newLevelState(i)
@@ -136,11 +152,9 @@ func (lm *LevelsManager) removeTablesUnsafe(levelNum int, tablesToRemove []uint6
 	if levelNum < 0 || levelNum >= lm.maxLevels {
 		return fmt.Errorf("invalid level number %d", levelNum)
 	}
-
-	for _, tableID := range tablesToRemove {
-		lm.levels[levelNum].Remove(tableID)
+	if len(tablesToRemove) > 0 {
+		lm.levels[levelNum].RemoveBatch(tablesToRemove)
 	}
-
 	return nil
 }
 
@@ -221,6 +235,52 @@ func (lm *LevelsManager) getTablesForLevelUnsafe(levelNum int) []*sstable.SSTabl
 	return lm.levels[levelNum].GetTables()
 }
 
+// NeedsIntraL0Compaction checks if an intra-L0 compaction should be triggered.
+// This happens if there are enough "small" files in L0.
+func (lm *LevelsManager) NeedsIntraL0Compaction(triggerFileCount int, maxFileSizeBytes int64) bool {
+	if triggerFileCount <= 0 || maxFileSizeBytes <= 0 {
+		return false // Feature is disabled if not configured properly.
+	}
+
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	l0Tables := lm.levels[0].GetTables()
+	smallFileCount := 0
+	for _, table := range l0Tables {
+		if table.Size() <= maxFileSizeBytes {
+			smallFileCount++
+		}
+	}
+
+	return smallFileCount >= triggerFileCount
+}
+
+// PickIntraL0CompactionCandidates selects the set of small files from L0 to be compacted together.
+func (lm *LevelsManager) PickIntraL0CompactionCandidates(triggerFileCount int, maxFileSizeBytes int64) []*sstable.SSTable {
+	if triggerFileCount <= 0 || maxFileSizeBytes <= 0 {
+		return nil
+	}
+
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	l0Tables := lm.levels[0].GetTables()
+	candidates := make([]*sstable.SSTable, 0, triggerFileCount)
+	for _, table := range l0Tables {
+		if table.Size() <= maxFileSizeBytes {
+			candidates = append(candidates, table)
+		}
+	}
+
+	// Only return candidates if we have enough to trigger a compaction.
+	if len(candidates) >= triggerFileCount {
+		return candidates
+	}
+
+	return nil
+}
+
 // GetTotalTableCount returns the total number of SSTables across all levels.
 func (lm *LevelsManager) GetTotalTableCount() int {
 	lm.mu.RLock()
@@ -294,10 +354,10 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 }
 
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
-// The primary strategy is to pick the table with the largest total size of overlapping tables in level N+1.
-// This helps reduce write amplification by compacting the "most problematic" file first.
-// If no tables have any overlap, it falls back to a configurable strategy (e.g., oldest or largest) to ensure
-// compaction can still proceed.
+// It uses a scoring model to balance two factors:
+// 1. Tombstone Density: Prioritizes tables with a high ratio of deleted entries to reclaim disk space.
+// 2. Overlap Penalty: Penalizes tables that overlap with a large amount of data in the next level.
+// If multiple tables have the same highest score, a fallback strategy is used to break the tie.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
@@ -312,133 +372,138 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 	}
 
 	tables := level.GetTables()
-	var bestTable *sstable.SSTable
-	maxOverlapSize := int64(-1) // Use -1 to ensure a table with 0 overlap is chosen if no overlaps exist.
+	var candidates []*sstable.SSTable
+	bestScore := -math.MaxFloat64
 
 	for _, table := range tables {
+		// 1. Calculate Tombstone Density Score
+		var tombstoneDensity float64
+		if table.KeyCount() > 0 {
+			tombstoneDensity = float64(table.TombstoneCount()) / float64(table.KeyCount())
+		}
+
+		// 2. Calculate Overlap Penalty
 		minKey, maxKey := table.MinKey(), table.MaxKey()
 		overlappingTables := lm.getOverlappingTablesLocked(levelNum+1, minKey, maxKey)
-
 		var currentOverlapSize int64
 		for _, overlapTable := range overlappingTables {
 			currentOverlapSize += overlapTable.Size()
 		}
+		var overlapPenalty float64
+		if table.Size() > 0 {
+			// Normalize overlap by table size to get a write amplification factor for this compaction
+			overlapPenalty = float64(currentOverlapSize) / float64(table.Size())
+		}
 
-		if currentOverlapSize > maxOverlapSize {
-			maxOverlapSize = currentOverlapSize
-			bestTable = table
+		// 3. Combine into a final score using configured weights. Higher is better.
+		score := (lm.tombstoneWeight * tombstoneDensity) - (lm.overlapWeight * overlapPenalty)
+
+		if score > bestScore {
+			bestScore = score
+			candidates = []*sstable.SSTable{table} // Start a new list of candidates
+		} else if score == bestScore {
+			candidates = append(candidates, table) // Add to the list of candidates
 		}
 	}
 
-	// If no table had any overlap with the next level, trigger fallback logic.
-	if maxOverlapSize <= 0 {
-		// Fallback logic is now configurable
-		switch lm.fallbackStrategy {
-		case PickLargest:
-			// Fallback: Pick the largest table in the current level.
-			var largestTable *sstable.SSTable
-			var maxSize int64 = -1
-			for _, table := range tables {
-				if table.Size() > maxSize {
-					maxSize = table.Size()
-					largestTable = table
-				}
-			}
-			return largestTable
-		case PickSmallest:
-			// Fallback: Pick the smallest table in the current level.
-			var smallestTable *sstable.SSTable
-			for _, table := range tables {
-				if smallestTable == nil || table.Size() < smallestTable.Size() {
-					smallestTable = table
-				}
-			}
-			return smallestTable
-		case PickMostKeys:
-			// Fallback: Pick the table with the most keys.
-			var mostKeysTable *sstable.SSTable
-			for _, table := range tables {
-				if mostKeysTable == nil || table.KeyCount() > mostKeysTable.KeyCount() {
-					mostKeysTable = table
-				}
-			}
-			return mostKeysTable
-		case PickSmallestAvgKeySize:
-			// Fallback: Pick the table with the smallest average size per key.
-			// This can be useful for compacting tables with many small, inefficiently stored keys.
-			var smallestAvgSizeTable *sstable.SSTable
-			minAvgSize := math.MaxFloat64
-
-			for _, table := range tables {
-				if table.KeyCount() == 0 {
-					continue // Avoid division by zero; tables with no keys are not candidates.
-				}
-				avgSize := float64(table.Size()) / float64(table.KeyCount())
-				if avgSize < minAvgSize {
-					minAvgSize = avgSize
-					smallestAvgSizeTable = table
-				}
-			}
-			return smallestAvgSizeTable
-		case PickLargestAvgKeySize:
-			// Fallback: Pick the table with the largest average size per key.
-			// This can be useful for compacting tables with few, very large keys.
-			var largestAvgSizeTable *sstable.SSTable
-			maxAvgSize := -1.0
-
-			for _, table := range tables {
-				if table.KeyCount() == 0 {
-					continue // Avoid division by zero.
-				}
-				avgSize := float64(table.Size()) / float64(table.KeyCount())
-				if avgSize > maxAvgSize {
-					maxAvgSize = avgSize
-					largestAvgSizeTable = table
-				}
-			}
-			return largestAvgSizeTable
-		case PickOldestByTimestamp:
-			// Fallback: Pick the table with the smallest MinKey.
-			// Since tables in L1+ are already sorted by MinKey, this is the first table.
-			if len(tables) > 0 {
-				return tables[0]
-			}
-			return nil
-		case PickFewestKeys:
-			// Fallback: Pick the table with the fewest keys.
-			// Useful for cleaning up small, sparse tables.
-			var fewestKeysTable *sstable.SSTable
-			minKeyCount := uint64(math.MaxUint64)
-			for _, table := range tables {
-				if table.KeyCount() < minKeyCount {
-					minKeyCount = table.KeyCount()
-					fewestKeysTable = table
-				}
-			}
-			return fewestKeysTable
-		case PickRandom:
-			// Fallback: Pick a random table.
-			// This helps prevent starvation where the same tables are always
-			// ignored by other fallback strategies.
-			if len(tables) > 0 {
-				return tables[rand.Intn(len(tables))]
-			}
-			return nil
-		case PickOldest:
-			fallthrough // Fallthrough to the default case
-		default:
-			// Default Fallback: Pick the oldest table (smallest ID) in the current level.
-			var oldestTable *sstable.SSTable
-			for _, table := range tables {
-				if oldestTable == nil || table.ID() < oldestTable.ID() {
-					oldestTable = table
-				}
-			}
-			return oldestTable
-		}
+	if len(candidates) == 0 {
+		return nil // No tables in the level.
 	}
 
-	return bestTable
+	// If there's only one table with the minimum overlap, it's our candidate.
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	// If multiple tables have the same best score (e.g., zero overlap),
+	// use the configured fallback strategy to break the tie.
+	return lm.pickFromCandidatesUsingFallback(candidates)
+}
+
+// pickFromCandidatesUsingFallback applies the configured fallback strategy to select a single
+// SSTable from a list of candidates that all have the same best compaction score.
+func (lm *LevelsManager) pickFromCandidatesUsingFallback(candidates []*sstable.SSTable) *sstable.SSTable {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// For most strategies, we can sort the candidates slice and pick the first element.
+	// This simplifies the logic and avoids repetitive loops.
+	switch lm.fallbackStrategy {
+	case PickLargest:
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].Size() > candidates[j].Size()
+		})
+	case PickSmallest:
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].Size() < candidates[j].Size()
+		})
+	case PickMostKeys:
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].KeyCount() > candidates[j].KeyCount()
+		})
+	case PickFewestKeys:
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].KeyCount() < candidates[j].KeyCount()
+		})
+	case PickSmallestAvgKeySize:
+		sort.Slice(candidates, func(i, j int) bool {
+			// Treat tables with 0 keys as having an infinitely large average size.
+			if candidates[i].KeyCount() == 0 {
+				return false // i is not smaller than j
+			}
+			if candidates[j].KeyCount() == 0 {
+				return true // i is smaller than j (which has 0 keys)
+			}
+			avgSizeI := float64(candidates[i].Size()) / float64(candidates[i].KeyCount())
+			avgSizeJ := float64(candidates[j].Size()) / float64(candidates[j].KeyCount())
+			return avgSizeI < avgSizeJ
+		})
+	case PickLargestAvgKeySize:
+		sort.Slice(candidates, func(i, j int) bool {
+			// Treat tables with 0 keys as having the smallest average size.
+			if candidates[i].KeyCount() == 0 {
+				return false // i is not larger than j
+			}
+			if candidates[j].KeyCount() == 0 {
+				return true // i is larger than j (which has 0 keys)
+			}
+			avgSizeI := float64(candidates[i].Size()) / float64(candidates[i].KeyCount())
+			avgSizeJ := float64(candidates[j].Size()) / float64(candidates[j].KeyCount())
+			return avgSizeI > avgSizeJ
+		})
+	case PickOldestByTimestamp:
+		sort.Slice(candidates, func(i, j int) bool {
+			return bytes.Compare(candidates[i].MinKey(), candidates[j].MinKey()) < 0
+		})
+	case PickNewest:
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].ID() > candidates[j].ID()
+		})
+	case PickHighestTombstoneDensity:
+		sort.Slice(candidates, func(i, j int) bool {
+			var densityI, densityJ float64
+			if candidates[i].KeyCount() > 0 {
+				densityI = float64(candidates[i].TombstoneCount()) / float64(candidates[i].KeyCount())
+			}
+			if candidates[j].KeyCount() > 0 {
+				densityJ = float64(candidates[j].TombstoneCount()) / float64(candidates[j].KeyCount())
+			}
+			return densityI > densityJ
+		})
+	case PickRandom:
+		// PickRandom is the only strategy that doesn't involve sorting.
+		return candidates[rand.Intn(len(candidates))]
+	case PickOldest:
+		fallthrough
+	default:
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].ID() < candidates[j].ID()
+		})
+	}
+
+	// After sorting, the best candidate is the first one.
+	return candidates[0]
 }
 
 // ApplyCompactionResults updates the levels structure after a compaction.

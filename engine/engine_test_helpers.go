@@ -40,6 +40,8 @@ func getBaseOptsForFlushTest(t *testing.T) StorageEngineOptions {
 		SelfMonitoringEnabled:        true,
 		SelfMonitoringPrefix:         "__",
 		SelfMonitoringIntervalMs:     1000,
+		CompactionTombstoneWeight: 1.5,
+		CompactionOverlapWeight: 1.0,
 	}
 }
 

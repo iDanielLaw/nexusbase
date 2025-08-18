@@ -112,6 +112,8 @@ type TagIndexManagerOptions struct {
 	MaxL0Files                 int // Number of L0 index files to trigger compaction.
 	MaxLevels                  int
 	BaseTargetSize             int64
+	CompactionTombstoneWeight      float64 // New: Weight for tombstone score
+	CompactionOverlapWeight        float64 // New: Weight for overlap penalty
 	Clock                      clock.Clock // Clock interface for time measurement, allows mocking in tests.
 }
 
@@ -180,7 +182,15 @@ func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies,
 		opts.LevelsTargetSizeMultiplier = 5
 	}
 
-	lm, err := levels.NewLevelsManager(opts.MaxLevels, opts.MaxL0Files, opts.BaseTargetSize, tracer, opts.CompactionFallbackStrategy)
+	lm, err := levels.NewLevelsManager(
+		opts.MaxLevels,
+		opts.MaxL0Files,
+		opts.BaseTargetSize,
+		tracer,
+		opts.CompactionFallbackStrategy,
+		opts.CompactionTombstoneWeight,
+		opts.CompactionOverlapWeight,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create levels manager for tag index: %w", err)
 	}

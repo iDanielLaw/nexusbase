@@ -246,7 +246,7 @@ func (e *storageEngine) flushMemtableToSSTable(parentCtx context.Context, memToF
 
 	e.levelsManager.AddL0Table(newSST)
 
-	e.logger.Info("Successfully flushed memtable to SSTable.", "path", newSST.FilePath())
+	e.logger.Debug("Successfully flushed memtable to SSTable.", "path", newSST.FilePath())
 
 	// --- Post-Flush Hook ---
 	postFlushPayload := hooks.PostFlushMemtablePayload{SSTable: newSST}

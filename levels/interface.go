@@ -16,6 +16,8 @@ type Manager interface {
 	GetTotalSizeForLevel(level int) int64
 	MaxLevels() int
 	NeedsL0Compaction(maxL0Files int, l0CompactionTriggerSize int64) bool
+	NeedsIntraL0Compaction(triggerFileCount int, maxFileSizeBytes int64) bool
+	PickIntraL0CompactionCandidates(triggerFileCount int, maxFileSizeBytes int64) []*sstable.SSTable
 	NeedsLevelNCompaction(levelN int, multiplier int) bool
 	PickCompactionCandidateForLevelN(levelN int) *sstable.SSTable
 	GetOverlappingTables(level int, minKey, maxKey []byte) []*sstable.SSTable

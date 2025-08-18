@@ -20,7 +20,7 @@ engine:
   # --- Memtable ---
   memtable:
     size_threshold_bytes: 4194304 # 4 MiB
-    flush_interval: "1s" # Time-based flush interval. 0 to disable.
+    flush_interval: "0" # Time-based flush interval. 0 to disable.
 
   # --- SSTable ---
   sstable:

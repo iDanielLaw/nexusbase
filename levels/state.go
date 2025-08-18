@@ -120,6 +120,33 @@ func (ls *LevelState) Remove(sstID uint64) error {
 	return nil
 }
 
+// RemoveBatch removes multiple tables from the level by their IDs in a single pass.
+// This is more efficient than calling Remove in a loop. It does not return an
+// error for IDs that are not found.
+func (ls *LevelState) RemoveBatch(sstIDs []uint64) {
+	if len(sstIDs) == 0 {
+		return
+	}
+
+	toRemove := make(map[uint64]struct{}, len(sstIDs))
+	for _, id := range sstIDs {
+		toRemove[id] = struct{}{}
+	}
+
+	newTables := ls.tables[:0] // Re-slice to avoid new allocation
+	for _, table := range ls.tables {
+		if _, found := toRemove[table.ID()]; found {
+			// This table is marked for removal.
+			delete(ls.tableMap, table.ID())
+			ls.totalSize -= table.Size()
+		} else {
+			// Keep this table.
+			newTables = append(newTables, table)
+		}
+	}
+	ls.tables = newTables
+}
+
 // Size returns the number of tables in the level.
 func (ls *LevelState) Size() int {
 	// The length of the slice is the source of truth for the count.

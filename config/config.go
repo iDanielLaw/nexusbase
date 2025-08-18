@@ -51,9 +51,12 @@ type CompactionConfig struct {
 	LevelsSizeMultiplier   int    `yaml:"levels_size_multiplier"`
 	MaxLevels              int    `yaml:"max_levels"`
 	CheckInterval          string `yaml:"check_interval"`
-	FallbackStrategy       string `yaml:"fallback_strategy"`
+	FallbackStrategy     string  `yaml:"fallback_strategy"`
+	TombstoneWeight      float64 `yaml:"tombstone_weight"`
+	OverlapPenaltyWeight float64 `yaml:"overlap_penalty_weight"`
+	IntraL0TriggerFileCount int   `yaml:"intra_l0_trigger_file_count"`
+	IntraL0MaxFileSizeBytes int64 `yaml:"intra_l0_max_file_size_bytes"`
 }
-
 // WALConfig holds Write-Ahead Log specific configurations.
 type WALConfig struct {
 	SyncMode            string `yaml:"sync_mode"`
@@ -193,7 +196,11 @@ func Load(r io.Reader) (*Config, error) {
 				LevelsSizeMultiplier:   5,
 				MaxLevels:              7,
 				CheckInterval:          "120s",
-				FallbackStrategy:       "PickOldest",
+				FallbackStrategy:         "PickOldest",
+				TombstoneWeight:          1.5, // Default weight for tombstone priority
+				OverlapPenaltyWeight:     1.0, // Default weight for overlap penalty
+				IntraL0TriggerFileCount: 8, // Default to triggering with 8 small files
+				IntraL0MaxFileSizeBytes: 2 * 1024 * 1024, // Default to 2MB for "small" files
 			},
 			WAL: WALConfig{
 				SyncMode:            "interval",

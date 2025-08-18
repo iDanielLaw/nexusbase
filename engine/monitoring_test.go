@@ -51,7 +51,14 @@ func TestCollectAndStoreMetrics(t *testing.T) {
 		},
 	}
 	// The embedded levels.Manager needs to be initialized
-	lm, err := levels.NewLevelsManager(opts.MaxLevels, opts.MaxL0Files, opts.TargetSSTableSize, trace.NewNoopTracerProvider().Tracer("test"), opts.CompactionFallbackStrategy)
+	lm, err := levels.NewLevelsManager(
+		opts.MaxLevels, opts.MaxL0Files,
+		opts.TargetSSTableSize,
+		trace.NewNoopTracerProvider().Tracer("test"),
+		opts.CompactionFallbackStrategy,
+		opts.CompactionTombstoneWeight,
+		opts.CompactionOverlapWeight,
+	)
 	require.NoError(t, err)
 	mockLM.Manager = lm
 	concreteEngine.levelsManager = mockLM
