@@ -56,6 +56,20 @@ func (b *Block) decodeKeyAtRestartPoint(blockData []byte, offset uint32) ([]byte
 		return nil, false
 	}
 
+	// We need to skip over value_len, entry_type, and point_id to get to the key data.
+	// Read and discard value_len
+	if _, err := binary.ReadUvarint(reader); err != nil {
+		return nil, false
+	}
+	// Read and discard entry_type
+	if _, err := reader.ReadByte(); err != nil {
+		return nil, false
+	}
+	// Read and discard point_id
+	if _, err := binary.ReadUvarint(reader); err != nil {
+		return nil, false
+	}
+
 	// We only need the key, so we can read just the unshared part and return.
 	key := make([]byte, unsharedLen)
 	_, err = io.ReadFull(reader, key)
