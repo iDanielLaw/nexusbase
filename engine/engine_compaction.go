@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -486,6 +487,48 @@ func (cm *CompactionManager) Trigger() {
 	}
 }
 
+// runL0CompactionTask is a helper to wrap the execution of L0-related compactions (Intra-L0, L0->L1).
+// It handles common logic like goroutine management, locking, tracing, and metrics.
+func (cm *CompactionManager) runL0CompactionTask(parentCtx context.Context, compactionType string, compactionFunc func(context.Context) error) {
+	cm.compactionWg.Add(1)
+	go func() {
+		if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
+			cm.metrics.CompactionsInProgress.Add(1)
+			defer cm.metrics.CompactionsInProgress.Add(-1)
+		}
+		defer cm.l0CompactionActive.Store(false)
+		defer cm.compactionWg.Done()
+
+		ctx, span := cm.tracer.Start(parentCtx, fmt.Sprintf("CompactionManager.%sWorker", strings.ReplaceAll(compactionType, "->", "To")))
+		defer span.End()
+		span.SetAttributes(attribute.String("compaction.type", compactionType))
+
+		clock := cm.Engine.GetClock()
+		startTime := clock.Now()
+
+		if err := compactionFunc(ctx); err == nil {
+			duration := clock.Now().Sub(startTime).Seconds()
+			if cm.compactionLatencyHist != nil {
+				observeLatency(cm.compactionLatencyHist, duration)
+			}
+			span.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
+			cm.logger.Info(fmt.Sprintf("%s compaction finished successfully.", compactionType), "duration_seconds", duration)
+			if cm.compactionCount != nil {
+				cm.compactionCount.Add(1)
+			}
+			span.SetAttributes(attribute.Bool("compaction.performed", true))
+		} else {
+			cm.logger.Error(fmt.Sprintf("%s compaction failed.", compactionType), "error", err)
+			span.SetStatus(codes.Error, fmt.Sprintf("%s compaction failed: %v", compactionType, err))
+			if cm.Engine != nil {
+				if concreteEngine, ok := cm.Engine.(*storageEngine); ok && concreteEngine.metrics.CompactionErrorsTotal != nil {
+					concreteEngine.metrics.CompactionErrorsTotal.Add(1)
+				}
+			}
+		}
+	}()
+}
+
 // performCompactionCycle checks if compaction is needed and runs it.
 func (cm *CompactionManager) performCompactionCycle() {
 	ctx, span := cm.tracer.Start(context.Background(), "CompactionManager.performCompactionCycle")
@@ -496,45 +539,8 @@ func (cm *CompactionManager) performCompactionCycle() {
 	if cm.levelsManager.NeedsIntraL0Compaction(cm.opts.IntraL0CompactionTriggerFiles, cm.opts.IntraL0CompactionMaxFileSizeBytes) {
 		if cm.l0CompactionActive.CompareAndSwap(false, true) {
 			compactionInitiatedThisCycle = true
-			cm.compactionWg.Add(1)
 			cm.logger.Info("Intra-L0 compaction needed, starting task.", "trigger_files", cm.opts.IntraL0CompactionTriggerFiles)
-
-			go func(parentCtx context.Context) {
-				if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
-					cm.metrics.CompactionsInProgress.Add(1)
-					defer cm.metrics.CompactionsInProgress.Add(-1)
-				}
-				defer cm.l0CompactionActive.Store(false)
-				defer cm.compactionWg.Done()
-
-				l0Ctx, l0Span := cm.tracer.Start(parentCtx, "CompactionManager.IntraL0CompactionWorker")
-				defer l0Span.End()
-				l0Span.SetAttributes(attribute.String("compaction.type", "Intra-L0"))
-
-				clock := cm.Engine.GetClock()
-				startTime := clock.Now()
-
-				if err := cm.compactIntraL0(l0Ctx); err == nil {
-					duration := clock.Now().Sub(startTime).Seconds()
-					if cm.compactionLatencyHist != nil {
-						observeLatency(cm.compactionLatencyHist, duration)
-					}
-					l0Span.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
-					cm.logger.Info("Intra-L0 compaction finished successfully.", "duration_seconds", duration)
-					if cm.compactionCount != nil {
-						cm.compactionCount.Add(1)
-					}
-					l0Span.SetAttributes(attribute.Bool("compaction.performed", true))
-				} else {
-					cm.logger.Error("Intra-L0 compaction failed.", "error", err)
-					l0Span.SetStatus(codes.Error, fmt.Sprintf("Intra-L0 compaction failed: %v", err))
-					if cm.Engine != nil {
-						if concreteEngine, ok := cm.Engine.(*storageEngine); ok && concreteEngine.metrics.CompactionErrorsTotal != nil {
-							concreteEngine.metrics.CompactionErrorsTotal.Add(1)
-						}
-					}
-				}
-			}(ctx)
+			cm.runL0CompactionTask(ctx, "Intra-L0", cm.compactIntraL0)
 		} else {
 			cm.logger.Info("Skipping Intra-L0 compaction as another L0 compaction is already active.")
 		}
@@ -545,45 +551,8 @@ func (cm *CompactionManager) performCompactionCycle() {
 		// Try to start an L0 compaction if one isn't already running.
 		if cm.l0CompactionActive.CompareAndSwap(false, true) {
 			compactionInitiatedThisCycle = true
-			cm.compactionWg.Add(1)
 			cm.logger.Info("L0 compaction needed, starting L0->L1 compaction task.", "max_l0_files", cm.opts.MaxL0Files)
-
-			go func(parentCtx context.Context) {
-				if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
-					cm.metrics.CompactionsInProgress.Add(1)
-					defer cm.metrics.CompactionsInProgress.Add(-1)
-				}
-				defer cm.l0CompactionActive.Store(false)
-				defer cm.compactionWg.Done()
-
-				l0Ctx, l0Span := cm.tracer.Start(parentCtx, "CompactionManager.L0CompactionWorker")
-				defer l0Span.End()
-				l0Span.SetAttributes(attribute.String("compaction.type", "L0->L1"))
-
-				clock := cm.Engine.GetClock()
-				startTime := clock.Now()
-
-				if err := cm.compactL0ToL1(l0Ctx); err == nil {
-					duration := clock.Now().Sub(startTime).Seconds()
-					if cm.compactionLatencyHist != nil {
-						observeLatency(cm.compactionLatencyHist, duration)
-					}
-					l0Span.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
-					cm.logger.Info("L0->L1 compaction finished successfully.", "duration_seconds", duration)
-					if cm.compactionCount != nil {
-						cm.compactionCount.Add(1)
-					}
-					l0Span.SetAttributes(attribute.Bool("compaction.performed", true))
-				} else {
-					cm.logger.Error("L0->L1 compaction failed.", "error", err)
-					l0Span.SetStatus(codes.Error, fmt.Sprintf("L0->L1 compaction failed: %v", err))
-					if cm.Engine != nil {
-						if concreteEngine, ok := cm.Engine.(*storageEngine); ok && concreteEngine.metrics.CompactionErrorsTotal != nil {
-							concreteEngine.metrics.CompactionErrorsTotal.Add(1)
-						}
-					}
-				}
-			}(ctx)
+			cm.runL0CompactionTask(ctx, "L0->L1", cm.compactL0ToL1)
 		} else {
 			cm.logger.Info("Skipping L0 compaction as one is already active.")
 			span.SetAttributes(attribute.String("compaction.skipped_reason", "l0_already_active"))
