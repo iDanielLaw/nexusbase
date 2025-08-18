@@ -2,17 +2,56 @@ package levels
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/INLOpen/nexusbase/compressors"
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sstable"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// testEntryWithTombstone is a helper struct for creating tables with mixed entry types.
+type testEntryWithTombstone struct {
+	key       []byte
+	value     []byte
+	entryType core.EntryType
+	pointID   uint64
+}
+
+func newTestSSTableWithTombstones(t *testing.T, id uint64, entries []testEntryWithTombstone) *sstable.SSTable {
+	t.Helper()
+	testSpecificDir := t.TempDir()
+	writerOpts := core.SSTableWriterOptions{
+		DataDir:                      testSpecificDir,
+		ID:                           id,
+		EstimatedKeys:                uint64(len(entries)),
+		BloomFilterFalsePositiveRate: 0.01,
+		BlockSize:                    256,
+		Tracer:                       nil,
+		Compressor:                   &compressors.NoCompressionCompressor{},
+		Logger:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	writer, err := sstable.NewSSTableWriter(writerOpts)
+	require.NoError(t, err, "Failed to create SSTable writer for test")
+	for _, entry := range entries {
+		// For tombstones, the value is often nil or empty.
+		writer.Add(entry.key, entry.value, entry.entryType, entry.pointID)
+	}
+	require.NoError(t, writer.Finish(), "Failed to finish test SSTable")
+	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: id, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	tbl, err := sstable.LoadSSTable(loadOpts)
+	require.NoError(t, err, "Failed to load test SSTable")
+	return tbl
+}
+
 
 func TestNewLevelsManager(t *testing.T) {
 	lm, err := NewLevelsManager(7, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
@@ -252,6 +291,57 @@ func TestLevelsManager_NeedsLevelNCompaction(t *testing.T) {
 	defer l2_tbl2_needs.Close()
 	require.NoError(t, lm.AddTableToLevel(2, l2_tbl2_needs))
 	assert.True(t, lm.NeedsLevelNCompaction(2, multiplier), "L2 with size >= target should need compaction")
+}
+func TestLevelsManager_PickCompactionCandidateForLevelN_TombstoneAware(t *testing.T) {
+	lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest)
+	defer lm.Close()
+
+	// Table A: High tombstone density (50%)
+	tableA_entries := []testEntryWithTombstone{
+		{key: []byte("a1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1},
+		{key: []byte("a2"), value: nil, entryType: core.EntryTypeDelete, pointID: 2},
+	}
+	tableA := newTestSSTableWithTombstones(t, 10, tableA_entries)
+	defer tableA.Close()
+	require.Equal(t, uint64(1), tableA.TombstoneCount())
+	require.Equal(t, uint64(2), tableA.KeyCount())
+
+	// Table B: Low tombstone density (10%)
+	tableB_entries := make([]testEntryWithTombstone, 10)
+	for i := 0; i < 9; i++ {
+		tableB_entries[i] = testEntryWithTombstone{key: []byte(fmt.Sprintf("b%d", i)), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: uint64(i + 1)}
+	}
+	tableB_entries[9] = testEntryWithTombstone{key: []byte("b9"), value: nil, entryType: core.EntryTypeDelete, pointID: 10}
+	tableB := newTestSSTableWithTombstones(t, 20, tableB_entries)
+	defer tableB.Close()
+	require.Equal(t, uint64(1), tableB.TombstoneCount())
+	require.Equal(t, uint64(10), tableB.KeyCount())
+
+	// Table C: No tombstones, but larger overlap (to ensure tombstone density wins over overlap)
+	tableC_entries := []testEntryWithTombstone{
+		{key: []byte("c1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1},
+		{key: []byte("c2"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 2},
+	}
+	tableC := newTestSSTableWithTombstones(t, 30, tableC_entries)
+	defer tableC.Close()
+	require.Equal(t, uint64(0), tableC.TombstoneCount())
+
+	// L2 table that overlaps with C but not A or B, to make C a worse choice based on overlap.
+	l2_overlap_C := newTestSSTableWithTombstones(t, 100, []testEntryWithTombstone{
+		{key: []byte("c1_overlap"), value: makeValue(2048), entryType: core.EntryTypePutEvent, pointID: 1},
+	})
+	defer l2_overlap_C.Close()
+
+	// Set up the levels
+	lm.levels[1].SetTables([]*sstable.SSTable{tableA, tableB, tableC})
+	lm.levels[2].SetTables([]*sstable.SSTable{l2_overlap_C})
+
+	// Act
+	candidate := lm.PickCompactionCandidateForLevelN(1)
+
+	// Assert
+	require.NotNil(t, candidate)
+	assert.Equal(t, tableA.ID(), candidate.ID(), "Should pick Table A with the highest tombstone density (50%)")
 }
 
 func TestLevelsManager_PickCompactionCandidateForLevelN(t *testing.T) {

@@ -340,10 +340,11 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 }
 
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
-// The primary strategy is to pick the table with the smallest total size of overlapping tables in level N+1.
-// This helps reduce write amplification by minimizing the amount of data that needs to be re-written from the next level.
-// If one or more tables have no overlap (the ideal case), it falls back to a configurable strategy (e.g., oldest or largest) to ensure
-// compaction can still proceed.
+// The strategy is now multi-faceted:
+// 1. Prioritize tables with a high density of tombstones to reclaim space.
+// 2. Among those, or if none have high tombstone density, pick the one with the
+//    smallest total size of overlapping tables in level N+1 to reduce write amplification.
+// 3. If multiple tables have zero overlap, use a configurable fallback strategy.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
