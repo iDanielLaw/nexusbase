@@ -225,6 +225,8 @@ func main() {
 		fallbackStrategy = levels.PickRandom
 	case "picklargestavgkeysize":
 		fallbackStrategy = levels.PickLargestAvgKeySize
+	case "picknewest":
+		fallbackStrategy = levels.PickNewest
 	case "pickoldest":
 		fallthrough
 	default:

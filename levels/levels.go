@@ -36,6 +36,8 @@ const (
 	PickRandom
 	// PickLargestAvgKeySize selects the table with the largest average data size per key.
 	PickLargestAvgKeySize
+	// PickNewest selects the table with the largest ID (newest).
+	PickNewest
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -480,6 +482,16 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 			return candidates[rand.Intn(len(candidates))]
 		}
 		return nil
+	case PickNewest:
+		// Fallback: Pick the newest table (largest ID) among the candidates.
+		var newestTable *sstable.SSTable
+		for _, table := range candidates {
+			if newestTable == nil || table.ID() > newestTable.ID() {
+				newestTable = table
+			}
+		}
+		return newestTable
+
 	case PickOldest:
 		fallthrough // Fallthrough to the default case
 	default:
