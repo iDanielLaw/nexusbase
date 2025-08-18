@@ -482,9 +482,9 @@ func (lm *LevelsManager) pickFromCandidatesUsingFallback(candidates []*sstable.S
 		})
 	case PickHighestTombstoneDensity:
 		sort.Slice(candidates, func(i, j int) bool {
-			var density float64
-			if table.KeyCount() > 0 {
-				density = float64(table.TombstoneCount()) / float64(table.KeyCount())
+			var densityI, densityJ float64
+			if candidates[i].KeyCount() > 0 {
+				densityI = float64(candidates[i].TombstoneCount()) / float64(candidates[i].KeyCount())
 			}
 			if candidates[j].KeyCount() > 0 {
 				densityJ = float64(candidates[j].TombstoneCount()) / float64(candidates[j].KeyCount())
