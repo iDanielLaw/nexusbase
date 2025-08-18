@@ -171,12 +171,6 @@ type storageEngine struct {
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
 }
 
-const (
-	CURRENT_FILE_NAME    = "CURRENT"
-	MANIFEST_FILE_PREFIX = "MANIFEST" // Prefix for manifest files, e.g., MANIFEST_12345.json
-	NEXTID_FILE_NAME     = "NEXTID"
-)
-
 var _ StorageEngineInterface = (*storageEngine)(nil)
 
 // NewStorageEngine initializes and returns a new StorageEngine.
@@ -501,8 +495,8 @@ func (e *storageEngine) wipeDataDirectory() error {
 		e.sstDir,
 		e.dlqDir,
 		filepath.Join(e.opts.DataDir, "wal"),
-		filepath.Join(e.opts.DataDir, CURRENT_FILE_NAME),
-		filepath.Join(e.opts.DataDir, "CHECKPOINT"),
+		filepath.Join(e.opts.DataDir, core.CurrentFileName),
+		filepath.Join(e.opts.DataDir, core.CheckpointFileName),
 		filepath.Join(e.opts.DataDir, "string_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series.log"),

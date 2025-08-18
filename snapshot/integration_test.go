@@ -105,8 +105,8 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 	// places the tag index snapshot into `dataDir/index`. The TagIndexManager, however,
 	// expects its data to be in `dataDir/index_sst`. We must move the data to the
 	// correct location before the TagIndexManager is initialized and tries to load it.
-	indexSnapshotPath := filepath.Join(dataDir, indexer.IndexDirName)
-	indexDataPath := filepath.Join(dataDir, indexer.IndexSSTDirName)
+	indexSnapshotPath := filepath.Join(dataDir, core.IndexDirName)
+	indexDataPath := filepath.Join(dataDir, core.IndexSSTDirName)
 	if _, statErr := os.Stat(indexSnapshotPath); statErr == nil {
 		t.Logf("Moving restored tag index data from %s to %s", indexSnapshotPath, indexDataPath)
 		// Clean up any old index data dir first, just in case.
@@ -286,7 +286,7 @@ func TestSnapshot_E2E_CreateAndRestore(t *testing.T) {
 	assert.FileExists(t, filepath.Join(snapshotDir, "sst", "2.sst"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "wal", "00000001.wal"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "wal", "00000002.wal"))
-	assert.FileExists(t, filepath.Join(snapshotDir, "index", indexer.IndexManifestFileName))
+	assert.FileExists(t, filepath.Join(snapshotDir, "index", core.IndexManifestFileName))
 	assert.FileExists(t, filepath.Join(snapshotDir, "deleted_series.json"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "range_tombstones.json"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "string_mapping.log"))
@@ -306,7 +306,7 @@ func TestSnapshot_E2E_CreateAndRestore(t *testing.T) {
 	assert.FileExists(t, filepath.Join(restoredDataDir, "sst", "2.sst"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "wal", "00000001.wal"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "wal", "00000002.wal"))
-	assert.FileExists(t, filepath.Join(restoredDataDir, indexer.IndexDirName, indexer.IndexManifestFileName))
+	assert.FileExists(t, filepath.Join(restoredDataDir, core.IndexDirName, core.IndexManifestFileName))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "deleted_series.json"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "range_tombstones.json"))
 	assert.FileExists(t, filepath.Join(restoredDataDir, "string_mapping.log"))

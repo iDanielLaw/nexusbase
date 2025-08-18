@@ -20,10 +20,6 @@ import (
 	"github.com/INLOpen/nexusbase/sys"
 )
 
-const (
-	StringMappingLogName = "string_mapping.log"
-)
-
 // StringStore manages the mapping between strings (metrics, tag keys, tag values) and integer IDs.
 type StringStore struct {
 	logFile sys.FileInterface
@@ -59,7 +55,7 @@ func (s *StringStore) GetLogFilePath() string {
 // It now includes validation of the file header and per-record checksums
 // to ensure integrity and compatibility.
 func (s *StringStore) LoadFromFile(dataDir string) (err error) {
-	logPath := filepath.Join(dataDir, StringMappingLogName)
+	logPath := filepath.Join(dataDir, core.StringMappingLogName)
 	var maxId uint64 = 0
 
 	file, err := sys.OpenFile(logPath, os.O_RDWR|os.O_CREATE, 0644)

@@ -136,9 +136,8 @@ func (sr *SegmentReader) ReadRecord() ([]byte, error) {
 
 	// A sanity check to prevent allocating huge amounts of memory for a corrupt record.
 	// This limit can be adjusted based on expected maximum record size.
-	const maxRecordSize = 128 * 1024 * 1024 // 128MB
-	if length > maxRecordSize {
-		return nil, fmt.Errorf("wal record length %d exceeds sanity limit of %d bytes", length, maxRecordSize)
+	if length > core.WALMaxSegmentSize {
+		return nil, fmt.Errorf("wal record length %d exceeds sanity limit of %d bytes", length, core.WALMaxSegmentSize)
 	}
 
 	data := make([]byte, length)

@@ -22,7 +22,7 @@ func (e *storageEngine) persistManifest() (err error) {
 	_, span := e.tracer.Start(context.Background(), "StorageEngine.persistManifest")
 	defer span.End()
 
-	currentFilePath := filepath.Join(e.opts.DataDir, CURRENT_FILE_NAME)
+	currentFilePath := filepath.Join(e.opts.DataDir, core.CurrentFileName)
 	oldManifestFileName := ""
 	if oldCurrentFileContent, readErr := os.ReadFile(currentFilePath); readErr == nil {
 		oldManifestFileName = strings.TrimSpace(string(oldCurrentFileContent))
@@ -60,7 +60,7 @@ func (e *storageEngine) persistManifest() (err error) {
 	}
 
 	// Create a new manifest file with a unique name
-	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", MANIFEST_FILE_PREFIX, e.clock.Now().UnixNano())
+	uniqueManifestFileName := fmt.Sprintf("%s_%d.bin", core.ManifestFilePrefix, e.clock.Now().UnixNano())
 	manifestFilePath := filepath.Join(e.opts.DataDir, uniqueManifestFileName)
 	e.logger.Debug("Persisting manifest with current state.", "manifest_file", uniqueManifestFileName)
 
@@ -87,7 +87,7 @@ func (e *storageEngine) persistManifest() (err error) {
 	}
 
 	// Update nextSSTableID to file
-	nextSSTableIDFilePath := filepath.Join(e.opts.DataDir, NEXTID_FILE_NAME)
+	nextSSTableIDFilePath := filepath.Join(e.opts.DataDir, core.NextIDFileName)
 	numByte := make([]byte, 8)
 	binary.BigEndian.PutUint64(numByte, e.nextSSTableID.Load())
 	if err = os.WriteFile(nextSSTableIDFilePath, numByte, 0644); err != nil {

@@ -87,7 +87,7 @@ func (sl *StateLoader) Load() error {
 func (sl *StateLoader) loadStateFromDisk() (bool, error) {
 	sl.logger.Info("Loading database state from disk...")
 	// Load NextID Last
-	nextIdFilePath := filepath.Join(sl.opts.DataDir, NEXTID_FILE_NAME)
+	nextIdFilePath := filepath.Join(sl.opts.DataDir, core.NextIDFileName)
 
 	currentNextID, err := os.ReadFile(nextIdFilePath)
 
@@ -107,7 +107,7 @@ func (sl *StateLoader) loadStateFromDisk() (bool, error) {
 		sl.engine.nextSSTableID.Store(num)
 	}
 
-	currentFilePath := filepath.Join(sl.opts.DataDir, CURRENT_FILE_NAME)
+	currentFilePath := filepath.Join(sl.opts.DataDir, core.CurrentFileName)
 
 	// Try to read CURRENT file to find the latest manifest
 	latestManifestFileName := ""

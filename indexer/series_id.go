@@ -38,10 +38,6 @@ type SeriesIDStore struct {
 	closeFunc    func() error
 }
 
-const (
-	SeriesMappingLogName = "series_mapping.log"
-)
-
 // NewSeriesIDStore creates a new SeriesIDStore.
 func NewSeriesIDStore(logger *slog.Logger, hookManager hooks.HookManager) *SeriesIDStore {
 	s := &SeriesIDStore{
@@ -61,7 +57,7 @@ func NewSeriesIDStore(logger *slog.Logger, hookManager hooks.HookManager) *Serie
 // It now includes validation of the file header and per-record checksums
 // to ensure integrity and compatibility.
 func (s *SeriesIDStore) LoadFromFile(dataDir string) (err error) {
-	logPath := filepath.Join(dataDir, SeriesMappingLogName)
+	logPath := filepath.Join(dataDir, core.SeriesMappingLogName)
 	var maxId uint64 = 0
 
 	file, openErr := sys.OpenFile(logPath, os.O_RDWR|os.O_CREATE, 0644)

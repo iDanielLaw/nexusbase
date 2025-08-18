@@ -46,6 +46,10 @@ const (
 	WALFileSuffix = ".wal"
 	// CheckpointFileName is the name of the file storing checkpoint information.
 	CheckpointFileName = "CHECKPOINT"
+
+	SeriesMappingLogName = "series_mapping.log"
+
+	StringMappingLogName = "string_mapping.log"
 )
 
 // --- Protocol & Format Versions ---
@@ -58,6 +62,13 @@ const (
 const (
 	// WALMaxSegmentSize is the default maximum size for a WAL segment file.
 	WALMaxSegmentSize = 128 * 1024 * 1024 // 128 MB
+)
+
+const (
+	// IndexManifestFileName is the name of the manifest file for the tag index.
+	IndexManifestFileName = "MANIFEST"
+	IndexDirName          = "index"
+	IndexSSTDirName       = "index_sst"
 )
 
 // Checkpoint stores the state of the last durable checkpoint.

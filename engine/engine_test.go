@@ -558,7 +558,7 @@ func TestStorageEngine_Recovery_FallbackScan(t *testing.T) {
 		// To properly test the fallback recovery path (`scanDataDirAndLoadToL0`), we must
 		// remove the CURRENT file. This makes the primary recovery path (from MANIFEST)
 		// fail with os.ErrNotExist, which correctly triggers the fallback logic.
-		require.NoError(t, os.Remove(filepath.Join(dataDir, CURRENT_FILE_NAME)))
+		require.NoError(t, os.Remove(filepath.Join(dataDir, core.CurrentFileName)))
 	}
 
 	// --- Phase 2: Create a new engine, which should load the state via fallback scan ---

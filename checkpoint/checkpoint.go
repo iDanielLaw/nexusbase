@@ -10,24 +10,6 @@ import (
 	"github.com/INLOpen/nexusbase/sys"
 )
 
-/*
-const (
-	// MagicNumber is the magic number for a CHECKPOINT file.
-	// It corresponds to the ASCII representation of "CKPT".
-	MagicNumber uint32 = 0x54504B43
-	// FileName is the name of the checkpoint file.
-	FileName = "CHECKPOINT"
-	// TempFileName is the temporary file used for atomic writes.
-	TempFileName = "CHECKPOINT.tmp"
-)
-
-// Checkpoint holds the data stored in the CHECKPOINT file.
-type Checkpoint struct {
-	// LastSafeSegmentIndex is the index of the last WAL segment
-	// whose data has been fully persisted to SSTables.
-	LastSafeSegmentIndex uint64
-}
-*/
 // Write atomically writes the checkpoint data to a file in the given directory.
 // It implements the "write-and-rename" strategy described in checkpointing.md
 // to ensure atomicity and prevent corruption.
