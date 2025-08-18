@@ -293,11 +293,12 @@ func TestLevelsManager_NeedsLevelNCompaction(t *testing.T) {
 	assert.True(t, lm.NeedsLevelNCompaction(2, multiplier), "L2 with size >= target should need compaction")
 }
 func TestLevelsManager_PickCompactionCandidate_TombstonePriority(t *testing.T) {
-	// This test uses the new PickHighestTombstoneDensity fallback strategy.
-	// It sets up a scenario where two tables have zero overlap, making them both
-	// primary candidates. The tie should be broken by picking the one with the
-	// higher tombstone density.
-	lm, err := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickHighestTombstoneDensity, 1.5, 1.0)
+	// TestLevelsManager_PickCompactionCandidate_TombstonePriority verifies that the primary
+	// scoring model correctly prioritizes tables with a higher tombstone density when
+	// other factors like overlap are equal.
+	// It sets up a scenario where two tables have zero overlap, but different tombstone densities.
+	// The test asserts that the table with the higher density receives a higher score and is chosen for compaction.
+	lm, err := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest, 1.5, 1.0)
 	require.NoError(t, err)
 	defer lm.Close()
 
@@ -334,10 +335,10 @@ func TestLevelsManager_PickCompactionCandidate_TombstonePriority(t *testing.T) {
 	candidate := lm.PickCompactionCandidateForLevelN(1)
 
 	// Assert
-	// The candidates with minimum overlap (0) are A and B.
-	// The fallback strategy PickHighestTombstoneDensity should choose A (50%) over B (10%).
+	// Table A has a higher score (0.75) due to its higher tombstone density (50%) compared to Table B (score 0.15, density 10%),
+	// while both have zero overlap penalty. Therefore, the primary scoring model should select Table A.
 	require.NotNil(t, candidate)
-	assert.Equal(t, tableA.ID(), candidate.ID(), "Should pick Table A with the highest tombstone density")
+	assert.Equal(t, tableA.ID(), candidate.ID(), "Should pick Table A due to its higher primary score from tombstone density")
 }
 
 // TestLevelsManager_PickCompactionCandidate_LeastOverlap tests that the primary selection strategy
