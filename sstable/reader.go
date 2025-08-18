@@ -40,8 +40,8 @@ type SSTable struct {
 	maxKey   []byte        // Maximum key in this SSTable (FR4.4)
 	size     int64         // Size of the SSTable file on disk (FR4.5)
 	keyCount uint64 // Total number of entries in the SSTable
-
 	tombstoneCount uint64 // Total number of tombstone entries
+	
 	// dataEndOffset is the offset in the file where the actual key-value data blocks end
 	// and the footer (index, bloom filter, metadata) begins.
 	dataEndOffset int64
