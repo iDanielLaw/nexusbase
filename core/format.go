@@ -23,6 +23,8 @@ const (
 	TagIndexMagicNumber uint32 = 0x54414758 // "TAGX"
 	// SSTableMagicNumber identifies an SSTable file.
 	SSTableMagicNumber uint32 = 0x53535442 // "SSTB"
+
+	CheckpointMagicNumber uint32 = 0x54504B43
 )
 
 // --- Magic Strings ---
@@ -61,6 +63,10 @@ const (
 // Checkpoint stores the state of the last durable checkpoint.
 type Checkpoint struct {
 	LastSafeSegmentIndex uint64
+}
+
+func FormatTempFilename(prefix, postfix string) string {
+	return fmt.Sprintf("%s.%s", prefix, postfix)
 }
 
 // FormatSegmentFileName creates a segment file name from its index.

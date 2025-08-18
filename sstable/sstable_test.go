@@ -401,12 +401,12 @@ func TestLoadSSTable_TruncatedFile(t *testing.T) {
 		},
 		{
 			name:         "truncated_in_bloom_filter_data",
-			truncateSize: originalFileSize - int64(core.SSTableMagicNumber) - 10, // Just before magic string, in bloom filter data
-			expectedErr:  ErrCorrupted,                                           // Or io.EOF/io.ErrUnexpectedEOF
+			truncateSize: originalFileSize - int64(core.SSTableMagicStringLen) - 10, // Just before magic string, in bloom filter data
+			expectedErr:  ErrCorrupted,                                              // Or io.EOF/io.ErrUnexpectedEOF
 		},
 		{
 			name:         "truncated_just_before_magic_string",
-			truncateSize: originalFileSize - int64(core.SSTableMagicNumber) + 1,
+			truncateSize: originalFileSize - int64(core.SSTableMagicStringLen) + 1,
 			expectedErr:  ErrCorrupted, // Should fail magic string check
 		},
 	}

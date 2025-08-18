@@ -450,7 +450,7 @@ func (e *storageEngine) Close() error {
 	if e.wal != nil {
 		lastFlushedSegment := e.wal.ActiveSegmentIndex()
 		if lastFlushedSegment > 0 {
-			cp := checkpoint.Checkpoint{LastSafeSegmentIndex: lastFlushedSegment}
+			cp := core.Checkpoint{LastSafeSegmentIndex: lastFlushedSegment}
 			if writeErr := checkpoint.Write(e.opts.DataDir, cp); writeErr != nil {
 				e.logger.Error("Failed to write final checkpoint during close.", "error", writeErr)
 				closeErr = errors.Join(closeErr, writeErr)

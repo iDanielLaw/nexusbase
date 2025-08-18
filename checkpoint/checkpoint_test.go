@@ -6,21 +6,22 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCheckpoint_WriteAndRead_Successful(t *testing.T) {
 	tempDir := t.TempDir()
-	cp := Checkpoint{LastSafeSegmentIndex: 123}
+	cp := core.Checkpoint{LastSafeSegmentIndex: 123}
 
 	// Write the checkpoint
 	err := Write(tempDir, cp)
 	require.NoError(t, err, "Write should succeed")
 
 	// Verify the CHECKPOINT file exists and the temp file is gone
-	checkpointPath := filepath.Join(tempDir, FileName)
-	tempPath := filepath.Join(tempDir, TempFileName)
+	checkpointPath := filepath.Join(tempDir, core.CheckpointFileName)
+	tempPath := filepath.Join(tempDir, core.FormatTempFilename(core.CheckpointFileName, "tmp"))
 	_, err = os.Stat(checkpointPath)
 	require.NoError(t, err, "CHECKPOINT file should exist after write")
 	_, err = os.Stat(tempPath)
@@ -49,12 +50,12 @@ func TestCheckpoint_Write_Overwrite(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Write initial checkpoint
-	cp1 := Checkpoint{LastSafeSegmentIndex: 10}
+	cp1 := core.Checkpoint{LastSafeSegmentIndex: 10}
 	err := Write(tempDir, cp1)
 	require.NoError(t, err)
 
 	// Write a new checkpoint to overwrite
-	cp2 := Checkpoint{LastSafeSegmentIndex: 20}
+	cp2 := core.Checkpoint{LastSafeSegmentIndex: 20}
 	err = Write(tempDir, cp2)
 	require.NoError(t, err)
 
@@ -67,7 +68,7 @@ func TestCheckpoint_Write_Overwrite(t *testing.T) {
 
 func TestCheckpoint_Read_Corrupted(t *testing.T) {
 	tempDir := t.TempDir()
-	checkpointPath := filepath.Join(tempDir, FileName)
+	checkpointPath := filepath.Join(tempDir, core.CheckpointFileName)
 
 	t.Run("BadMagicNumber", func(t *testing.T) {
 		// Write a file with a wrong magic number
@@ -95,19 +96,19 @@ func TestCheckpoint_Read_Corrupted(t *testing.T) {
 
 func TestCheckpoint_Write_AtomicitySimulation(t *testing.T) {
 	tempDir := t.TempDir()
-	tempPath := filepath.Join(tempDir, TempFileName)
+	tempPath := filepath.Join(tempDir, core.FormatTempFilename(core.CheckpointFileName, "tmp"))
 
 	// 1. Create an old checkpoint file
-	oldCp := Checkpoint{LastSafeSegmentIndex: 99}
+	oldCp := core.Checkpoint{LastSafeSegmentIndex: 99}
 	err := Write(tempDir, oldCp)
 	require.NoError(t, err)
 
 	// 2. Simulate a crash during a new write, after the .tmp file is created but before rename
 	// We can't actually crash, so we'll manually create the .tmp file.
-	newCp := Checkpoint{LastSafeSegmentIndex: 199}
+	newCp := core.Checkpoint{LastSafeSegmentIndex: 199}
 	file, err := os.Create(tempPath)
 	require.NoError(t, err)
-	require.NoError(t, binary.Write(file, binary.LittleEndian, MagicNumber))
+	require.NoError(t, binary.Write(file, binary.LittleEndian, core.CheckpointMagicNumber))
 	require.NoError(t, binary.Write(file, binary.LittleEndian, newCp.LastSafeSegmentIndex))
 	require.NoError(t, file.Sync())
 	file.Close()

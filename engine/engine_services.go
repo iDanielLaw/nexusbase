@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/checkpoint"
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/memtable"
 )
 
@@ -123,7 +124,7 @@ func (sm *ServiceManager) startFlushLoop() {
 
 				// 5. After all flushes, write an authoritative checkpoint for the highest segment that was flushed.
 				if lastSafeSegment > 0 {
-					cp := checkpoint.Checkpoint{LastSafeSegmentIndex: lastSafeSegment}
+					cp := core.Checkpoint{LastSafeSegmentIndex: lastSafeSegment}
 					if writeErr := checkpoint.Write(sm.engine.opts.DataDir, cp); writeErr != nil {
 						completionChan <- writeErr
 						continue // continue the select loop
