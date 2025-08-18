@@ -912,6 +912,142 @@ func TestLevelsManager_AddTableToLevel(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid level number")
 }
 
+func TestLevelsManager_PickCompactionCandidateForLevelN_ScoringAndFallback(t *testing.T) {
+	// Default weights for tests unless specified otherwise
+	defaultTombstoneWeight := 0.6
+	defaultOverlapWeight := 0.4
+
+	t.Run("Scoring_PicksLeastOverlap", func(t *testing.T) {
+		// Test case: The primary scoring model should prioritize the table with the least overlap penalty,
+		// even if another table has a better tombstone score.
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest, defaultTombstoneWeight, defaultOverlapWeight)
+		defer lm.Close()
+
+		// L1 Table A: High tombstone density, but also high overlap with L2.
+		tableA_high_overlap := newTestSSTableWithTombstones(t, 10, []testEntryWithTombstone{
+			{key: []byte("a1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1},
+			{key: []byte("a2"), value: nil, entryType: core.EntryTypeDelete, pointID: 2}, // 50% density
+		})
+		defer tableA_high_overlap.Close()
+
+		// L1 Table B: Zero tombstone density, but zero overlap with L2.
+		tableB_zero_overlap := newTestSSTableWithTombstones(t, 20, []testEntryWithTombstone{
+			{key: []byte("z1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1},
+		})
+		defer tableB_zero_overlap.Close()
+
+		// L2 Table that overlaps with A, making A's overlap penalty high.
+		tableL2_for_A := newTestSSTableWithTombstones(t, 100, []testEntryWithTombstone{
+			{key: []byte("a1_overlap"), value: makeValue(5000), entryType: core.EntryTypePutEvent, pointID: 1},
+		})
+		defer tableL2_for_A.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{tableA_high_overlap, tableB_zero_overlap})
+		lm.levels[2].SetTables([]*sstable.SSTable{tableL2_for_A})
+
+		// Act
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+
+		// Assert
+		// Score(A) = (0.6 * 0.5) - (0.4 * large_penalty) -> likely negative score
+		// Score(B) = (0.6 * 0.0) - (0.4 * 0) = 0.0
+		// Table B should be picked because its score (0.0) is higher.
+		require.NotNil(t, candidate)
+		assert.Equal(t, tableB_zero_overlap.ID(), candidate.ID(), "Should pick Table B with zero overlap, as overlap penalty is the primary factor")
+	})
+
+	t.Run("Scoring_PicksHighestTombstoneDensity_WhenOverlapIsEqual", func(t *testing.T) {
+		// Test case: When overlap is equal (e.g., zero for all candidates),
+		// the model should pick the one with the higher tombstone density.
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest, defaultTombstoneWeight, defaultOverlapWeight)
+		defer lm.Close()
+
+		// L1 Table A: High tombstone density (50%), zero overlap
+		tableA_high_density := newTestSSTableWithTombstones(t, 10, []testEntryWithTombstone{
+			{key: []byte("a1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1},
+			{key: []byte("a2"), value: nil, entryType: core.EntryTypeDelete, pointID: 2},
+		})
+		defer tableA_high_density.Close()
+
+		// L1 Table B: Low tombstone density (0%), zero overlap
+		tableB_low_density := newTestSSTableWithTombstones(t, 20, []testEntryWithTombstone{
+			{key: []byte("b1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1},
+		})
+		defer tableB_low_density.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{tableA_high_density, tableB_low_density})
+		// L2 is empty, so overlap is zero for both.
+
+		// Act
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+
+		// Assert
+		// Score(A) = (0.6 * 0.5) - 0 = 0.3
+		// Score(B) = (0.6 * 0.0) - 0 = 0.0
+		// Table A should be picked.
+		require.NotNil(t, candidate)
+		assert.Equal(t, tableA_high_density.ID(), candidate.ID(), "Should pick Table A with higher tombstone density when overlap is equal")
+	})
+
+	t.Run("Fallback_PickOldest", func(t *testing.T) {
+		// Test case: When scores are identical (e.g., both 0), the fallback strategy should be used.
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest, defaultTombstoneWeight, defaultOverlapWeight)
+		defer lm.Close()
+
+		// Both tables have zero tombstones and zero overlap, so their scores will be identical (0.0).
+		tableNewer := newTestSSTableWithTombstones(t, 20, []testEntryWithTombstone{{key: []byte("b1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1}})
+		defer tableNewer.Close()
+		tableOlder := newTestSSTableWithTombstones(t, 10, []testEntryWithTombstone{{key: []byte("a1"), value: []byte("v"), entryType: core.EntryTypePutEvent, pointID: 1}})
+		defer tableOlder.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{tableNewer, tableOlder})
+
+		// Act
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+
+		// Assert
+		require.NotNil(t, candidate)
+		assert.Equal(t, tableOlder.ID(), candidate.ID(), "Fallback PickOldest should select the table with the smallest ID")
+	})
+
+	t.Run("Fallback_PickLargest", func(t *testing.T) {
+		// Test case: Test the PickLargest fallback strategy.
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickLargest, defaultTombstoneWeight, defaultOverlapWeight)
+		defer lm.Close()
+
+		// Both tables have zero tombstones and zero overlap, so their scores will be identical (0.0).
+		tableSmall := newTestSSTableWithTombstones(t, 10, []testEntryWithTombstone{{key: []byte("a1"), value: makeValue(100), entryType: core.EntryTypePutEvent, pointID: 1}})
+		defer tableSmall.Close()
+		tableLarge := newTestSSTableWithTombstones(t, 20, []testEntryWithTombstone{{key: []byte("b1"), value: makeValue(1000), entryType: core.EntryTypePutEvent, pointID: 1}})
+		defer tableLarge.Close()
+
+		lm.levels[1].SetTables([]*sstable.SSTable{tableSmall, tableLarge})
+
+		// Act
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+
+		// Assert
+		require.NotNil(t, candidate)
+		assert.Equal(t, tableLarge.ID(), candidate.ID(), "Fallback PickLargest should select the table with the largest size")
+	})
+
+	t.Run("ReturnsNilForEmptyLevel", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest, defaultTombstoneWeight, defaultOverlapWeight)
+		defer lm.Close()
+
+		candidate := lm.PickCompactionCandidateForLevelN(1)
+		assert.Nil(t, candidate, "Should return nil for an empty level")
+	})
+
+	t.Run("ReturnsNilForInvalidLevel", func(t *testing.T) {
+		lm, _ := NewLevelsManager(5, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest, defaultTombstoneWeight, defaultOverlapWeight)
+		defer lm.Close()
+
+		assert.Nil(t, lm.PickCompactionCandidateForLevelN(0), "Should return nil for L0")
+		assert.Nil(t, lm.PickCompactionCandidateForLevelN(4), "Should return nil for the last level")
+	})
+}
+
 func TestLevelsManager_RemoveTables(t *testing.T) {
 	lm, _ := NewLevelsManager(3, 4, 1024, nil, PickOldest, 1.5, 1.0)
 	defer lm.Close()
