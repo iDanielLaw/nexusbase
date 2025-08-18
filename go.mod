@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.10
 
 require (
-	github.com/INLOpen/nexuscore v0.0.0 
+	github.com/INLOpen/nexuscore v0.0.0
 	github.com/INLOpen/skiplist v1.2.1
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/antlr4-go/antlr/v4 v4.13.1
