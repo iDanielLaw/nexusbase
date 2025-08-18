@@ -23,7 +23,7 @@ const (
 	TagIndexMagicNumber uint32 = 0x54414758 // "TAGX"
 	// SSTableMagicNumber identifies an SSTable file.
 	SSTableMagicNumber uint32 = 0x53535442 // "SSTB"
-
+	// CheckpointMagicNumber identifies a checkpoint file.
 	CheckpointMagicNumber uint32 = 0x54504B43
 )
 
