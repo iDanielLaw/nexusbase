@@ -139,6 +139,43 @@ func (cm *CompactionManager) runCompactionTask(task *compactionTask) ([]*sstable
 	return newTables, nil
 }
 
+
+// compactIntraL0 performs a compaction of small files within Level 0.
+func (cm *CompactionManager) compactIntraL0(ctx context.Context) error {
+	_, span := cm.tracer.Start(ctx, "CompactionManager.compactIntraL0")
+	defer span.End()
+
+	// 1. Pick the small L0 files to compact.
+	inputTables := cm.levelsManager.PickIntraL0CompactionCandidates(cm.opts.IntraL0CompactionTriggerFiles, cm.opts.IntraL0CompactionMaxFileSizeBytes)
+	if len(inputTables) == 0 {
+		cm.logger.Info("Intra-L0 compaction was triggered, but no candidate files were picked. Skipping.")
+		return nil
+	}
+	cm.logger.Info("Compacting files within L0.", "input_tables_count", len(inputTables), "input_table_ids", levels.GetTableIDs(inputTables))
+	span.SetAttributes(
+		attribute.Int("input.l0_tables_count", len(inputTables)),
+	)
+
+	// 2. Create the compaction task. Source and Target level are both 0.
+	task := &compactionTask{
+		sourceLevel:    0,
+		targetLevel:    0, // Compacting within L0
+		inputTables:    inputTables,
+		isL0Compaction: true, // Treat it like an L0 compaction for locking/priority purposes
+		parentSpanCtx:  ctx,
+	}
+
+	// 3. Run the task (merge, apply results, cleanup)
+	newTables, err := cm.runCompactionTask(task)
+	if err != nil {
+		cm.logger.Error("Intra-L0 compaction failed during merge", "error", err)
+		return err
+	}
+
+	cm.logger.Info("Intra-L0 compaction completed.", "removed_old_tables_count", len(inputTables), "created_new_tables_count", len(newTables))
+	return nil
+}
+
 // CompactionOptions holds configuration for the compaction process.
 type CompactionOptions struct {
 	MaxL0Files                 int   // Trigger for L0->L1 compaction
@@ -147,6 +184,10 @@ type CompactionOptions struct {
 	LevelsTargetSizeMultiplier int   // Multiplier for target size of next level (for LN -> LN+1)
 	CompactionIntervalSeconds  int
 	MaxConcurrentLNCompactions int             // Maximum number of LN->LN+1 compactions to run in parallel
+	// New fields
+	IntraL0CompactionTriggerFiles    int
+	IntraL0CompactionMaxFileSizeBytes int64
+
 	SSTableCompressor          core.Compressor // Changed to use the interface
 	RetentionPeriod            string          // e.g., "30d", "1y". If empty, no retention.
 	// Add other options as needed
@@ -451,8 +492,56 @@ func (cm *CompactionManager) performCompactionCycle() {
 	defer span.End()
 	cm.logger.Debug("Checking for compaction needs...", "trace_id", span.SpanContext().TraceID().String())
 	var compactionInitiatedThisCycle bool
+	// NEW: Check for Intra-L0 compaction first. This is a cheaper operation that can reduce L0->L1 pressure.
+	if cm.levelsManager.NeedsIntraL0Compaction(cm.opts.IntraL0CompactionTriggerFiles, cm.opts.IntraL0CompactionMaxFileSizeBytes) {
+		if cm.l0CompactionActive.CompareAndSwap(false, true) {
+			compactionInitiatedThisCycle = true
+			cm.compactionWg.Add(1)
+			cm.logger.Info("Intra-L0 compaction needed, starting task.", "trigger_files", cm.opts.IntraL0CompactionTriggerFiles)
 
-	if cm.levelsManager.NeedsL0Compaction(cm.opts.MaxL0Files, cm.opts.L0CompactionTriggerSize) {
+			go func(parentCtx context.Context) {
+				if cm.metrics != nil && cm.metrics.CompactionsInProgress != nil {
+					cm.metrics.CompactionsInProgress.Add(1)
+					defer cm.metrics.CompactionsInProgress.Add(-1)
+				}
+				defer cm.l0CompactionActive.Store(false)
+				defer cm.compactionWg.Done()
+
+				l0Ctx, l0Span := cm.tracer.Start(parentCtx, "CompactionManager.IntraL0CompactionWorker")
+				defer l0Span.End()
+				l0Span.SetAttributes(attribute.String("compaction.type", "Intra-L0"))
+
+				clock := cm.Engine.GetClock()
+				startTime := clock.Now()
+
+				if err := cm.compactIntraL0(l0Ctx); err == nil {
+					duration := clock.Now().Sub(startTime).Seconds()
+					if cm.compactionLatencyHist != nil {
+						observeLatency(cm.compactionLatencyHist, duration)
+					}
+					l0Span.SetAttributes(attribute.Float64("compaction.duration_seconds", duration))
+					cm.logger.Info("Intra-L0 compaction finished successfully.", "duration_seconds", duration)
+					if cm.compactionCount != nil {
+						cm.compactionCount.Add(1)
+					}
+					l0Span.SetAttributes(attribute.Bool("compaction.performed", true))
+				} else {
+					cm.logger.Error("Intra-L0 compaction failed.", "error", err)
+					l0Span.SetStatus(codes.Error, fmt.Sprintf("Intra-L0 compaction failed: %v", err))
+					if cm.Engine != nil {
+						if concreteEngine, ok := cm.Engine.(*storageEngine); ok && concreteEngine.metrics.CompactionErrorsTotal != nil {
+							concreteEngine.metrics.CompactionErrorsTotal.Add(1)
+						}
+					}
+				}
+			}(ctx)
+		} else {
+			cm.logger.Info("Skipping Intra-L0 compaction as another L0 compaction is already active.")
+		}
+	}
+
+	// Check for L0->L1 compaction only if an Intra-L0 compaction was NOT initiated in this cycle.
+	if !compactionInitiatedThisCycle && cm.levelsManager.NeedsL0Compaction(cm.opts.MaxL0Files, cm.opts.L0CompactionTriggerSize) {
 		// Try to start an L0 compaction if one isn't already running.
 		if cm.l0CompactionActive.CompareAndSwap(false, true) {
 			compactionInitiatedThisCycle = true

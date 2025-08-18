@@ -96,6 +96,10 @@ type StorageEngineOptions struct {
 	// Rules for rounding relative query time ranges for caching. Must be sorted by QueryDurationThreshold.
 	RelativeQueryRoundingRules []RoundingRule
 	CompactionFallbackStrategy levels.CompactionFallbackStrategy
+
+	// New fields for Intra-L0 Compaction
+	IntraL0CompactionTriggerFiles    int   // Number of small files in L0 to trigger an intra-L0 compaction.
+	IntraL0CompactionMaxFileSizeBytes int64 // Max size of a file to be considered for intra-L0 compaction.
 }
 
 // storageEngine is the main struct that manages the LSM-tree components.
@@ -781,6 +785,10 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 				MaxConcurrentLNCompactions: e.opts.MaxConcurrentLNCompactions, // Default value, can be made configurable
 				SSTableCompressor:          e.opts.SSTableCompressor,
 				RetentionPeriod:            e.opts.RetentionPeriod,
+
+				// Pass Intra-L0 compaction options to the compactor
+				IntraL0CompactionTriggerFiles:    e.opts.IntraL0CompactionTriggerFiles,
+				IntraL0CompactionMaxFileSizeBytes: e.opts.IntraL0CompactionMaxFileSizeBytes,
 			},
 			LevelsManager:        lm,
 			Logger:               e.logger,

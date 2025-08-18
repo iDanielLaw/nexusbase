@@ -1719,3 +1719,181 @@ func TestCompactionManager_PerformCompactionCycle_L0_Failure(t *testing.T) {
 	assert.Len(t, lm.GetTablesForLevel(0), 2, "L0 should still contain its original tables after failed compaction")
 	assert.Empty(t, lm.GetTablesForLevel(1), "L1 should remain empty after failed compaction")
 }
+
+func TestCompactionManager_IntraL0Compaction(t *testing.T) {
+	// 1. Setup
+	tempDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Configure engine to trigger Intra-L0 compaction
+	opts := StorageEngineOptions{
+		DataDir:                           tempDir,
+		Logger:                            logger,
+		MaxLevels:                         3,
+		MaxL0Files:                        10, // High L0->L1 trigger to ensure it doesn't run
+		IntraL0CompactionTriggerFiles:     3,  // Trigger with 3 small files
+		IntraL0CompactionMaxFileSizeBytes: 1024, // Files <= 1KB are "small"
+		SSTableCompressor:                 &compressors.NoCompressionCompressor{},
+		CompactionIntervalSeconds:         3600, // Disable auto compaction
+	}
+
+	dummyEngine, err := NewStorageEngine(opts)
+	require.NoError(t, err)
+	require.NoError(t, dummyEngine.Start())
+	t.Cleanup(func() { dummyEngine.Close() })
+
+	concreteEngine := dummyEngine.(*storageEngine)
+	lm := concreteEngine.levelsManager
+	cm := concreteEngine.compactor.(*CompactionManager)
+
+	// 2. Arrange: Create 3 small SSTables and 1 large one in L0
+	smallSST1 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.a", value: "v1"}}) // small
+	smallSST2 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.b", value: "v2"}}) // small
+	smallSST3 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.c", value: "v3"}}) // small
+	largeSST := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.large", value: string(make([]byte, 2048))}}) // large
+
+	require.NoError(t, lm.AddL0Table(smallSST1))
+	require.NoError(t, lm.AddL0Table(smallSST2))
+	require.NoError(t, lm.AddL0Table(smallSST3))
+	require.NoError(t, lm.AddL0Table(largeSST))
+
+	require.Len(t, lm.GetTablesForLevel(0), 4, "L0 should have 4 tables initially")
+	require.True(t, lm.NeedsIntraL0Compaction(opts.IntraL0CompactionTriggerFiles, opts.IntraL0CompactionMaxFileSizeBytes), "Should need Intra-L0 compaction")
+	require.False(t, lm.NeedsL0Compaction(opts.MaxL0Files, 1024*1024), "Should NOT need L0->L1 compaction")
+
+	// 3. Act: Perform the compaction cycle
+	cm.performCompactionCycle()
+
+	// Wait for the compaction goroutine to finish.
+	cm.compactionWg.Wait()
+
+	// 4. Assert
+	l0Tables := lm.GetTablesForLevel(0)
+	// We expect 2 tables in L0: the original large one, and the new one from compacting the 3 small ones.
+	require.Len(t, l0Tables, 2, "L0 should have 2 tables after Intra-L0 compaction")
+
+	// Find the large table and the new table
+	var foundLargeTable, foundNewTable bool
+	var newTableSize int64
+	for _, tbl := range l0Tables {
+		if tbl.ID() == largeSST.ID() {
+			foundLargeTable = true
+		} else {
+			foundNewTable = true
+			newTableSize = tbl.Size()
+		}
+	}
+
+	assert.True(t, foundLargeTable, "The original large table should remain in L0")
+	assert.True(t, foundNewTable, "A new compacted table should be in L0")
+
+	// The new table should be larger than any of the individual small tables
+	assert.Greater(t, newTableSize, smallSST1.Size(), "New table should be larger than the input tables")
+}
+
+func TestCompactionManager_IntraL0Compaction_ShouldNotRun(t *testing.T) {
+	// setupTestEngine is a helper to create a clean engine for each sub-test.
+	setupTestEngine := func(t *testing.T, opts StorageEngineOptions) (*storageEngine, *CompactionManager) {
+		t.Helper()
+		if opts.Logger == nil {
+			opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		}
+		if opts.SSTableCompressor == nil {
+			opts.SSTableCompressor = &compressors.NoCompressionCompressor{}
+		}
+		opts.CompactionIntervalSeconds = 3600 // Disable auto compaction
+
+		dummyEngine, err := NewStorageEngine(opts)
+		require.NoError(t, err)
+		require.NoError(t, dummyEngine.Start())
+		t.Cleanup(func() { dummyEngine.Close() })
+
+		concreteEngine := dummyEngine.(*storageEngine)
+		cm := concreteEngine.compactor.(*CompactionManager)
+		return concreteEngine, cm
+	}
+
+	t.Run("FeatureDisabled", func(t *testing.T) {
+		// Setup: Feature is disabled via config (TriggerFiles = 0)
+		opts := StorageEngineOptions{
+			DataDir:                           t.TempDir(),
+			MaxLevels:                         3, // Add MaxLevels to prevent panic
+			MaxL0Files:                        100, // High L0->L1 trigger to ensure it doesn't run
+			L0CompactionTriggerSize:           1024 * 1024 * 1024, // High size trigger to ensure it doesn't run
+			IntraL0CompactionTriggerFiles:     0, // Feature disabled
+			IntraL0CompactionMaxFileSizeBytes: 1024,
+		}
+		engine, cm := setupTestEngine(t, opts)
+		lm := engine.levelsManager
+
+		// Arrange: Add enough small files that *would* trigger if enabled
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "m1"}}))
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "m2"}}))
+
+		require.False(t, lm.NeedsIntraL0Compaction(0, 1024), "Should not need compaction when feature is disabled")
+
+		// Act
+		cm.performCompactionCycle()
+		cm.compactionWg.Wait()
+
+		// Assert
+		assert.Len(t, lm.GetTablesForLevel(0), 2, "No compaction should have run as the feature is disabled")
+	})
+
+	t.Run("NotEnoughSmallFiles", func(t *testing.T) {
+		// Setup: Trigger requires 4 files, but we only have 3
+		opts := StorageEngineOptions{
+			DataDir:                           t.TempDir(),
+			MaxLevels:                         3, // Add MaxLevels to prevent panic
+			MaxL0Files:                        100, // High L0->L1 trigger to ensure it doesn't run
+			L0CompactionTriggerSize:           1024 * 1024 * 1024, // High size trigger
+			IntraL0CompactionTriggerFiles:     4, // Needs 4 files
+			IntraL0CompactionMaxFileSizeBytes: 1024,
+		}
+		engine, cm := setupTestEngine(t, opts)
+		lm := engine.levelsManager
+
+		// Arrange: Add 3 small files
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "m1"}}))
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "m2"}}))
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "m3"}}))
+
+		require.False(t, lm.NeedsIntraL0Compaction(4, 1024), "Should not need compaction with only 3 small files when trigger is 4")
+
+		// Act
+		cm.performCompactionCycle()
+		cm.compactionWg.Wait()
+
+		// Assert
+		assert.Len(t, lm.GetTablesForLevel(0), 3, "No compaction should have run as there are not enough small files")
+	})
+
+	t.Run("NoSmallFiles", func(t *testing.T) {
+		// Setup: All files are larger than the max size threshold
+		opts := StorageEngineOptions{
+			DataDir:                           t.TempDir(),
+			MaxLevels:                         3, // Add MaxLevels to prevent panic
+			MaxL0Files:                        100, // High L0->L1 trigger to ensure it doesn't run
+			L0CompactionTriggerSize:           1024 * 1024 * 1024, // High size trigger
+			IntraL0CompactionTriggerFiles:     3,
+			IntraL0CompactionMaxFileSizeBytes: 100, // Only files <= 100 bytes are small
+		}
+		engine, cm := setupTestEngine(t, opts)
+		lm := engine.levelsManager
+
+		// Arrange: Add 4 large files
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "large1", value: string(make([]byte, 200))}}))
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "large2", value: string(make([]byte, 200))}}))
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "large3", value: string(make([]byte, 200))}}))
+		lm.AddL0Table(createDummySSTable(t, engine, engine.GetNextSSTableID(), []testEntry{{metric: "large4", value: string(make([]byte, 200))}}))
+
+		require.False(t, lm.NeedsIntraL0Compaction(3, 100), "Should not need compaction as there are no small files")
+
+		// Act
+		cm.performCompactionCycle()
+		cm.compactionWg.Wait()
+
+		// Assert
+		assert.Len(t, lm.GetTablesForLevel(0), 4, "No compaction should have run as all files are too large")
+	})
+}

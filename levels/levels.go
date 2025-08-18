@@ -221,6 +221,52 @@ func (lm *LevelsManager) getTablesForLevelUnsafe(levelNum int) []*sstable.SSTabl
 	return lm.levels[levelNum].GetTables()
 }
 
+// NeedsIntraL0Compaction checks if an intra-L0 compaction should be triggered.
+// This happens if there are enough "small" files in L0.
+func (lm *LevelsManager) NeedsIntraL0Compaction(triggerFileCount int, maxFileSizeBytes int64) bool {
+	if triggerFileCount <= 0 || maxFileSizeBytes <= 0 {
+		return false // Feature is disabled if not configured properly.
+	}
+
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	l0Tables := lm.levels[0].GetTables()
+	smallFileCount := 0
+	for _, table := range l0Tables {
+		if table.Size() <= maxFileSizeBytes {
+			smallFileCount++
+		}
+	}
+
+	return smallFileCount >= triggerFileCount
+}
+
+// PickIntraL0CompactionCandidates selects the set of small files from L0 to be compacted together.
+func (lm *LevelsManager) PickIntraL0CompactionCandidates(triggerFileCount int, maxFileSizeBytes int64) []*sstable.SSTable {
+	if triggerFileCount <= 0 || maxFileSizeBytes <= 0 {
+		return nil
+	}
+
+	lm.mu.RLock()
+	defer lm.mu.RUnlock()
+
+	l0Tables := lm.levels[0].GetTables()
+	candidates := make([]*sstable.SSTable, 0, triggerFileCount)
+	for _, table := range l0Tables {
+		if table.Size() <= maxFileSizeBytes {
+			candidates = append(candidates, table)
+		}
+	}
+
+	// Only return candidates if we have enough to trigger a compaction.
+	if len(candidates) >= triggerFileCount {
+		return candidates
+	}
+
+	return nil
+}
+
 // GetTotalTableCount returns the total number of SSTables across all levels.
 func (lm *LevelsManager) GetTotalTableCount() int {
 	lm.mu.RLock()
