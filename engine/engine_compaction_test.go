@@ -1423,7 +1423,10 @@ func TestCompactionManager_RemoveAndCleanupSSTables(t *testing.T) {
 	})
 }
 
-func TestCompactionManager_PerformCompactionCycle_ParallelExecution(t *testing.T) {
+// TestCompactionManager_Parallel_L0_and_LN_Compactions tests the scenario where both an L0->L1 compaction
+// and multiple LN->LN+1 compactions are triggered in the same cycle and run concurrently,
+// respecting their respective concurrency limits (1 for L0, MaxConcurrentLNCompactions for LN).
+func TestCompactionManager_Parallel_L0_and_LN_Compactions(t *testing.T) {
 	// 1. Setup
 	tempDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil)) // Discard logs for cleaner test output
