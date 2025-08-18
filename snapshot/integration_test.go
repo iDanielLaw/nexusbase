@@ -65,7 +65,7 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 	require.NoError(t, os.MkdirAll(walDir, 0755))
 	require.NoError(t, os.MkdirAll(sstDir, 0755))
 
-	lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer(""), levels.PickOldest,1.5,1.0)
+	lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer(""), levels.PickOldest, 1.5, 1.0)
 	require.NoError(t, err)
 
 	// --- Load state from manifest if it exists ---
@@ -116,7 +116,7 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 
 	walOpts := wal.Options{
 		Dir:      walDir,
-		SyncMode: wal.SyncDisabled,
+		SyncMode: core.WALSyncDisabled,
 		Logger:   logger,
 	}
 	w, _, err := wal.Open(walOpts)

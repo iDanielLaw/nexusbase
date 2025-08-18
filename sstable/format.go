@@ -4,14 +4,11 @@ package sstable
 // Placeholder for SSTable format definitions.
 // Details to be filled based on FR4.1.
 
-import "errors"
+import (
+	"errors"
 
-// MagicString is a unique identifier placed at the end of an SSTable file.
-// Used for basic file corruption detection (FR7.2).
-const MagicString = "LSMT-SSTABLE-V1"
-
-// MagicStringLen is the length of the MagicString.
-const MagicStringLen = len(MagicString)
+	"github.com/INLOpen/nexusbase/core"
+)
 
 // Size constants for lengths in the file format.
 const (
@@ -43,7 +40,7 @@ const DefaultRestartPointInterval = 16
 // FooterSize is the total fixed size of the footer excluding the magic string.
 // Index(12) + Bloom(12) + MinKey(12) + MaxKey(12) + KeyCount(8) + TombstoneCount(8)
 const FooterFixedComponentSize = IndexOffsetSize + IndexLenSize + BloomFilterOffsetSize + BloomFilterLenSize + MinKeyOffsetSize + MinKeyLenSize + MaxKeyOffsetSize + MaxKeyLenSize + KeyCountSize + TombstoneCountSize
-const FooterSize = FooterFixedComponentSize + MagicStringLen
+const FooterSize = FooterFixedComponentSize + core.SSTableMagicStringLen
 
 // ErrNotFound is returned by Get when a key is not found.
 var ErrNotFound = errors.New("key not found")

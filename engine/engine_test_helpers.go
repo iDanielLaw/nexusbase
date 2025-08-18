@@ -11,7 +11,6 @@ import (
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/require"
 )
@@ -32,16 +31,16 @@ func getBaseOptsForFlushTest(t *testing.T) StorageEngineOptions {
 		BloomFilterFalsePositiveRate: 0.01,
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
-		WALSyncMode:                  wal.SyncDisabled, // Faster for tests
-		CompactionIntervalSeconds:    3600,             // Disable auto-compaction for most tests
+		WALSyncMode:                  core.WALSyncDisabled, // Faster for tests
+		CompactionIntervalSeconds:    3600,                 // Disable auto-compaction for most tests
 		Metrics:                      NewEngineMetrics(false, "test_"),
 		Logger:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Clock:                        clock.SystemClockDefault,
 		SelfMonitoringEnabled:        true,
 		SelfMonitoringPrefix:         "__",
 		SelfMonitoringIntervalMs:     1000,
-		CompactionTombstoneWeight: 1.5,
-		CompactionOverlapWeight: 1.0,
+		CompactionTombstoneWeight:    1.5,
+		CompactionOverlapWeight:      1.0,
 	}
 }
 

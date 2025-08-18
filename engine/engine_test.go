@@ -16,7 +16,6 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -133,7 +132,7 @@ func TestStorageEngine_VerifyDataConsistency(t *testing.T) {
 		BloomFilterFalsePositiveRate: 0.01,
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		SSTableCompressor:            &compressors.NoCompressionCompressor{}, // เพิ่ม NoCompressionCompressor
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		WALBatchSize:                 1,
 		WALFlushIntervalMs:           0,
 		CompactionIntervalSeconds:    3600, // Disable compaction for manual setup

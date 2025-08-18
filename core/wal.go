@@ -7,3 +7,11 @@ type WALEntry struct {
 	Value     []byte
 	SeqNum    uint64
 }
+
+type WALSyncMode string
+
+const (
+	WALSyncAlways   WALSyncMode = "always"   // Sync after every append (highest durability, lowest performance)
+	WALSyncInterval WALSyncMode = "interval" // Sync periodically (not handled by WAL anymore, but by engine)
+	WALSyncDisabled WALSyncMode = "disabled" // No sync (for testing/benchmarking, high risk of data loss)
+)

@@ -71,7 +71,7 @@ func readBytesWithLength(r io.Reader) ([]byte, error) {
 // WriteManifestBinary serializes the SnapshotManifest to a binary format.
 func WriteManifestBinary(w io.Writer, manifest *core.SnapshotManifest) error {
 	// 1. Header
-	header := core.NewFileHeader(core.ManifestMagic, core.CompressionNone)
+	header := core.NewFileHeader(core.ManifestMagicNumber, core.CompressionNone)
 	if err := binary.Write(w, binary.LittleEndian, &header); err != nil {
 		return fmt.Errorf("failed to write manifest header: %w", err)
 	}
@@ -160,7 +160,7 @@ func ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 		}
 		return nil, fmt.Errorf("failed to read manifest header: %w", err)
 	}
-	if header.Magic != core.ManifestMagic {
+	if header.Magic != core.ManifestMagicNumber {
 		return nil, fmt.Errorf("invalid binary manifest magic number. Got: %x", header.Magic)
 	}
 

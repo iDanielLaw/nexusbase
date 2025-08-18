@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -215,8 +215,8 @@ func TestCacheHooks(t *testing.T) {
 
 func TestWALHooks(t *testing.T) {
 	opts := getBaseOptsForFlushTest(t)
-	opts.WALMaxSegmentSize = 1024     // Small segment size to force rotation
-	opts.WALSyncMode = wal.SyncAlways // CRITICAL: Ensure writes are flushed to disk so size check works.
+	opts.WALMaxSegmentSize = 1024         // Small segment size to force rotation
+	opts.WALSyncMode = core.WALSyncAlways // CRITICAL: Ensure writes are flushed to disk so size check works.
 
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)

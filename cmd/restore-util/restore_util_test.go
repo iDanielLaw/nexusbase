@@ -13,7 +13,6 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/sstable"
-	"github.com/INLOpen/nexusbase/wal"
 )
 
 func TestRestoreUtil(t *testing.T) {
@@ -31,7 +30,7 @@ func TestRestoreUtil(t *testing.T) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		MaxLevels:                    3,
 		BloomFilterFalsePositiveRate: 0.01,
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		Logger:                       slog.Default(),
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
 	}
@@ -83,7 +82,7 @@ func TestRestoreUtil(t *testing.T) {
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
 		MaxLevels:                    3,
 		BloomFilterFalsePositiveRate: 0.01,
-		WALSyncMode:                  wal.SyncAlways,
+		WALSyncMode:                  core.WALSyncAlways,
 		Logger:                       slog.Default(),
 	}
 	engine2, err := engine.NewStorageEngine(restoredOpts)

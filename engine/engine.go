@@ -73,7 +73,7 @@ type StorageEngineOptions struct {
 	ErrorOnSSTableLoadFailure      bool
 	SSTableCompressor              core.Compressor
 	TestingOnlyInjectWALCloseError error // For testing purposes, allows injection of errors during WAL close or recover
-	WALSyncMode                    wal.WALSyncMode
+	WALSyncMode                    core.WALSyncMode
 	WALBatchSize                   int
 	WALFlushIntervalMs             int
 	WALPurgeKeepSegments           int // New: Number of WAL segments to keep behind the last checkpointed one.
@@ -100,7 +100,7 @@ type StorageEngineOptions struct {
 	CompactionFallbackStrategy levels.CompactionFallbackStrategy
 
 	// New fields for Intra-L0 Compaction
-	IntraL0CompactionTriggerFiles    int   // Number of small files in L0 to trigger an intra-L0 compaction.
+	IntraL0CompactionTriggerFiles     int   // Number of small files in L0 to trigger an intra-L0 compaction.
 	IntraL0CompactionMaxFileSizeBytes int64 // Max size of a file to be considered for intra-L0 compaction.
 }
 
@@ -796,7 +796,7 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 				RetentionPeriod:            e.opts.RetentionPeriod,
 
 				// Pass Intra-L0 compaction options to the compactor
-				IntraL0CompactionTriggerFiles:    e.opts.IntraL0CompactionTriggerFiles,
+				IntraL0CompactionTriggerFiles:     e.opts.IntraL0CompactionTriggerFiles,
 				IntraL0CompactionMaxFileSizeBytes: e.opts.IntraL0CompactionMaxFileSizeBytes,
 			},
 			LevelsManager:        lm,

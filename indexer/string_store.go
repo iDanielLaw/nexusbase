@@ -74,7 +74,7 @@ func (s *StringStore) LoadFromFile(dataDir string) (err error) {
 		if err == io.EOF {
 			// File is new or empty, write a new header.
 			s.logger.Info("String mapping file is new or empty, writing header.", "path", logPath)
-			newHeader := core.NewFileHeader(core.StringStoreMagic, core.CompressionNone)
+			newHeader := core.NewFileHeader(core.StringStoreMagicNumber, core.CompressionNone)
 			if _, err := file.Seek(0, 0); err != nil {
 				return fmt.Errorf("failed to seek to start of new string mapping file: %w", err)
 			}
@@ -86,11 +86,11 @@ func (s *StringStore) LoadFromFile(dataDir string) (err error) {
 		return fmt.Errorf("failed to read string mapping header: %w", err)
 	}
 
-	if header.Magic != core.StringStoreMagic {
-		return fmt.Errorf("invalid string mapping file magic number: got %x, want %x", header.Magic, core.StringStoreMagic)
+	if header.Magic != core.StringStoreMagicNumber {
+		return fmt.Errorf("invalid string mapping file magic number: got %x, want %x", header.Magic, core.StringStoreMagicNumber)
 	}
-	if header.Version > core.CurrentVersion {
-		return fmt.Errorf("unsupported string mapping file version: got %d, want <= %d", header.Version, core.CurrentVersion)
+	if header.Version > core.FormatVersion {
+		return fmt.Errorf("unsupported string mapping file version: got %d, want <= %d", header.Version, core.FormatVersion)
 	}
 
 	s.mu.Lock()

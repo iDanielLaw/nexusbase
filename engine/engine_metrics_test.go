@@ -10,7 +10,6 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/sstable" // For sstable.DefaultBlockSize
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,7 +24,7 @@ func TestStorageEngine_WALMetrics(t *testing.T) {
 		MemtableThreshold:            1024 * 1024, // Large enough
 		CompactionIntervalSeconds:    3600,        // Disable compaction
 		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
-		WALSyncMode:                  wal.SyncAlways, // Ensure WAL is written for the test
+		WALSyncMode:                  core.WALSyncAlways, // Ensure WAL is written for the test
 		WALBatchSize:                 1,
 		MaxLevels:                    3,
 		BloomFilterFalsePositiveRate: 0.01,

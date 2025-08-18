@@ -8,17 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/sys"
-)
-
-const (
-	segmentFileSuffix = ".wal"
-	// MaxSegmentSize is the default maximum size for a WAL segment file.
-	MaxSegmentSize = 128 * 1024 * 1024 // 128 MB
 )
 
 // Segment represents a single WAL segment file.
@@ -41,30 +33,16 @@ type SegmentReader struct {
 	reader *bufio.Reader
 }
 
-// formatSegmentFileName creates a segment file name from its index.
-func formatSegmentFileName(index uint64) string {
-	return fmt.Sprintf("%08d%s", index, segmentFileSuffix)
-}
-
-// parseSegmentFileName extracts the index from a segment file name.
-func parseSegmentFileName(name string) (uint64, error) {
-	if !strings.HasSuffix(name, segmentFileSuffix) {
-		return 0, fmt.Errorf("file %s is not a WAL segment file", name)
-	}
-	name = strings.TrimSuffix(name, segmentFileSuffix)
-	return strconv.ParseUint(name, 10, 64)
-}
-
 // CreateSegment creates a new segment file in the given directory.
 func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
-	path := filepath.Join(dir, formatSegmentFileName(index))
+	path := filepath.Join(dir, core.FormatSegmentFileName(index))
 	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create segment file %s: %w", path, err)
 	}
 
 	// Write header
-	header := core.NewFileHeader(core.WALMagic, core.CompressionNone)
+	header := core.NewFileHeader(core.WALMagicNumber, core.CompressionNone)
 	if err := binary.Write(file, binary.LittleEndian, &header); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("failed to write segment header to %s: %w", path, err)
@@ -98,12 +76,12 @@ func OpenSegmentForRead(path string) (*SegmentReader, error) {
 		}
 		return nil, fmt.Errorf("failed to read segment header from %s: %w", path, err)
 	}
-	if header.Magic != core.WALMagic {
+	if header.Magic != core.WALMagicNumber {
 		file.Close()
-		return nil, fmt.Errorf("invalid magic number in segment %s: got %x, want %x", path, header.Magic, core.WALMagic)
+		return nil, fmt.Errorf("invalid magic number in segment %s: got %x, want %x", path, header.Magic, core.WALMagicNumber)
 	}
 
-	index, err := parseSegmentFileName(filepath.Base(path))
+	index, err := core.ParseSegmentFileName(filepath.Base(path))
 	if err != nil {
 		file.Close()
 		return nil, fmt.Errorf("could not parse segment index from path %s: %w", path, err)

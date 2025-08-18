@@ -23,7 +23,6 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
-	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -221,7 +220,7 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 		MetadataSyncIntervalSeconds:  int(metadataSyncInterval.Seconds()),
 		Metrics:                      engine.NewEngineMetrics(true, "engine_"), // This might need adjustment if metrics are handled differently
 		SSTableCompressor:            sstCompressor,
-		WALSyncMode:                  wal.WALSyncMode(appCfg.Engine.WAL.SyncMode),
+		WALSyncMode:                  core.WALSyncMode(appCfg.Engine.WAL.SyncMode),
 		WALBatchSize:                 appCfg.Engine.WAL.BatchSize,
 		WALFlushIntervalMs:           int(walFlushInterval.Milliseconds()),
 		RetentionPeriod:              appCfg.Engine.RetentionPeriod,
