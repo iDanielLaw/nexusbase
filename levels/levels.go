@@ -38,6 +38,8 @@ const (
 	PickLargestAvgKeySize
 	// PickNewest selects the table with the largest ID (newest).
 	PickNewest
+	// PickHighestTombstoneDensity selects the table with the highest ratio of tombstones to keys.
+	PickHighestTombstoneDensity
 )
 
 func GetTableIDs(tables []*sstable.SSTable) []uint64 {
@@ -61,13 +63,23 @@ type LevelsManager struct {
 	tracer         trace.Tracer  // For creating spans
 	// fallbackStrategy defines the logic to use when no table has a clear overlap advantage.
 	fallbackStrategy CompactionFallbackStrategy
+	tombstoneWeight  float64
+	overlapWeight    float64
 }
 
 var _ Manager = (*LevelsManager)(nil)
 
 // NewLevelsManager creates a new LevelsManager.
 // Corresponds to FR5.1, FR5.2.
-func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, tracer trace.Tracer, fallbackStrategy CompactionFallbackStrategy) (*LevelsManager, error) {
+func NewLevelsManager(
+	maxLevels int,
+	maxL0Files int,
+	baseTargetSize int64,
+	tracer trace.Tracer,
+	fallbackStrategy CompactionFallbackStrategy,
+	tombstoneWeight float64,
+	overlapWeight float64,
+) (*LevelsManager, error) {
 	lm := &LevelsManager{
 		levels:           make([]*LevelState, maxLevels),
 		maxLevels:        maxLevels,
@@ -75,6 +87,8 @@ func NewLevelsManager(maxLevels int, maxL0Files int, baseTargetSize int64, trace
 		baseTargetSize:   baseTargetSize,
 		tracer:           tracer,
 		fallbackStrategy: fallbackStrategy,
+		tombstoneWeight:  tombstoneWeight,
+		overlapWeight:    overlapWeight,
 	}
 	for i := 0; i < maxLevels; i++ {
 		lm.levels[i] = newLevelState(i)
@@ -138,11 +152,9 @@ func (lm *LevelsManager) removeTablesUnsafe(levelNum int, tablesToRemove []uint6
 	if levelNum < 0 || levelNum >= lm.maxLevels {
 		return fmt.Errorf("invalid level number %d", levelNum)
 	}
-
-	for _, tableID := range tablesToRemove {
-		lm.levels[levelNum].Remove(tableID)
+	if len(tablesToRemove) > 0 {
+		lm.levels[levelNum].RemoveBatch(tablesToRemove)
 	}
-
 	return nil
 }
 
@@ -342,11 +354,10 @@ func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRang
 }
 
 // PickCompactionCandidateForLevelN selects an SSTable from level N (N > 0) for compaction.
-// The strategy is:
-// 1. Find the table(s) with the smallest total size of overlapping tables in level N+1.
-//    This minimizes write amplification.
-// 2. If there is a tie (e.g., multiple tables with zero overlap), use a configurable
-//    fallback strategy to pick one from the tied candidates.
+// It uses a scoring model to balance two factors:
+// 1. Tombstone Density: Prioritizes tables with a high ratio of deleted entries to reclaim disk space.
+// 2. Overlap Penalty: Penalizes tables that overlap with a large amount of data in the next level.
+// If multiple tables have the same highest score, a fallback strategy is used to break the tie.
 func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable.SSTable {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
@@ -362,21 +373,35 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 
 	tables := level.GetTables()
 	var candidates []*sstable.SSTable
-	minOverlapSize := int64(math.MaxInt64)
+	bestScore := -math.MaxFloat64
 
 	for _, table := range tables {
+		// 1. Calculate Tombstone Density Score
+		var tombstoneDensity float64
+		if table.KeyCount() > 0 {
+			tombstoneDensity = float64(table.TombstoneCount()) / float64(table.KeyCount())
+		}
+
+		// 2. Calculate Overlap Penalty
 		minKey, maxKey := table.MinKey(), table.MaxKey()
 		overlappingTables := lm.getOverlappingTablesLocked(levelNum+1, minKey, maxKey)
-
 		var currentOverlapSize int64
 		for _, overlapTable := range overlappingTables {
 			currentOverlapSize += overlapTable.Size()
 		}
+		var overlapPenalty float64
+		if table.Size() > 0 {
+			// Normalize overlap by table size to get a write amplification factor for this compaction
+			overlapPenalty = float64(currentOverlapSize) / float64(table.Size())
+		}
 
-		if currentOverlapSize < minOverlapSize {
-			minOverlapSize = currentOverlapSize
+		// 3. Combine into a final score using configured weights. Higher is better.
+		score := (lm.tombstoneWeight * tombstoneDensity) - (lm.overlapWeight * overlapPenalty)
+
+		if score > bestScore {
+			bestScore = score
 			candidates = []*sstable.SSTable{table} // Start a new list of candidates
-		} else if currentOverlapSize == minOverlapSize {
+		} else if score == bestScore {
 			candidates = append(candidates, table) // Add to the list of candidates
 		}
 	}
@@ -491,7 +516,21 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 			}
 		}
 		return newestTable
-
+	case PickHighestTombstoneDensity:
+		// Fallback: Pick the table with the highest tombstone density among candidates.
+		var bestTable *sstable.SSTable
+		maxDensity := -1.0
+		for _, table := range candidates {
+			var density float64
+			if table.KeyCount() > 0 {
+				density = float64(table.TombstoneCount()) / float64(table.KeyCount())
+			}
+			if bestTable == nil || density > maxDensity {
+				maxDensity = density
+				bestTable = table
+			}
+		}
+		return bestTable
 	case PickOldest:
 		fallthrough // Fallthrough to the default case
 	default:

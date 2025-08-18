@@ -51,9 +51,10 @@ type CompactionConfig struct {
 	LevelsSizeMultiplier   int    `yaml:"levels_size_multiplier"`
 	MaxLevels              int    `yaml:"max_levels"`
 	CheckInterval          string `yaml:"check_interval"`
-	FallbackStrategy       string `yaml:"fallback_strategy"`
+	FallbackStrategy     string  `yaml:"fallback_strategy"`
+	TombstoneWeight      float64 `yaml:"tombstone_weight"`
+	OverlapPenaltyWeight float64 `yaml:"overlap_penalty_weight"`
 }
-
 // WALConfig holds Write-Ahead Log specific configurations.
 type WALConfig struct {
 	SyncMode            string `yaml:"sync_mode"`
@@ -193,7 +194,9 @@ func Load(r io.Reader) (*Config, error) {
 				LevelsSizeMultiplier:   5,
 				MaxLevels:              7,
 				CheckInterval:          "120s",
-				FallbackStrategy:       "PickOldest",
+				FallbackStrategy:         "PickOldest",
+				TombstoneWeight:          1.5, // Default weight for tombstone priority
+				OverlapPenaltyWeight:     1.0, // Default weight for overlap penalty
 			},
 			WAL: WALConfig{
 				SyncMode:            "interval",

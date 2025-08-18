@@ -130,6 +130,56 @@ func TestLevelState_Remove(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found in LevelState")
 }
 
+func TestLevelState_RemoveBatch(t *testing.T) {
+	ls := newLevelStateForTest(1) // Use L1+ for predictable order
+
+	tbl1 := newTestSSTable(t, 1, []struct{ key, value []byte }{{[]byte("a"), makeValue(10)}})
+	tbl2 := newTestSSTable(t, 2, []struct{ key, value []byte }{{[]byte("b"), makeValue(20)}})
+	tbl3 := newTestSSTable(t, 3, []struct{ key, value []byte }{{[]byte("c"), makeValue(30)}})
+	tbl4 := newTestSSTable(t, 4, []struct{ key, value []byte }{{[]byte("d"), makeValue(40)}})
+
+	// Helper to reset state for sub-tests
+	resetState := func() {
+		ls.SetTables([]*sstable.SSTable{tbl1, tbl2, tbl3, tbl4})
+		require.Equal(t, tbl1.Size()+tbl2.Size()+tbl3.Size()+tbl4.Size(), ls.TotalSize())
+		assertTableOrder(t, ls, []uint64{1, 2, 3, 4})
+	}
+
+	t.Run("Remove subset of tables", func(t *testing.T) {
+		resetState()
+		ls.RemoveBatch([]uint64{2, 4}) // Remove from middle and end
+
+		assertTableOrder(t, ls, []uint64{1, 3})
+		assert.Equal(t, tbl1.Size()+tbl3.Size(), ls.TotalSize(), "Total size should be updated correctly")
+		_, exists2 := ls.tableMap[2]
+		_, exists4 := ls.tableMap[4]
+		assert.False(t, exists2, "Table 2 should be removed from map")
+		assert.False(t, exists4, "Table 4 should be removed from map")
+	})
+
+	t.Run("Remove all tables", func(t *testing.T) {
+		resetState()
+		ls.RemoveBatch([]uint64{1, 2, 3, 4})
+
+		assertTableOrder(t, ls, []uint64{})
+		assert.Zero(t, ls.TotalSize(), "Total size should be zero after removing all tables")
+		assert.Empty(t, ls.tableMap, "Table map should be empty")
+	})
+
+	t.Run("Remove with non-existent IDs", func(t *testing.T) {
+		resetState()
+		// Attempt to remove existing (1, 3) and non-existent (99, 100) IDs
+		ls.RemoveBatch([]uint64{1, 99, 3, 100})
+
+		assertTableOrder(t, ls, []uint64{2, 4})
+		assert.Equal(t, tbl2.Size()+tbl4.Size(), ls.TotalSize(), "Total size should be correct after removing a mix of IDs")
+		_, exists1 := ls.tableMap[1]
+		_, exists3 := ls.tableMap[3]
+		assert.False(t, exists1, "Table 1 should be removed from map")
+		assert.False(t, exists3, "Table 3 should be removed from map")
+	})
+}
+
 func TestLevelState_GetTables_IsCopy(t *testing.T) {
 	ls := newLevelStateForTest(0)
 

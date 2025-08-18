@@ -227,6 +227,8 @@ func main() {
 		fallbackStrategy = levels.PickLargestAvgKeySize
 	case "picknewest":
 		fallbackStrategy = levels.PickNewest
+	case "pickhighesttombstonedensity":
+		fallbackStrategy = levels.PickHighestTombstoneDensity
 	case "pickoldest":
 		fallthrough
 	default:
@@ -265,6 +267,8 @@ func main() {
 		IndexMaxL0Files:                cfg.Engine.Index.L0TriggerFileCount,
 		IndexBaseTargetSize:            cfg.Engine.Index.BaseTargetSizeBytes,
 		CompactionFallbackStrategy:     fallbackStrategy,
+		CompactionTombstoneWeight:      cfg.Engine.Compaction.TombstoneWeight,
+		CompactionOverlapWeight:        cfg.Engine.Compaction.OverlapPenaltyWeight,
 		Logger:                         logger,
 	}
 

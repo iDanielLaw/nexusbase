@@ -100,7 +100,15 @@ func setupServiceManagerTest(t *testing.T, opts StorageEngineOptions) (*storageE
 	t.Helper()
 
 	// Create a minimal engine with only the components needed by ServiceManager
-	lm, _ := levels.NewLevelsManager(opts.MaxLevels, opts.MaxL0Files, opts.TargetSSTableSize, trace.NewNoopTracerProvider().Tracer("test"), opts.CompactionFallbackStrategy)
+	lm, _ := levels.NewLevelsManager(
+		opts.MaxLevels,
+		opts.MaxL0Files,
+		opts.TargetSSTableSize,
+		trace.NewNoopTracerProvider().Tracer("test"),
+		opts.CompactionFallbackStrategy,
+		opts.CompactionTombstoneWeight,
+		opts.CompactionOverlapWeight,
+	)
 
 	eng := &storageEngine{
 		opts:          opts,

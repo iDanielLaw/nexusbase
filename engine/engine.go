@@ -87,6 +87,8 @@ type StorageEngineOptions struct {
 	IndexMaxL0Files                int
 	IndexMaxLevels                 int
 	IndexBaseTargetSize            int64
+	CompactionTombstoneWeight      float64 // New: Weight for tombstone score
+	CompactionOverlapWeight        float64 // New: Weight for overlap penalty
 	Logger                         *slog.Logger
 	Clock                          clock.Clock // Clock interface for testing, defaults to SystemClock
 
@@ -765,7 +767,14 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 			cacheWithMetrics.SetMetrics(e.metrics.CacheHits, e.metrics.CacheMisses)
 		}
 	}
-	lm, err := levels.NewLevelsManager(e.opts.MaxLevels, e.opts.MaxL0Files, e.opts.TargetSSTableSize, e.tracer, e.opts.CompactionFallbackStrategy)
+	lm, err := levels.NewLevelsManager(
+		e.opts.MaxLevels,
+		e.opts.MaxL0Files,
+		e.opts.TargetSSTableSize,
+		e.tracer,
+		e.opts.CompactionFallbackStrategy,
+		e.opts.CompactionTombstoneWeight,
+		e.opts.CompactionOverlapWeight)
 	if err != nil {
 		e.logger.Error("failed to create levels manager", "error", err)
 		return fmt.Errorf("failed to create levels manager: %w", err)
