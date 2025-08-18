@@ -545,6 +545,125 @@ func (lm *LevelsManager) PickCompactionCandidateForLevelN(levelNum int) *sstable
 	}
 }
 
+// pickFromCandidatesUsingFallback applies the configured fallback strategy to select a single
+// SSTable from a list of candidates that all have the same best compaction score.
+func (lm *LevelsManager) pickFromCandidatesUsingFallback(candidates []*sstable.SSTable) *sstable.SSTable {
+	// If we are here, it means multiple tables have the same best score.
+	// This is common when the score is dominated by zero overlap.
+	// We use the fallback strategy to choose among these candidates.
+	switch lm.fallbackStrategy {
+	case PickLargest:
+		var largestTable *sstable.SSTable
+		var maxSize int64 = -1
+		for _, table := range candidates {
+			if table.Size() > maxSize {
+				maxSize = table.Size()
+				largestTable = table
+			}
+		}
+		return largestTable
+	case PickSmallest:
+		var smallestTable *sstable.SSTable
+		for _, table := range candidates {
+			if smallestTable == nil || table.Size() < smallestTable.Size() {
+				smallestTable = table
+			}
+		}
+		return smallestTable
+	case PickMostKeys:
+		var mostKeysTable *sstable.SSTable
+		for _, table := range candidates {
+			if mostKeysTable == nil || table.KeyCount() > mostKeysTable.KeyCount() {
+				mostKeysTable = table
+			}
+		}
+		return mostKeysTable
+	case PickSmallestAvgKeySize:
+		var smallestAvgSizeTable *sstable.SSTable
+		minAvgSize := math.MaxFloat64
+		for _, table := range candidates {
+			if table.KeyCount() == 0 {
+				continue
+			}
+			avgSize := float64(table.Size()) / float64(table.KeyCount())
+			if avgSize < minAvgSize {
+				minAvgSize = avgSize
+				smallestAvgSizeTable = table
+			}
+		}
+		return smallestAvgSizeTable
+	case PickLargestAvgKeySize:
+		var largestAvgSizeTable *sstable.SSTable
+		maxAvgSize := -1.0
+		for _, table := range candidates {
+			if table.KeyCount() == 0 {
+				continue
+			}
+			avgSize := float64(table.Size()) / float64(table.KeyCount())
+			if avgSize > maxAvgSize {
+				maxAvgSize = avgSize
+				largestAvgSizeTable = table
+			}
+		}
+		return largestAvgSizeTable
+	case PickOldestByTimestamp:
+		sort.Slice(candidates, func(i, j int) bool {
+			return bytes.Compare(candidates[i].MinKey(), candidates[j].MinKey()) < 0
+		})
+		if len(candidates) > 0 {
+			return candidates[0]
+		}
+		return nil
+	case PickFewestKeys:
+		var fewestKeysTable *sstable.SSTable
+		minKeyCount := uint64(math.MaxUint64)
+		for _, table := range candidates {
+			if table.KeyCount() < minKeyCount {
+				minKeyCount = table.KeyCount()
+				fewestKeysTable = table
+			}
+		}
+		return fewestKeysTable
+	case PickRandom:
+		if len(candidates) > 0 {
+			return candidates[rand.Intn(len(candidates))]
+		}
+		return nil
+	case PickNewest:
+		var newestTable *sstable.SSTable
+		for _, table := range candidates {
+			if newestTable == nil || table.ID() > newestTable.ID() {
+				newestTable = table
+			}
+		}
+		return newestTable
+	case PickHighestTombstoneDensity:
+		var bestTable *sstable.SSTable
+		maxDensity := -1.0
+		for _, table := range candidates {
+			var density float64
+			if table.KeyCount() > 0 {
+				density = float64(table.TombstoneCount()) / float64(table.KeyCount())
+			}
+			if bestTable == nil || density > maxDensity {
+				maxDensity = density
+				bestTable = table
+			}
+		}
+		return bestTable
+	case PickOldest:
+		fallthrough
+	default:
+		var oldestTable *sstable.SSTable
+		for _, table := range candidates {
+			if oldestTable == nil || table.ID() < oldestTable.ID() {
+				oldestTable = table
+			}
+		}
+		return oldestTable
+	}
+}
+
 // ApplyCompactionResults updates the levels structure after a compaction.
 // It removes oldTables and adds newTables to their respective levels.
 // For L0->L1 compaction: sourceLevelNum = 0, targetLevelNum = 1.
