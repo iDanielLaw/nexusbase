@@ -1121,8 +1121,3 @@ func (e *storageEngine) SetSequenceNumber(seqNum uint64) {
 	e.sequenceNumber.Store(seqNum)
 	e.logger.Info("Engine sequence number force-set", "new_seq_num", seqNum)
 }
-
-// GetSequenceNumber returns the current sequence number of the engine.
-func (e *storageEngine) GetSequenceNumber() uint64 {
-	return e.sequenceNumber.Load()
-}
