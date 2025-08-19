@@ -11,6 +11,8 @@ import (
 	apiv1 "github.com/INLOpen/nexusbase/api/v1"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/snapshot"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -248,6 +250,15 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 
 	entryChan, errChan, err := f.client.StreamWAL(ctx, startSeqNum)
 	if err != nil {
+		// A common "good" error is that the requested WAL segment has been purged by the leader.
+		// The gRPC status code for this should be `NotFound`.
+		if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
+			f.logger.Warn("Requested WAL segment not found on leader, forcing snapshot bootstrap.", "from_seq_num", startSeqNum, "error", err)
+			// We can force a bootstrap by deleting our local data. This is a simple but effective strategy.
+			// A more advanced strategy could be to just trigger the bootstrap logic without deleting.
+			// For now, we'll just return an error that the main loop will catch, causing a full re-sync check.
+			return fmt.Errorf("wal segment purged on leader, requires bootstrap: %w", err)
+		}
 		return fmt.Errorf("cannot start WAL streaming: %w", err)
 	}
 
@@ -261,6 +272,9 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 			if !ok {
 				if err := <-errChan; err != nil {
 					return fmt.Errorf("WAL stream terminated with error: %w", err)
+				} else if ctx.Err() != nil {
+					// If the context was cancelled, the stream might close cleanly before the error is sent.
+					return ctx.Err()
 				}
 				f.logger.Info("WAL stream finished cleanly.")
 				return nil
