@@ -271,8 +271,8 @@ func (m *MockQueryResultIterator) Put(item *core.QueryResultItem) {
 	// No-op for the mock, as we don't need to manage a pool in tests.
 }
 
-func (m *MockQueryResultIterator) UnderlyingAt() ([]byte, []byte, core.EntryType, uint64) {
+func (m *MockQueryResultIterator) UnderlyingAt() (*core.IteratorNode, error) {
 	// This is a mock implementation. Return nil or sensible defaults.
 	// Tests that need specific underlying data can extend this mock.
-	return nil, nil, 0, 0
+	return nil, nil
 }

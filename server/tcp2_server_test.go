@@ -157,7 +157,7 @@ func TestTCP2Server_HandlerConnection(t *testing.T) {
 
 		mockAuth.AuthenticateUserPassFunc = func(username, password string) error { return nil }
 		fields, _ := core.NewFieldValuesFromMap(map[string]interface{}{"value": 123.0})
-		mockIterator := NewMockQueryResultIterator([]*core.QueryResultItem{
+		mockIterator := engine.NewMockQueryResultIterator([]*core.QueryResultItem{
 			{Metric: "test.metric", Timestamp: 1, Fields: fields},
 			{Metric: "test.metric", Timestamp: 2, Fields: fields},
 		}, nil)
