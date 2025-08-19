@@ -642,6 +642,29 @@ func TestStorageEngine_FlushRemainingMemtables(t *testing.T) {
 	require.NoError(t, err, "CURRENT file should exist after final flush")
 }
 
+
+// mockWALReader is a mock implementation of wal.WALReader for testing.
+type mockWALReader struct {
+	mock.Mock
+}
+
+func (m *mockWALReader) Next(ctx context.Context) (*core.WALEntry, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*core.WALEntry), args.Error(1)
+}
+
+func (m *mockWALReader) Close() error {
+	args := m.Called()
+	if len(args) == 0 {
+		return nil
+	}
+	return args.Error(0)
+}
+
+
 // mockWAL is a mock implementation of the wal.WALInterface for testing.
 type mockWAL struct {
 	mock.Mock
@@ -703,4 +726,12 @@ func TestStorageEngine_PurgeWALSegments(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (m *mockWAL) OpenReader(fromSeqNum uint64) (wal.WALReader, error) {
+	args := m.Called(fromSeqNum)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(wal.WALReader), args.Error(1)
 }
