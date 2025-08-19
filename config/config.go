@@ -80,6 +80,7 @@ type EngineConfig struct {
 	DataDir              string           `yaml:"data_dir"`
 	RetentionPeriod      string           `yaml:"retention_period"`
 	MetadataSyncInterval string           `yaml:"metadata_sync_interval"`
+	ReplicationSyncTimeoutMs int `yaml:"replication_sync_timeout_ms"`
 	CheckpointInterval   string           `yaml:"checkpoint_interval"` // Added for completeness
 	Memtable             MemtableConfig   `yaml:"memtable"`
 	SSTable              SSTableConfig    `yaml:"sstable"`
@@ -176,6 +177,7 @@ func Load(r io.Reader) (*Config, error) {
 			DataDir:              "./data",
 			RetentionPeriod:      "",
 			MetadataSyncInterval: "60s",
+			ReplicationSyncTimeoutMs:       0, // Default to async
 			CheckpointInterval:   "300s", // Default to 5 minutes
 			Memtable: MemtableConfig{
 				SizeThresholdBytes: 4 * 1024 * 1024, // 4 MiB
