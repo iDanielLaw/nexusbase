@@ -18,8 +18,9 @@ import (
 // process from bootstrapping via snapshot to continuous WAL streaming.
 type Follower struct {
 	leaderAddr string
-	dataDir    string
-	engineOpts engine.StorageEngineOptions // Store engine options for restarts
+	dataDir            string
+	engineOpts         engine.StorageEngineOptions // Store engine options for restarts
+	bootstrapThreshold uint64                      // If lag is > this, bootstrap from snapshot.
 
 	mu                sync.RWMutex
 	engine            engine.StorageEngineInterface
@@ -33,18 +34,19 @@ type Follower struct {
 }
 
 // NewFollower creates and initializes a new Follower instance.
-func NewFollower(leaderAddr string, engineOpts engine.StorageEngineOptions, logger *slog.Logger) (*Follower, error) {
+func NewFollower(leaderAddr string, bootstrapThreshold uint64, engineOpts engine.StorageEngineOptions, logger *slog.Logger) (*Follower, error) {
 	// Ensure the data directory exists
 	if err := os.MkdirAll(engineOpts.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", engineOpts.DataDir, err)
 	}
 
 	f := &Follower{
-		leaderAddr:   leaderAddr,
-		dataDir:      engineOpts.DataDir,
-		engineOpts:   engineOpts,
-		logger:       logger.With("component", "Follower"),
-		shutdownChan: make(chan struct{}),
+		leaderAddr:         leaderAddr,
+		dataDir:            engineOpts.DataDir,
+		engineOpts:         engineOpts,
+		bootstrapThreshold: bootstrapThreshold,
+		logger:             logger.With("component", "Follower"),
+		shutdownChan:       make(chan struct{}),
 	}
 
 	return f, nil
@@ -175,15 +177,25 @@ func (f *Follower) syncWithLeader() error {
 	localSeqNum := f.lastAppliedSeqNum
 	f.mu.RUnlock()
 
-	if localSeqNum == 0 {
-		f.logger.Info("Local state is empty, bootstrapping from snapshot.")
+	// Decide whether to bootstrap or stream WAL
+	// Bootstrap if:
+	// 1. We have no local data (localSeqNum == 0).
+	// 2. We are too far behind the leader (lag > bootstrapThreshold).
+	lag := leaderState.GetLatestSequenceNumber() - localSeqNum
+	shouldBootstrap := localSeqNum == 0 || (f.bootstrapThreshold > 0 && lag > f.bootstrapThreshold)
+
+	if shouldBootstrap {
+		f.logger.Info("Follower state requires bootstrap.", "local_seq_num", localSeqNum, "leader_seq_num", leaderState.GetLatestSequenceNumber(), "lag", lag, "threshold", f.bootstrapThreshold)
 		snapshotSeqNum, err := f.bootstrapFromSnapshot(ctx)
 		if err != nil {
 			return fmt.Errorf("snapshot bootstrap failed: %w", err)
 		}
 		f.mu.Lock()
 		f.lastAppliedSeqNum = snapshotSeqNum
+		localSeqNum = snapshotSeqNum
 		f.mu.Unlock()
+	} else {
+		f.logger.Info("Follower state is recent enough, proceeding with WAL catch-up.", "local_seq_num", localSeqNum, "leader_seq_num", leaderState.GetLatestSequenceNumber(), "lag", lag)
 	}
 
 	return f.streamAndApplyWAL(ctx)
