@@ -105,6 +105,12 @@ func (s *ReplicationGRPCServer) StreamWAL(req *apiv1.StreamWALRequest, stream ap
 	for {
 		coreEntry, err := reader.Next(ctx)
 		if err != nil {
+			// NEW: Check if the error is because the requested segment was not found (purged).
+			if os.IsNotExist(errors.Unwrap(err)) {
+				s.logger.Warn("Follower requested a purged WAL segment", "from_seq_num", req.GetFromSequenceNumber(), "error", err)
+				return status.Errorf(codes.NotFound, "requested WAL segment has been purged: %v", err)
+			}
+
 			if err == io.EOF || status.Code(err) == codes.Canceled || err == context.Canceled || err == context.DeadlineExceeded {
 				s.logger.Info("Stopping WAL stream", "reason", err)
 				return nil // Cleanly exit the stream

@@ -524,8 +524,11 @@ func (r *walReader) Next(ctx context.Context) (*core.WALEntry, error) {
 
 		// 2. Buffer is empty, ensure we have a segment reader.
 		if r.currentSegReader == nil {
-			if !r.openNextSegment() {
-				// No more segments, we are at the tip. Wait for new data.
+			err := r.openNextSegment()
+			if err != nil {
+				return nil, err // Propagate error (e.g., segment not found)
+			}
+			if r.currentSegReader == nil { // No error, but no segment opened (at the tip)
 				if err := r.waitForData(ctx); err != nil {
 					return nil, err
 				}
@@ -566,8 +569,9 @@ func (r *walReader) Next(ctx context.Context) (*core.WALEntry, error) {
 
 // openNextSegment tries to open the next available WAL segment for reading.
 // It returns true if a new segment was successfully opened.
+// It returns an error if a segment is expected but not found.
 // MUST be called with the reader's lock held.
-func (r *walReader) openNextSegment() bool {
+func (r *walReader) openNextSegment() error {
 	r.wal.mu.Lock()
 	defer r.wal.mu.Unlock()
 
@@ -588,20 +592,24 @@ func (r *walReader) openNextSegment() bool {
 	}
 
 	if nextSegIndex == 0 {
-		return false // No more segments to open.
+		return nil // No more segments to open, we are at the tip.
 	}
 
 	path := filepath.Join(r.wal.dir, core.FormatSegmentFileName(nextSegIndex))
 	segReader, err := OpenSegmentForRead(path)
 	if err != nil {
-		r.wal.logger.Warn("Failed to open next segment for reading, will wait", "segment", nextSegIndex, "error", err)
-		return false
+		if os.IsNotExist(err) {
+			// This is a critical error for the reader. The segment is gone.
+			return fmt.Errorf("segment %d not found, likely purged: %w", nextSegIndex, err)
+		}
+		r.wal.logger.Error("Failed to open next segment for reading", "segment", nextSegIndex, "error", err)
+		return err
 	}
 
 	r.wal.logger.Debug("WAL reader opened new segment", "segment", nextSegIndex)
 	r.currentSegReader = segReader
 	r.currentSegIndex = nextSegIndex
-	return true
+	return nil
 }
 
 // waitForData blocks until new data is written to the WAL or the context is cancelled.
