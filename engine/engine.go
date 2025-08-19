@@ -218,7 +218,6 @@ type storageEngine struct {
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
-	replicationTracker  *core.ReplicationTracker
 }
 
 var _ StorageEngineInterface = (*storageEngine)(nil)
