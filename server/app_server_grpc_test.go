@@ -72,7 +72,7 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup
-			mockEngine := new(MockStorageEngine)
+			mockEngine := new(engine.MockStorageEngine)
 			testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 			grpcPort := findFreePort(t)
 			tcpPort := 0 // Disable TCP server for this test
@@ -172,10 +172,10 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 
 // setupTestGRPCServer is a helper function to initialize a server with a mock engine
 // and return a gRPC client connected to it, along with a cleanup function.
-func setupTestGRPCServer(t *testing.T) (tsdb.TSDBServiceClient, *MockStorageEngine, func()) {
+func setupTestGRPCServer(t *testing.T) (tsdb.TSDBServiceClient, *engine.MockStorageEngine, func()) {
 	t.Helper()
 
-	mockEngine := new(MockStorageEngine)
+	mockEngine := new(engine.MockStorageEngine)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	grpcPort := findFreePort(t)
 
@@ -354,7 +354,7 @@ func TestAppServer_GRPC_Query_AggregatedData(t *testing.T) {
 			"count(*)":   100.0,
 		},
 	}
-	mockIterator := NewMockQueryResultIterator([]*core.QueryResultItem{mockItem}, nil)
+	mockIterator := engine.NewMockQueryResultIterator([]*core.QueryResultItem{mockItem}, nil)
 
 	// Setup mock expectation
 	mockEngine.On("Query", mock.Anything, mock.MatchedBy(func(params core.QueryParams) bool {
@@ -484,7 +484,7 @@ func generateTestCerts(t *testing.T) (string, string) {
 }
 func TestAppServer_HealthCheck_Failure(t *testing.T) {
 	// 1. Setup
-	mockEngine := new(MockStorageEngine)
+	mockEngine := new(engine.MockStorageEngine)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	grpcPort := findFreePort(t)
 	tcpPort := 0 // Disable TCP server for this test
@@ -542,7 +542,7 @@ func TestAppServer_HealthCheck_Failure(t *testing.T) {
 
 func TestAppServer_TLS_BadCert(t *testing.T) {
 	// 1. Setup Server
-	mockEngine := new(MockStorageEngine)
+	mockEngine := new(engine.MockStorageEngine)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	grpcPort := findFreePort(t)
 	tcpPort := 0 // Disable TCP server for this test

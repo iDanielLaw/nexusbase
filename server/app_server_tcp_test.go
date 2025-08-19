@@ -288,7 +288,7 @@ func TestTCPServer_Query_RawData(t *testing.T) {
 	defer server.close(t)
 
 	// Mock the iterator
-	mockIterator := NewMockQueryResultIterator(nil, nil) // No data for simplicity, Next() will return false.
+	mockIterator := engine.NewMockQueryResultIterator(nil, nil) // No data for simplicity, Next() will return false.
 
 	// Make the mock expectation more specific instead of using mock.Anything.
 	server.mockEngine.On("Query", mock.Anything, mock.MatchedBy(func(params core.QueryParams) bool {
@@ -335,7 +335,7 @@ func TestTCPServer_Query_RawData_WithResults(t *testing.T) {
 	}
 
 	// Mock the iterator
-	mockIterator := NewMockQueryResultIterator(points, nil)
+	mockIterator := engine.NewMockQueryResultIterator(points, nil)
 
 	// Make the mock expectation more specific
 	server.mockEngine.On("Query", mock.Anything, mock.MatchedBy(func(params core.QueryParams) bool {
@@ -375,7 +375,7 @@ func TestTCPServer_Query_RawData_WithResults(t *testing.T) {
 }
 
 func TestExecutor_executePush_AutoTimestamp(t *testing.T) {
-	mockEngine := new(MockStorageEngine)
+	mockEngine := new(engine.MockStorageEngine)
 	fixedTime := time.Date(2025, time.July, 13, 10, 0, 0, 0, time.UTC)
 	mockClock := clock.NewMockClock(fixedTime) // สร้าง MockClock ด้วยเวลาที่กำหนดเอง
 
