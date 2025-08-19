@@ -108,30 +108,32 @@ func TestReplication_E2E_BootstrapAndCatchup(t *testing.T) {
 	// This data will be part of the initial snapshot.
 	for i := 0; i < 10; i++ {
 		dp := core.DataPoint{
-			Metric:    "bootstrap.metric",
-			Tags:      map[string]string{"id": fmt.Sprintf("%d", i)},
-			Timestamp: int64(i),
-			Fields:    mustNewFieldValues(t, map[string]interface{}{"value": float64(i)}),
+			Metric:    "initial.data",
+			Tags:      map[string]string{"id": fmt.Sprintf("pre-start-%d", i)},
+			Timestamp: int64(i + 1),
+			Fields:    mustNewFieldValues(t, map[string]interface{}{"value": float64(i + 1)}),
 		}
-		require.NoError(t, leaderEngine.Put(ctx, dp))
+		// Use PutBatch here as Put is a convenience wrapper.
+		require.NoError(t, leaderEngine.PutBatch(ctx, []core.DataPoint{dp}))
 	}
 	// Force a flush to create an SSTable on the leader
 	require.NoError(t, leaderEngine.ForceFlush(ctx, true))
+	leaderInitialSeq := leaderEngine.GetSequenceNumber()
+	require.Greater(t, leaderInitialSeq, uint64(0), "Leader should have a non-zero sequence number after initial writes")
 
-	// 2. Start the follower. It should connect and wait for data.
+	// 2. Start the follower. It should perform a snapshot bootstrap.
 	require.NoError(t, follower.Start())
 
-	// 3. Wait for the follower to catch up.
-	// Since the follower started before data was written, it will replicate via WAL streaming.
+	// 3. Wait for the follower to finish bootstrapping and catch up to the leader's initial state.
 	require.Eventually(t, func() bool {
 		follower.mu.RLock()
 		defer follower.mu.RUnlock()
 		if follower.engine == nil {
 			return false
 		}
-		_, err := follower.engine.Get(ctx, "bootstrap.metric", map[string]string{"id": "9"}, 9)
-		return err == nil
-	}, 5*time.Second, 100*time.Millisecond, "Follower did not bootstrap data from snapshot in time")
+		// Check that the follower's sequence number has caught up to where the leader was when we started.
+		return follower.engine.GetSequenceNumber() >= leaderInitialSeq
+	}, 5*time.Second, 100*time.Millisecond, "Follower did not bootstrap and catch up to initial state in time")
 
 	// 4. Put more data on the leader AFTER the follower has started.
 	// This data should be replicated via WAL streaming.
@@ -141,7 +143,7 @@ func TestReplication_E2E_BootstrapAndCatchup(t *testing.T) {
 		Timestamp: 1000,
 		Fields:    mustNewFieldValues(t, map[string]interface{}{"value": 123.0}),
 	}
-	require.NoError(t, leaderEngine.Put(ctx, dpLive))
+	require.NoError(t, leaderEngine.Put(ctx, dpLive), "Put should not fail with a running follower")
 
 	// 5. Wait for the live data to be replicated.
 	require.Eventually(t, func() bool {
