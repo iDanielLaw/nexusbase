@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net"
 
@@ -15,6 +16,7 @@ import (
 
 	apiv1 "github.com/INLOpen/nexusbase/api/v1"
 	"github.com/INLOpen/nexusbase/config"
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 )
 
@@ -73,8 +75,51 @@ func (s *ReplicationGRPCServer) Stop() {
 // This is a placeholder implementation based on the plan in `docs/TODO-data-replication.md`.
 func (s *ReplicationGRPCServer) StreamWAL(req *apiv1.StreamWALRequest, stream apiv1.ReplicationService_StreamWALServer) error {
 	s.logger.Info("Received StreamWAL request", "from_sequence_number", req.GetFromSequenceNumber())
-	// TODO: Implement actual WAL reading and streaming logic.
-	return status.Errorf(codes.Unimplemented, "method StreamWAL not implemented")
+	ctx := stream.Context()
+
+	// The engine interface needs to expose the WAL. This is a design decision.
+	// We define a local interface to check if the engine supports this.
+	type walProvider interface {
+		GetWAL() core.WALInterface
+	}
+
+	engineWithWAL, ok := s.engine.(walProvider)
+	if !ok {
+		s.logger.Error("Storage engine does not support providing a WAL for replication")
+		return status.Error(codes.Unimplemented, "replication is not supported by the current storage engine")
+	}
+
+	reader, err := engineWithWAL.GetWAL().OpenReader(req.GetFromSequenceNumber())
+	if err != nil {
+		s.logger.Error("Failed to open WAL reader", "error", err)
+		return status.Errorf(codes.Internal, "could not start WAL stream: %v", err)
+	}
+	defer reader.Close()
+
+	for {
+		coreEntry, err := reader.Next(ctx)
+		if err != nil {
+			if err == io.EOF || status.Code(err) == codes.Canceled || err == context.Canceled || err == context.DeadlineExceeded {
+				s.logger.Info("Stopping WAL stream", "reason", err)
+				return nil // Cleanly exit the stream
+			}
+			s.logger.Error("Error reading next WAL entry", "error", err)
+			return status.Errorf(codes.Internal, "error during WAL stream: %v", err)
+		}
+
+		// Convert core.WALEntry to apiv1.WALEntry
+		apiEntry, err := s.convertCoreWALEntryToAPI(coreEntry)
+		if err != nil {
+			s.logger.Error("Failed to convert WAL entry for replication", "seq_num", coreEntry.SeqNum, "error", err)
+			// Skip corrupted/unconvertible entries? For now, we fail the stream.
+			return status.Errorf(codes.Internal, "failed to process WAL entry %d: %v", coreEntry.SeqNum, err)
+		}
+
+		if err := stream.Send(apiEntry); err != nil {
+			s.logger.Warn("Failed to send WAL entry to follower", "error", err)
+			return err
+		}
+	}
 }
 
 // GetLatestState returns the latest sequence number from the leader.
@@ -91,4 +136,40 @@ func (s *ReplicationGRPCServer) GetSnapshot(req *apiv1.SnapshotRequest, stream a
 	s.logger.Info("Received GetSnapshot request")
 	// TODO: Implement snapshot creation and streaming logic.
 	return status.Errorf(codes.Unimplemented, "method GetSnapshot not implemented")
+}
+
+func (s *ReplicationGRPCServer) convertCoreWALEntryToAPI(coreEntry *core.WALEntry) (*apiv1.WALEntry, error) {
+	apiEntry := &apiv1.WALEntry{
+		SequenceNumber:  coreEntry.SeqNum,
+		WalSegmentIndex: coreEntry.SegmentIndex,
+	}
+
+	switch coreEntry.EntryType {
+	case core.EntryTypePutEvent:
+		apiEntry.Payload = &apiv1.WALEntry_PutEvent{
+			PutEvent: &apiv1.PutEvent{
+				Key:   coreEntry.Key,
+				Value: coreEntry.Value,
+			},
+		}
+	case core.EntryTypeDelete:
+		apiEntry.Payload = &apiv1.WALEntry_DeleteEvent{
+			DeleteEvent: &apiv1.DeleteEvent{
+				Key: coreEntry.Key,
+			},
+		}
+	case core.EntryTypeDeleteSeries:
+		apiEntry.Payload = &apiv1.WALEntry_DeleteSeriesEvent{
+			DeleteSeriesEvent: &apiv1.DeleteSeriesEvent{
+				KeyPrefix: coreEntry.Key,
+			},
+		}
+	case core.EntryTypeDeleteRange:
+		// TODO: The core.WALEntry for DeleteRange needs to be properly defined.
+		// Assuming the value contains the start and end timestamps.
+		return nil, status.Errorf(codes.Unimplemented, "delete range replication not yet supported")
+	default:
+		return nil, status.Errorf(codes.Internal, "unknown WAL entry type: %v", coreEntry.EntryType)
+	}
+	return apiEntry, nil
 }

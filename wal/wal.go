@@ -28,6 +28,7 @@ type WAL struct {
 
 	activeSegment  *SegmentWriter
 	segmentIndexes []uint64
+	readerCond     *sync.Cond
 
 	metricsBytesWritten   *expvar.Int
 	metricsEntriesWritten *expvar.Int
@@ -77,12 +78,16 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 		metricsBytesWritten:   opts.BytesWritten,
 		metricsEntriesWritten: opts.EntriesWritten,
 		hookManager:           opts.HookManager,
+		readerCond:            sync.NewCond(&sync.Mutex{}),
 	}
 
 	// 1. Discover existing segments
 	if err := w.loadSegments(); err != nil {
 		return nil, nil, fmt.Errorf("failed to load WAL segments: %w", err)
 	}
+
+	// Use the WAL's mutex for the condition variable
+	w.readerCond.L = &w.mu
 
 	// 2. Perform recovery
 	recoveredEntries, recoveryErr := w.recover(opts.StartRecoveryIndex)
@@ -201,6 +206,9 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 	if err := w.activeSegment.WriteRecord(payloadBytes); err != nil {
 		return err
 	}
+
+	// Signal any waiting readers that new data is available.
+	w.readerCond.Broadcast()
 
 	if w.opts.SyncMode == core.WALSyncAlways {
 		return w.activeSegment.Sync()
@@ -393,12 +401,17 @@ func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 	var allEntries []core.WALEntry
 	for _, index := range w.segmentIndexes {
 		if index <= startRecoveryIndex {
+			w.logger.Debug("Skipping WAL segment for recovery (covered by checkpoint)", "index", index)
 			continue // Skip segments that are already covered by a checkpoint
 		}
 		path := filepath.Join(w.dir, core.FormatSegmentFileName(index))
-		entries, err := recoverFromSegment(path, w.logger)
+		entries, err := w.recoverFromSegment(path)
 		if len(entries) > 0 {
 			allEntries = append(allEntries, entries...)
+			// Update the last known sequence number from the recovered entries
+			// This part is actually handled by the engine applying the entries,
+			// so we don't need to track it here during recovery.
+			// w.lastKnownSeqNum = entries[len(entries)-1].SeqNum
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -417,20 +430,15 @@ func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 }
 
 // recoverFromSegment reads all valid entries from a single WAL segment file.
-// It is an unexported helper function.
+// It is a method on WAL to access its logger.
 // It returns all entries read successfully before an error was encountered,
 // along with the error itself (which can be io.EOF for a clean read).
-func recoverFromSegment(filePath string, logger *slog.Logger) ([]core.WALEntry, error) {
+func (w *WAL) recoverFromSegment(filePath string) ([]core.WALEntry, error) {
 	reader, err := OpenSegmentForRead(filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			logger.Info("WAL segment does not exist, nothing to recover.", "path", filePath)
-			return nil, nil // Not an error, just no entries to recover.
-		}
-		return nil, fmt.Errorf("failed to open WAL segment for reading %s: %w", filePath, err)
+		return nil, err
 	}
 	defer reader.Close()
-
 	var entries []core.WALEntry
 	for {
 		recordData, err := reader.ReadRecord()
@@ -449,6 +457,193 @@ func recoverFromSegment(filePath string, logger *slog.Logger) ([]core.WALEntry, 
 			return entries, fmt.Errorf("failed to decode batch record from segment: %w", err) // Return entries collected so far, along with the error
 		}
 	}
+}
+
+// walReader implements the WALReader interface for streaming WAL entries.
+type walReader struct {
+	wal         *WAL
+	nextSeqNum  uint64
+	entryBuffer []core.WALEntry
+
+	currentSegReader *SegmentReader
+	currentSegIndex  uint64
+
+	mu         sync.Mutex
+	closeCh    chan struct{}
+	cancelOnce sync.Once
+}
+
+// OpenReader creates a new WAL reader starting from a given sequence number.
+// The reader will start from the oldest available segment and scan forward.
+func (w *WAL) OpenReader(fromSeqNum uint64) (WALReader, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.segmentIndexes) == 0 {
+		// This can happen if the WAL is new and no data has been written yet.
+		// The reader will just wait for the first entry.
+		w.logger.Info("Opening WAL reader on an empty WAL, will wait for data", "from_seq_num", fromSeqNum)
+	}
+
+	r := &walReader{
+		wal:        w,
+		nextSeqNum: fromSeqNum,
+		closeCh:    make(chan struct{}),
+	}
+
+	return r, nil
+}
+
+// Next returns the next available WAL entry. It blocks if no new entries are
+// available, until an entry is written, the context is cancelled, or the reader is closed.
+func (r *walReader) Next(ctx context.Context) (*core.WALEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for {
+		// Check for cancellation or closed reader first.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-r.closeCh:
+			return nil, io.EOF
+		default:
+		}
+
+		// 1. Process buffered entries first.
+		if len(r.entryBuffer) > 0 {
+			entry := r.entryBuffer[0]
+			r.entryBuffer = r.entryBuffer[1:] // Consume entry
+			if entry.SeqNum >= r.nextSeqNum {
+				r.nextSeqNum = entry.SeqNum + 1
+				return &entry, nil
+			}
+			// Stale entry, loop to get the next one from the buffer.
+			continue
+		}
+
+		// 2. Buffer is empty, ensure we have a segment reader.
+		if r.currentSegReader == nil {
+			if !r.openNextSegment() {
+				// No more segments, we are at the tip. Wait for new data.
+				if err := r.waitForData(ctx); err != nil {
+					return nil, err
+				}
+				continue // After waiting, loop again to try opening a segment.
+			}
+		}
+
+		// 3. Read a new record from the current segment.
+		recordData, err := r.currentSegReader.ReadRecord()
+		if err == nil {
+			entries, decErr := decodeBatchRecord(recordData)
+			if decErr != nil {
+				r.wal.logger.Error("Failed to decode WAL batch record during streaming", "error", decErr, "segment", r.currentSegIndex)
+				// This is a corruption error. We should stop.
+				return nil, decErr
+			}
+			// Add segment index to all entries in the batch
+			for i := range entries {
+				entries[i].SegmentIndex = r.currentSegIndex
+			}
+			r.entryBuffer = entries
+			continue // Loop to process the newly filled buffer.
+		}
+
+		// 4. Handle read error.
+		if errors.Is(err, io.EOF) {
+			// Clean end of segment, close it and try to open the next one in the next loop iteration.
+			r.currentSegReader.Close()
+			r.currentSegReader = nil
+			continue
+		}
+
+		// Any other error is fatal for this reader.
+		r.wal.logger.Error("Unrecoverable error reading from WAL segment", "error", err, "segment", r.currentSegIndex)
+		return nil, err
+	}
+}
+
+// openNextSegment tries to open the next available WAL segment for reading.
+// It returns true if a new segment was successfully opened.
+// MUST be called with the reader's lock held.
+func (r *walReader) openNextSegment() bool {
+	r.wal.mu.Lock()
+	defer r.wal.mu.Unlock()
+
+	var nextSegIndex uint64
+	if r.currentSegIndex == 0 {
+		// First time opening, start from the oldest segment.
+		if len(r.wal.segmentIndexes) > 0 {
+			nextSegIndex = r.wal.segmentIndexes[0]
+		}
+	} else {
+		// Find the segment that comes after the current one.
+		for i, index := range r.wal.segmentIndexes {
+			if index == r.currentSegIndex && i+1 < len(r.wal.segmentIndexes) {
+				nextSegIndex = r.wal.segmentIndexes[i+1]
+				break
+			}
+		}
+	}
+
+	if nextSegIndex == 0 {
+		return false // No more segments to open.
+	}
+
+	path := filepath.Join(r.wal.dir, core.FormatSegmentFileName(nextSegIndex))
+	segReader, err := OpenSegmentForRead(path)
+	if err != nil {
+		r.wal.logger.Warn("Failed to open next segment for reading, will wait", "segment", nextSegIndex, "error", err)
+		return false
+	}
+
+	r.wal.logger.Debug("WAL reader opened new segment", "segment", nextSegIndex)
+	r.currentSegReader = segReader
+	r.currentSegIndex = nextSegIndex
+	return true
+}
+
+// waitForData blocks until new data is written to the WAL or the context is cancelled.
+// MUST be called WITHOUT the reader's lock held.
+func (r *walReader) waitForData(ctx context.Context) error {
+	// This is a pattern to wait on a sync.Cond with context cancellation.
+	waitDone := make(chan struct{})
+	go func() {
+		r.wal.mu.Lock()
+		r.wal.readerCond.Wait()
+		r.wal.mu.Unlock()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		return nil // Woken up by a new write.
+	case <-ctx.Done():
+		// Context was cancelled. We need to wake up our waiting goroutine.
+		r.wal.readerCond.Broadcast() // This wakes up all waiters, including ours.
+		<-waitDone                   // Wait for the goroutine to exit.
+		return ctx.Err()
+	case <-r.closeCh:
+		// Reader was closed.
+		r.wal.readerCond.Broadcast()
+		<-waitDone
+		return io.EOF
+	}
+}
+
+// Close stops the reader and releases its resources.
+func (r *walReader) Close() error {
+	r.cancelOnce.Do(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		close(r.closeCh)
+		if r.currentSegReader != nil {
+			r.currentSegReader.Close()
+			r.currentSegReader = nil
+		}
+	})
+	return nil
 }
 
 func (w *WAL) openForAppend() error {

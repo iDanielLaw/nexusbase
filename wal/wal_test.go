@@ -292,7 +292,11 @@ func TestWAL_StartRecoveryIndex(t *testing.T) {
 
 func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
 	tempDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := testWALOptions(t, tempDir)
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	defer wal.Close()
+
 	segmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(1))
 
 	// 1. Manually construct a batch payload where one of the inner entries is corrupted.
@@ -318,13 +322,13 @@ func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Write this corrupted payload as a single, validly-checksummed record to a segment file.
-	sw, err := CreateSegment(tempDir, 1)
+	sw, err := CreateSegment(wal.dir, 1)
 	require.NoError(t, err)
 	require.NoError(t, sw.WriteRecord(payloadBuf.Bytes()))
 	require.NoError(t, sw.Close())
 
 	// 3. Attempt to recover from the segment.
-	recoveredEntries, err := recoverFromSegment(segmentPath, logger)
+	recoveredEntries, err := wal.recoverFromSegment(segmentPath)
 
 	// 4. Verify the outcome.
 	require.Error(t, err, "Recovery should fail due to corruption inside the batch")

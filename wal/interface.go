@@ -1,6 +1,16 @@
 package wal
 
-import "github.com/INLOpen/nexusbase/core"
+import (
+	"context"
+
+	"github.com/INLOpen/nexusbase/core"
+)
+
+// WALReader defines an interface for reading entries sequentially from the WAL.
+type WALReader interface {
+	Next(ctx context.Context) (*core.WALEntry, error)
+	Close() error
+}
 
 // WALInterface defines the public API for the Write-Ahead Log.
 type WALInterface interface {
@@ -19,4 +29,6 @@ type WALInterface interface {
 	ActiveSegmentIndex() uint64
 	// Rotate manually triggers a segment rotation.
 	Rotate() error
+	// OpenReader opens a reader that can stream WAL entries starting from a specific sequence number.
+	OpenReader(fromSeqNum uint64) (WALReader, error)
 }
