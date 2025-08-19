@@ -211,6 +211,27 @@ func (m *mockTagIndexManager) LoadFromFile(dataDir string) error {
 	return args.Error(0)
 }
 
+// mockWALReader is a mock for wal.WALReader
+type mockWALReader struct {
+	mock.Mock
+}
+
+func (m *mockWALReader) Next(ctx context.Context) (*core.WALEntry, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*core.WALEntry), args.Error(1)
+}
+
+func (m *mockWALReader) Close() error {
+	args := m.Called()
+	if len(args) == 0 {
+		return nil
+	}
+	return args.Error(0)
+}
+
 // mockWAL is a mock for wal.WALInterface
 type mockWAL struct {
 	mock.Mock
@@ -228,6 +249,14 @@ func (m *mockWAL) ActiveSegmentIndex() uint64 {
 	return args.Get(0).(uint64)
 }
 func (m *mockWAL) Rotate() error { return m.Called().Error(0) }
+
+func (m *mockWAL) OpenReader(fromSeqNum uint64) (wal.WALReader, error) {
+	args := m.Called(fromSeqNum)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(wal.WALReader), args.Error(1)
+}
 
 // mockPrivateManagerStore เป็น mock สำหรับ internal.PrivateManagerStore
 type mockPrivateManagerStore struct {
