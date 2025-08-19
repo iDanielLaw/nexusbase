@@ -68,10 +68,6 @@ func (e *storageEngine) GetSSTableCompressionType() string {
 	return e.opts.SSTableCompressor.Type().String()
 }
 
-func (e *storageEngine) GetSequenceNumber() uint64 {
-	return e.sequenceNumber.Load()
-}
-
 // --- Locking & State Manipulation ---
 
 func (e *storageEngine) Lock() {
