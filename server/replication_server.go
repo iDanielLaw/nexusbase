@@ -18,6 +18,7 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/wal"
 )
 
 // ReplicationGRPCServer wraps the grpc.Server and implements the ReplicationService.
@@ -80,7 +81,7 @@ func (s *ReplicationGRPCServer) StreamWAL(req *apiv1.StreamWALRequest, stream ap
 	// The engine interface needs to expose the WAL. This is a design decision.
 	// We define a local interface to check if the engine supports this.
 	type walProvider interface {
-		GetWAL() core.WALInterface
+		GetWAL() wal.WALInterface
 	}
 
 	engineWithWAL, ok := s.engine.(walProvider)
