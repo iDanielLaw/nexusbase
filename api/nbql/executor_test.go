@@ -187,6 +187,20 @@ func (m *MockStorageEngine) GetClock() clock.Clock {
 	return args.Get(0).(clock.Clock)
 }
 
+func (m *MockStorageEngine) ApplyReplicatedEntry(ctx context.Context, entry *core.WALEntry) error {
+	args := m.Called(ctx, entry)
+	return args.Error(0)
+}
+
+func (m *MockStorageEngine) GetSequenceNumber() uint64 {
+	args := m.Called()
+	return args.Get(0).(uint64)
+}
+
+func (m *MockStorageEngine) SetSequenceNumber(seqNum uint64) {
+	m.Called(seqNum)
+}
+
 func TestExecutor_SnapshotRestore(t *testing.T) {
 	ctx := context.Background()
 
