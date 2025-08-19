@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package nexusbase.api.v1;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/your-org/nexusbase/api/v1;apiv1";
+
+// ReplicationService defines the service for data replication between nodes.
+service ReplicationService {
+  // StreamWAL allows a follower to stream WAL entries from a leader.
+  // The stream will block and wait for new entries if the follower is caught up.
+  rpc StreamWAL(StreamWALRequest) returns (stream WALEntry) {}
+
+  // GetLatestState returns the latest sequence number and WAL segment index from the leader.
+  // This is used by a follower to determine its replication lag.
+  rpc GetLatestState(google.protobuf.Empty) returns (LatestStateResponse) {}
+
+  // GetSnapshot allows a follower to bootstrap by receiving a full snapshot of the database.
+  rpc GetSnapshot(SnapshotRequest) returns (stream SnapshotChunk) {}
+
+}
+
+message StreamWALRequest {
+  // The sequence number from which the follower wants to start streaming.
+  uint64 from_sequence_number = 1;
+}
+
+message LatestStateResponse {
+  uint64 latest_sequence_number = 1;
+  uint64 latest_wal_segment_index = 2;
+}
+
+message WALEntry {
+  uint64 sequence_number = 1;
+  uint64 wal_segment_index = 2; // Follower needs this for its own checkpointing
+
+  oneof payload {
+    PutEvent put_event = 3;
+    DeleteEvent delete_event = 4;
+    DeleteSeriesEvent delete_series_event = 5;
+    DeleteRangeEvent delete_range_event = 6;
+  }
+}
+
+message PutEvent {
+  bytes key = 1;
+  bytes value = 2; // Encoded FieldValues
+}
+
+message DeleteEvent {
+  bytes key = 1;
+}
+
+message DeleteSeriesEvent {
+  bytes key_prefix = 1;
+}
+
+message DeleteRangeEvent {
+  bytes key_prefix = 1;
+  int64 start_ts = 2;
+  int64 end_ts = 3;
+}
+
+message SnapshotRequest {
+  // Can be extended later to request partial snapshots.
+}
+
+message SnapshotChunk {
+  // Relative path within the snapshot directory.
+  // e.g., "sst/000001.sst", "MANIFEST", "string_mapping.log"
+  string file_path_relative = 1;
+  bytes content = 2;
+}
