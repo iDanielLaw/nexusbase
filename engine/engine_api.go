@@ -702,6 +702,20 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 		return err
 	}
 
+	// --- Synchronous Replication Wait ---
+	// If synchronous replication is enabled, wait for follower confirmation.
+	if e.opts.ReplicationSyncTimeoutMs > 0 {
+		lastSeqInBatch := walEntries[len(walEntries)-1].SeqNum
+		timeout := time.Duration(e.opts.ReplicationSyncTimeoutMs) * time.Millisecond
+		waitCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		if err := e.replicationTracker.WaitForSequence(waitCtx, lastSeqInBatch); err != nil {
+			// The write IS durable on the leader, but the follower did not confirm in time.
+			return fmt.Errorf("write timed out waiting for follower confirmation: %w", err)
+		}
+	}
+
 	// 4. Write all entries to memtable under a single lock.
 	// This part is now much safer because the WAL write was atomic. If this fails,
 	// the WAL is ahead of the memtable, which is a critical state that must be handled.
