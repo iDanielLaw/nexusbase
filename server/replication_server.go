@@ -2,9 +2,14 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -127,16 +132,81 @@ func (s *ReplicationGRPCServer) StreamWAL(req *apiv1.StreamWALRequest, stream ap
 // This is a placeholder implementation.
 func (s *ReplicationGRPCServer) GetLatestState(ctx context.Context, req *emptypb.Empty) (*apiv1.LatestStateResponse, error) {
 	s.logger.Info("Received GetLatestState request")
-	// TODO: Implement logic to get the latest sequence number from the engine.
-	return nil, status.Errorf(codes.Unimplemented, "method GetLatestState not implemented")
+
+	// Define local interfaces to check if the engine supports the required methods.
+	// This avoids modifying the public StorageEngineInterface for internal replication needs.
+	type sequenceProvider interface {
+		GetSequenceNumber() uint64
+	}
+	type walProvider interface {
+		GetWAL() wal.WALInterface
+	}
+
+	var seqNum uint64
+	if sp, ok := s.engine.(sequenceProvider); ok {
+		seqNum = sp.GetSequenceNumber()
+	} else {
+		return nil, status.Error(codes.Unimplemented, "replication is not supported: engine does not provide sequence number")
+	}
+
+	var walIndex uint64
+	if wp, ok := s.engine.(walProvider); ok {
+		if wal := wp.GetWAL(); wal != nil {
+			walIndex = wal.ActiveSegmentIndex()
+		}
+	} else {
+		return nil, status.Error(codes.Unimplemented, "replication is not supported: engine does not provide WAL")
+	}
+
+	return &apiv1.LatestStateResponse{
+		LatestSequenceNumber:  seqNum,
+		LatestWalSegmentIndex: walIndex,
+	}, nil
 }
 
 // GetSnapshot allows a follower to bootstrap by receiving a full snapshot.
-// This is a placeholder implementation.
 func (s *ReplicationGRPCServer) GetSnapshot(req *apiv1.SnapshotRequest, stream apiv1.ReplicationService_GetSnapshotServer) error {
 	s.logger.Info("Received GetSnapshot request")
-	// TODO: Implement snapshot creation and streaming logic.
-	return status.Errorf(codes.Unimplemented, "method GetSnapshot not implemented")
+	ctx := stream.Context()
+
+	snapshotPath, err := s.engine.CreateSnapshot(ctx)
+	if err != nil {
+		s.logger.Error("Failed to create snapshot for replication", "error", err)
+		return status.Errorf(codes.Internal, "failed to create database snapshot: %v", err)
+	}
+	defer func() {
+		s.logger.Info("Cleaning up temporary snapshot directory", "path", snapshotPath)
+		if err := os.RemoveAll(snapshotPath); err != nil {
+			s.logger.Error("Failed to clean up snapshot directory", "path", snapshotPath, "error", err)
+		}
+	}()
+
+	s.logger.Info("Snapshot created, beginning stream.", "path", snapshotPath)
+
+	err = filepath.WalkDir(snapshotPath, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if err := s.streamFile(stream, snapshotPath, path); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if err != nil {
+		s.logger.Error("Error during snapshot streaming", "error", err)
+		if status.Code(err) == codes.Canceled || errors.Is(err, context.Canceled) {
+			s.logger.Info("Snapshot stream cancelled by client.")
+			return nil
+		}
+		return status.Errorf(codes.Internal, "error streaming snapshot: %v", err)
+	}
+
+	s.logger.Info("Successfully streamed all snapshot files.")
+	return nil
 }
 
 func (s *ReplicationGRPCServer) convertCoreWALEntryToAPI(coreEntry *core.WALEntry) (*apiv1.WALEntry, error) {
@@ -173,4 +243,44 @@ func (s *ReplicationGRPCServer) convertCoreWALEntryToAPI(coreEntry *core.WALEntr
 		return nil, status.Errorf(codes.Internal, "unknown WAL entry type: %v", coreEntry.EntryType)
 	}
 	return apiEntry, nil
+}
+
+// streamFile reads a file from the snapshot and streams it in chunks.
+func (s *ReplicationGRPCServer) streamFile(stream apiv1.ReplicationService_GetSnapshotServer, snapshotRoot, filePath string) error {
+	relPath, err := filepath.Rel(snapshotRoot, filePath)
+	if err != nil {
+		return fmt.Errorf("failed to calculate relative path for %s: %w", filePath, err)
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open snapshot file %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	buffer := make([]byte, 64*1024) // 64KB chunks
+	for {
+		// Check for context cancellation before each read.
+		if err := stream.Context().Err(); err != nil {
+			return err
+		}
+
+		n, err := file.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read snapshot file chunk %s: %w", filePath, err)
+		}
+		if n == 0 {
+			break // End of file.
+		}
+
+		chunk := &apiv1.SnapshotChunk{
+			FilePathRelative: relPath,
+			Content:          buffer[:n],
+		}
+
+		if sendErr := stream.Send(chunk); sendErr != nil {
+			return sendErr // Client likely disconnected.
+		}
+	}
+	return nil
 }
