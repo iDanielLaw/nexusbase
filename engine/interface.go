@@ -35,6 +35,8 @@ type StorageEngineInterface interface {
 	// ApplyReplicatedEntry applies a WAL entry received from a leader node.
 	// It must bypass writing to its own WAL and use the provided sequence number.
 	ApplyReplicatedEntry(ctx context.Context, entry *core.WALEntry) error
+	// GetSequenceNumber returns the current sequence number of the engine.
+	GetSequenceNumber() uint64
 	// SetSequenceNumber forces the engine's sequence number to a specific value.
 	// This is used after a snapshot restore.
 	SetSequenceNumber(seqNum uint64)

@@ -82,6 +82,11 @@ func (m *MockStorageEngine) SetSequenceNumber(seqNum uint64) {
 	m.Called(seqNum)
 }
 
+func (m *MockStorageEngine) GetSequenceNumber() uint64 {
+	args := m.Called()
+	return args.Get(0).(uint64)
+}
+
 func (m *MockStorageEngine) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
 	args := m.Called(metric, tags)
 	if args.Get(0) == nil {
