@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -102,6 +103,51 @@ type StorageEngineOptions struct {
 	// New fields for Intra-L0 Compaction
 	IntraL0CompactionTriggerFiles     int   // Number of small files in L0 to trigger an intra-L0 compaction.
 	IntraL0CompactionMaxFileSizeBytes int64 // Max size of a file to be considered for intra-L0 compaction.
+}
+
+// DefaultStorageEngineOptions returns a new StorageEngineOptions struct with sensible default values.
+func DefaultStorageEngineOptions() StorageEngineOptions {
+	return StorageEngineOptions{
+		DataDir:                        "./data",
+		MemtableThreshold:              64 * 1024 * 1024, // 64MB
+		MemtableFlushIntervalMs:        1000,             // 1s
+		BlockCacheCapacity:             10000,
+		L0CompactionTriggerSize:        0, // Disabled by default, MaxL0Files is primary trigger
+		MaxL0Files:                     4,
+		CompactionIntervalSeconds:      60,
+		TargetSSTableSize:              128 * 1024 * 1024, // 128MB
+		LevelsTargetSizeMultiplier:     10,
+		MaxLevels:                      7,
+		MaxConcurrentLNCompactions:     runtime.NumCPU(),
+		BloomFilterFalsePositiveRate:   0.01,
+		SSTableDefaultBlockSize:        sstable.DefaultBlockSize,
+		CheckpointIntervalSeconds:      300, // 5 minutes
+		ErrorOnSSTableLoadFailure:      false,
+		SSTableCompressor:              &compressors.SnappyCompressor{},
+		WALSyncMode:                    core.WALSyncInterval,
+		WALBatchSize:                   1024,
+		WALFlushIntervalMs:             1000, // 1s
+		WALPurgeKeepSegments:           3,
+		WALMaxSegmentSize:              core.WALMaxSegmentSize, // 128MB
+		RetentionPeriod:                "",                     // Disabled by default
+		MetadataSyncIntervalSeconds:    60,
+		EnableTagBloomFilter:           true,
+		IndexMemtableThreshold:         16 * 1024 * 1024, // 16MB
+		IndexFlushIntervalMs:           1000,             // 1s
+		IndexCompactionIntervalSeconds: 60,
+		IndexMaxL0Files:                4,
+		IndexMaxLevels:                 7,
+		IndexBaseTargetSize:            16 * 1024 * 1024, // 16MB
+		CompactionTombstoneWeight:      1.5,
+		CompactionOverlapWeight:        1.0,
+		Logger:                         slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Clock:                          clock.SystemClockDefault,
+		SelfMonitoringEnabled:          true,
+		SelfMonitoringPrefix:           "__nexus_internal_",
+		SelfMonitoringIntervalMs:       15000, // 15s
+		IntraL0CompactionTriggerFiles:     4,
+		IntraL0CompactionMaxFileSizeBytes: 16 * 1024 * 1024, // 16MB
+	}
 }
 
 // storageEngine is the main struct that manages the LSM-tree components.
