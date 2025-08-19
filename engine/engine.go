@@ -278,6 +278,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 			Open:     sys.Open,
 			OpenFile: sys.OpenFile,
 		},
+		replicationTracker: replication.NewReplicationTracker(),
 	}
 
 	if opts.TracerProvider != nil {
