@@ -2,6 +2,8 @@ package replication
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -120,7 +122,8 @@ func TestApplier_ApplyEntry(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockEngine := new(MockStorageEngine)
-			applier := NewApplier(mockEngine, nil)
+			discardLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			applier := NewApplier(mockEngine, discardLogger)
 
 			if tc.expectSuccess {
 				// Setup mock expectation for a successful call
