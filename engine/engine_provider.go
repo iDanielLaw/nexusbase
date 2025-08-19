@@ -148,6 +148,6 @@ func (e *storageEngine) GetRangeTombstones() map[string][]core.RangeTombstone {
 	return copied
 }
 
-func (e *storageEngine) GetReplicationTracker() *core.ReplicationTracker
-	
+func (e *storageEngine) GetReplicationTracker() *core.ReplicationTracker {
+	return e.replicationTracker
 }

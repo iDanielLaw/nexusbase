@@ -211,6 +211,7 @@ type storageEngine struct {
 	hookManager     hooks.HookManager // NEW: Hook manager
 
 	internalFile internalFileManage
+	replicationTracker *core.ReplicationTracker
 
 	clock clock.Clock
 
