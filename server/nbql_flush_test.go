@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/api/nbql"
+	"github.com/INLOpen/nexusbase/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -15,7 +16,7 @@ import (
 
 func TestExecutor_ExecuteFlush_All(t *testing.T) {
 	t.Run("Successful FLUSH ALL", func(t *testing.T) {
-		mockEngine := new(MockStorageEngine)
+		mockEngine := new(engine.MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
 		flushCmd, err := corenbql.Parse("FLUSH ALL")
 		require.NoError(t, err)
@@ -33,7 +34,7 @@ func TestExecutor_ExecuteFlush_All(t *testing.T) {
 	})
 
 	t.Run("Successful FLUSH (default to ALL)", func(t *testing.T) {
-		mockEngine := new(MockStorageEngine)
+		mockEngine := new(engine.MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
 		flushCmd, err := corenbql.Parse("FLUSH")
 		require.NoError(t, err)
@@ -54,7 +55,7 @@ func TestExecutor_ExecuteFlush_All(t *testing.T) {
 
 func TestExecutor_ExecuteFlush_Memtable(t *testing.T) {
 	t.Run("Successful FLUSH MEMTABLE", func(t *testing.T) {
-		mockEngine := new(MockStorageEngine)
+		mockEngine := new(engine.MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
 		flushCmd, err := corenbql.Parse("FLUSH MEMTABLE")
 		require.NoError(t, err)
@@ -69,7 +70,7 @@ func TestExecutor_ExecuteFlush_Memtable(t *testing.T) {
 		mockEngine.AssertExpectations(t)
 	})
 	t.Run("Failed FLUSH MEMTABLE", func(t *testing.T) {
-		mockEngine := new(MockStorageEngine)
+		mockEngine := new(engine.MockStorageEngine)
 		executor := nbql.NewExecutor(mockEngine, nil)
 		flushCmd, err := corenbql.Parse("FLUSH MEMTABLE")
 		require.NoError(t, err)
@@ -86,7 +87,7 @@ func TestExecutor_ExecuteFlush_Memtable(t *testing.T) {
 }
 
 func TestExecutor_ExecuteFlush_Disk(t *testing.T) {
-	mockEngine := new(MockStorageEngine)
+	mockEngine := new(engine.MockStorageEngine)
 	executor := nbql.NewExecutor(mockEngine, nil)
 	flushCmd, err := corenbql.Parse("FLUSH DISK")
 	require.NoError(t, err)

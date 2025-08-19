@@ -253,7 +253,7 @@ func TestTCPConnectionHandler_HandleAuthentication(t *testing.T) {
 }
 
 func TestTCPConnectionHandler_HandleCommand(t *testing.T) {
-	mockEngine := new(MockStorageEngine)
+	mockEngine := new(engine.MockStorageEngine)
 	mockClock := clock.NewMockClock(time.Now())
 	executor := api.NewExecutor(mockEngine, mockClock)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
