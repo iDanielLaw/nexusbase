@@ -4,8 +4,6 @@ package nexusbase.api.v1;
 
 import "google/protobuf/empty.proto";
 
-option go_package = "github.com/your-org/nexusbase/api/v1;apiv1";
-
 // ReplicationService defines the service for data replication between nodes.
 service ReplicationService {
   // StreamWAL allows a follower to stream WAL entries from a leader.
