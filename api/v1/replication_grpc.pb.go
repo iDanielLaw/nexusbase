@@ -31,6 +31,9 @@ type ReplicationServiceClient interface {
 	GetLatestState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*LatestStateResponse, error)
 	// GetSnapshot allows a follower to bootstrap by receiving a full snapshot of the database.
 	GetSnapshot(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (ReplicationService_GetSnapshotClient, error)
+	// ReportProgress allows a follower to report its latest applied sequence number to the leader.
+	// This is used for synchronous replication to unblock waiting client writes.
+	ReportProgress(ctx context.Context, in *ReportProgressRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type replicationServiceClient struct {
@@ -114,6 +117,15 @@ func (x *replicationServiceGetSnapshotClient) Recv() (*SnapshotChunk, error) {
 	return m, nil
 }
 
+func (c *replicationServiceClient) ReportProgress(ctx context.Context, in *ReportProgressRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, "/nexusbase.api.v1.ReplicationService/ReportProgress", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ReplicationServiceServer is the server API for ReplicationService service.
 // All implementations must embed UnimplementedReplicationServiceServer
 // for forward compatibility
@@ -126,6 +138,9 @@ type ReplicationServiceServer interface {
 	GetLatestState(context.Context, *emptypb.Empty) (*LatestStateResponse, error)
 	// GetSnapshot allows a follower to bootstrap by receiving a full snapshot of the database.
 	GetSnapshot(*SnapshotRequest, ReplicationService_GetSnapshotServer) error
+	// ReportProgress allows a follower to report its latest applied sequence number to the leader.
+	// This is used for synchronous replication to unblock waiting client writes.
+	ReportProgress(context.Context, *ReportProgressRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedReplicationServiceServer()
 }
 
@@ -141,6 +156,9 @@ func (UnimplementedReplicationServiceServer) GetLatestState(context.Context, *em
 }
 func (UnimplementedReplicationServiceServer) GetSnapshot(*SnapshotRequest, ReplicationService_GetSnapshotServer) error {
 	return status.Errorf(codes.Unimplemented, "method GetSnapshot not implemented")
+}
+func (UnimplementedReplicationServiceServer) ReportProgress(context.Context, *ReportProgressRequest) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportProgress not implemented")
 }
 func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
 
@@ -215,6 +233,24 @@ func (x *replicationServiceGetSnapshotServer) Send(m *SnapshotChunk) error {
 	return x.ServerStream.SendMsg(m)
 }
 
+func _ReplicationService_ReportProgress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportProgressRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).ReportProgress(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/nexusbase.api.v1.ReplicationService/ReportProgress",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).ReportProgress(ctx, req.(*ReportProgressRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -225,6 +261,10 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetLatestState",
 			Handler:    _ReplicationService_GetLatestState_Handler,
+		},
+		{
+			MethodName: "ReportProgress",
+			Handler:    _ReplicationService_ReportProgress_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
