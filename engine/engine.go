@@ -20,7 +20,6 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
-	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexuscore/utils/clock"
 
@@ -217,7 +216,7 @@ type storageEngine struct {
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
-	replicationTracker  *replication.ReplicationTracker // New: For synchronous replication
+	replicationTracker  *core.ReplicationTracker // New: For synchronous replication
 }
 
 var _ StorageEngineInterface = (*storageEngine)(nil)
@@ -278,7 +277,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 			Open:     sys.Open,
 			OpenFile: sys.OpenFile,
 		},
-		replicationTracker: replication.NewReplicationTracker(),
+		replicationTracker: core.NewReplicationTracker(), // New: Initialize the tracker
 	}
 
 	if opts.TracerProvider != nil {

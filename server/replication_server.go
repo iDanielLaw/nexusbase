@@ -23,7 +23,6 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
-	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexusbase/wal"
 )
 
@@ -175,7 +174,7 @@ func (s *ReplicationGRPCServer) GetLatestState(ctx context.Context, req *emptypb
 func (s *ReplicationGRPCServer) ReportProgress(ctx context.Context, req *apiv1.ReportProgressRequest) (*emptypb.Empty, error) {
 	// Define a local interface to get the tracker from the engine.
 	type trackerProvider interface {
-		GetReplicationTracker() *replication.ReplicationTracker
+		GetReplicationTracker() *core.ReplicationTracker
 	}
 
 	engineWithTracker, ok := s.engine.(trackerProvider)
