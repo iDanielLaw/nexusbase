@@ -232,16 +232,16 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 	startSeqNum := f.lastAppliedSeqNum + 1
 	f.mu.RUnlock()
 
-	entryChan, errChan, err := f.client.StreamWAL(ctx, startSeqNum)
-	// ... (existing code)
-	reportTicker := time.NewTicker(200 * time.Millisecond) // Report progress every 200ms
-	defer reportTicker.Stop()
+	f.logger.Info("Attempting to stream WAL entries...", "from_seq_num", startSeqNum)
 
+	entryChan, errChan, err := f.client.StreamWAL(ctx, startSeqNum)
 	if err != nil {
 		return fmt.Errorf("cannot start WAL streaming: %w", err)
 	}
 
-	f.logger.Info("Successfully connected to WAL stream, waiting for entries...", "from_seq_num", startSeqNum)
+	reportTicker := time.NewTicker(200 * time.Millisecond) // Report progress every 200ms
+	defer reportTicker.Stop()
+	f.logger.Info("Successfully connected to WAL stream, processing entries...", "from_seq_num", startSeqNum)
 
 	for {
 		select {
@@ -270,8 +270,12 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 			lastApplied := f.lastAppliedSeqNum
 			f.mu.RUnlock()
 			if lastApplied > 0 {
+				// Use a short-lived context derived from the main loop's context for the RPC call.
+				reportCtx, reportCancel := context.WithTimeout(ctx, 1*time.Second)
 				// Send progress report to leader. We ignore errors here as it's a best-effort notification.
-				f.client.grpcClient.ReportProgress(context.Background(), &apiv1.ReportProgressRequest{AppliedSequenceNumber: lastApplied})
+				// In a more robust system, we might handle repeated failures to report progress.
+				f.client.grpcClient.ReportProgress(reportCtx, &apiv1.ReportProgressRequest{AppliedSequenceNumber: lastApplied})
+				reportCancel()
 			}
 
 		case <-ctx.Done():

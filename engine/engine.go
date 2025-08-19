@@ -147,6 +147,7 @@ func DefaultStorageEngineOptions() StorageEngineOptions {
 		SelfMonitoringPrefix:           "__nexus_internal_",
 		SelfMonitoringIntervalMs:       15000, // 15s
 		IntraL0CompactionTriggerFiles:     4,
+		ReplicationSyncTimeoutMs:       0, // Default to async
 		IntraL0CompactionMaxFileSizeBytes: 16 * 1024 * 1024, // 16MB
 	}
 }
@@ -216,7 +217,6 @@ type storageEngine struct {
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
-	replicationTracker  *core.ReplicationTracker // New: For synchronous replication
 }
 
 var _ StorageEngineInterface = (*storageEngine)(nil)
@@ -277,7 +277,6 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 			Open:     sys.Open,
 			OpenFile: sys.OpenFile,
 		},
-		replicationTracker: core.NewReplicationTracker(), // New: Initialize the tracker
 	}
 
 	if opts.TracerProvider != nil {
@@ -1125,7 +1124,7 @@ func (e *storageEngine) SetSequenceNumber(seqNum uint64) {
 	e.logger.Info("Engine sequence number force-set", "new_seq_num", seqNum)
 }
 
-// GetReplicationTracker returns the engine's replication tracker.
-func (e *storageEngine) GetReplicationTracker() *core.ReplicationTracker {
-	return e.replicationTracker
+// GetSequenceNumber returns the current sequence number of the engine.
+func (e *storageEngine) GetSequenceNumber() uint64 {
+	return e.sequenceNumber.Load()
 }
