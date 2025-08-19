@@ -25,6 +25,7 @@ import (
 	"github.com/INLOpen/nexusbase/api/tsdb"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -288,7 +289,7 @@ func TestAppServer_GRPC_Query_RawData(t *testing.T) {
 		Timestamp: startTime + 100,
 		Fields:    mockFields,
 	}
-	mockIterator := NewMockQueryResultIterator([]*core.QueryResultItem{mockItem}, nil)
+	mockIterator := engine.NewMockQueryResultIterator([]*core.QueryResultItem{mockItem}, nil)
 
 	// Setup mock expectation
 	mockEngine.On("Query", mock.Anything, mock.MatchedBy(func(params core.QueryParams) bool {

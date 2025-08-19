@@ -15,6 +15,7 @@ import (
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/engine"
 	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
@@ -25,7 +26,7 @@ import (
 // testTCPServer holds the server and mock engine for a test.
 type testTCPServer struct {
 	appServer     *AppServer
-	mockEngine    *MockStorageEngine
+	mockEngine    *engine.MockStorageEngine
 	serverErrChan chan error
 }
 
@@ -46,7 +47,7 @@ func (s *testTCPServer) close(t *testing.T) {
 func setupTCPServerTest(t *testing.T) *testTCPServer {
 	t.Helper()
 
-	mockEngine := new(MockStorageEngine)
+	mockEngine := new(engine.MockStorageEngine)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	tcpPort := findFreePort(t)
 
