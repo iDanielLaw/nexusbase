@@ -1241,6 +1241,13 @@ func findLatestSnapshot(snapshotsBaseDir string, wrapper internal.PrivateSnapsho
 	return latestID, filepath.Join(snapshotsBaseDir, latestID), nil
 }
 
+// ReadManifestFromDir reads the manifest from a snapshot directory.
+// It finds the manifest file name from the CURRENT file and then reads and parses it.
+func ReadManifestFromDir(dir string) (*core.SnapshotManifest, error) {
+	manifest, _, err := readManifestFromDir(dir, newHelperSnapshot())
+	return manifest, err
+}
+
 // readManifestFromDir is a helper to read the manifest from a specific snapshot directory.
 func readManifestFromDir(dir string, wrapper internal.PrivateSnapshotHelper) (*core.SnapshotManifest, string, error) {
 	currentFilePath := filepath.Join(dir, core.CurrentFileName)
