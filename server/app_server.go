@@ -241,3 +241,8 @@ func (s *AppServer) Stop() {
 		s.cancel()
 	}
 }
+
+// GetEngine returns the underlying storage engine. This is useful for tests.
+func (s *AppServer) GetEngine() engine.StorageEngineInterface {
+	return s.engine
+}
