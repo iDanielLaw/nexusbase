@@ -21,11 +21,13 @@ import (
 
 // AppServer manages all network-facing servers (gRPC, TCP, etc.).
 type AppServer struct {
-	grpcLis     net.Listener
-	tcpLis      net.Listener
-	queryServer *HTTPServer
-	grpcServer  *GRPCServer
-	tcpServer   *TCP2Server
+	grpcLis           net.Listener
+	tcpLis            net.Listener
+	replicationLis    net.Listener
+	queryServer       *HTTPServer
+	grpcServer        *GRPCServer
+	tcpServer         *TCP2Server
+	replicationServer *ReplicationGRPCServer
 	putWorker   *WorkerPool
 	batchWorker *WorkerPool
 	cfg         *config.Config
@@ -101,6 +103,39 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 		appSrv.tcpLis = tcpLis
 	}
 
+	// 3. Initialize the Replication gRPC server if the port is configured.
+	// This assumes `ReplicationPort` is added to `config.ServerConfig`.
+	if cfg.Server.GRPCPort > 0 /* Replace with cfg.Server.ReplicationPort > 0 when added */ {
+		replicationAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort+1) // Placeholder port logic
+		replicationLis, err := net.Listen("tcp", replicationAddr)
+		if err != nil {
+			// Clean up previously opened listeners
+			if appSrv.grpcLis != nil {
+				appSrv.grpcLis.Close()
+			}
+			if appSrv.tcpLis != nil {
+				appSrv.tcpLis.Close()
+			}
+			return nil, fmt.Errorf("failed to listen on replication port %s: %w", replicationAddr, err)
+		}
+		logger.Info("Replication gRPC server will listen on", "address", replicationLis.Addr().String())
+
+		replicationSrv, err := NewReplicationGRPCServer(eng, &cfg.Server, logger)
+		if err != nil {
+			// Clean up all listeners
+			if appSrv.grpcLis != nil {
+				appSrv.grpcLis.Close()
+			}
+			if appSrv.tcpLis != nil {
+				appSrv.tcpLis.Close()
+			}
+			replicationLis.Close()
+			return nil, fmt.Errorf("failed to create replication gRPC server: %w", err)
+		}
+		appSrv.replicationServer = replicationSrv
+		appSrv.replicationLis = replicationLis
+	}
+
 	if cfg.QueryServer.Enabled {
 		queryServer := NewHTTPServer(&cfg.QueryServer, logger, executor)
 		appSrv.queryServer = queryServer
@@ -110,7 +145,7 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 
 // Start runs all configured servers in parallel. It blocks until all servers stop.
 func (s *AppServer) Start() error {
-	if s.grpcServer == nil && s.tcpServer == nil && s.queryServer == nil {
+	if s.grpcServer == nil && s.tcpServer == nil && s.queryServer == nil && s.replicationServer == nil {
 		s.logger.Error("No servers to start.")
 		return nil
 	}
@@ -148,6 +183,19 @@ func (s *AppServer) Start() error {
 			}()
 			s.logger.Info("Starting TCP server...")
 			return s.tcpServer.Start(s.tcpLis)
+		})
+	}
+
+	// Start Replication gRPC server if it exists
+	if s.replicationServer != nil {
+		g.Go(func() error {
+			go func() {
+				<-appCtx.Done()
+				s.logger.Info("Context cancelled, stopping Replication gRPC server...")
+				s.replicationServer.Stop()
+			}()
+			s.logger.Info("Starting Replication gRPC server...")
+			return s.replicationServer.Start(s.replicationLis)
 		})
 	}
 
