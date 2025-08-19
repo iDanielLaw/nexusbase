@@ -14,6 +14,7 @@ import (
 
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -284,7 +285,7 @@ func TestTCPConnectionHandler_HandleCommand(t *testing.T) {
 	t.Run("Successful QUERY command with results", func(t *testing.T) {
 		// Arrange
 		fields, _ := core.NewFieldValuesFromMap(map[string]interface{}{"value": 123.0})
-		mockIterator := NewMockQueryResultIterator([]*core.QueryResultItem{
+		mockIterator := engine.NewMockQueryResultIterator([]*core.QueryResultItem{
 			{Metric: "test.metric", Timestamp: 1, Fields: fields},
 			{Metric: "test.metric", Timestamp: 2, Fields: fields},
 		}, nil)
