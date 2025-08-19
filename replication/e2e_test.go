@@ -118,11 +118,11 @@ func TestReplication_E2E_BootstrapAndCatchup(t *testing.T) {
 	// Force a flush to create an SSTable on the leader
 	require.NoError(t, leaderEngine.ForceFlush(ctx, true))
 
-	// 2. Start the follower. It should perform a snapshot bootstrap.
+	// 2. Start the follower. It should connect and wait for data.
 	require.NoError(t, follower.Start())
 
 	// 3. Wait for the follower to catch up.
-	// We can verify this by checking if the data from step 1 exists on the follower.
+	// Since the follower started before data was written, it will replicate via WAL streaming.
 	require.Eventually(t, func() bool {
 		follower.mu.RLock()
 		defer follower.mu.RUnlock()
