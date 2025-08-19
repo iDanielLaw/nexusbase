@@ -10,8 +10,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/snapshot"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -19,9 +17,8 @@ import (
 // process from bootstrapping via snapshot to continuous WAL streaming.
 type Follower struct {
 	leaderAddr string
-	dataDir            string
-	engineOpts         engine.StorageEngineOptions // Store engine options for restarts
-	bootstrapThreshold uint64                      // If lag is > this, bootstrap from snapshot.
+	dataDir    string
+	engineOpts engine.StorageEngineOptions // Store engine options for restarts
 
 	mu                sync.RWMutex
 	engine            engine.StorageEngineInterface
@@ -35,19 +32,18 @@ type Follower struct {
 }
 
 // NewFollower creates and initializes a new Follower instance.
-func NewFollower(leaderAddr string, bootstrapThreshold uint64, engineOpts engine.StorageEngineOptions, logger *slog.Logger) (*Follower, error) {
+func NewFollower(leaderAddr string, engineOpts engine.StorageEngineOptions, logger *slog.Logger) (*Follower, error) {
 	// Ensure the data directory exists
 	if err := os.MkdirAll(engineOpts.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory %s: %w", engineOpts.DataDir, err)
 	}
 
 	f := &Follower{
-		leaderAddr:         leaderAddr,
-		dataDir:            engineOpts.DataDir,
-		engineOpts:         engineOpts,
-		bootstrapThreshold: bootstrapThreshold,
-		logger:             logger.With("component", "Follower"),
-		shutdownChan:       make(chan struct{}),
+		leaderAddr:   leaderAddr,
+		dataDir:      engineOpts.DataDir,
+		engineOpts:   engineOpts,
+		logger:       logger.With("component", "Follower"),
+		shutdownChan: make(chan struct{}),
 	}
 
 	return f, nil
@@ -178,25 +174,15 @@ func (f *Follower) syncWithLeader() error {
 	localSeqNum := f.lastAppliedSeqNum
 	f.mu.RUnlock()
 
-	// Decide whether to bootstrap or stream WAL
-	// Bootstrap if:
-	// 1. We have no local data (localSeqNum == 0).
-	// 2. We are too far behind the leader (lag > bootstrapThreshold).
-	lag := leaderState.GetLatestSequenceNumber() - localSeqNum
-	shouldBootstrap := localSeqNum == 0 || (f.bootstrapThreshold > 0 && lag > f.bootstrapThreshold)
-
-	if shouldBootstrap {
-		f.logger.Info("Follower state requires bootstrap.", "local_seq_num", localSeqNum, "leader_seq_num", leaderState.GetLatestSequenceNumber(), "lag", lag, "threshold", f.bootstrapThreshold)
+	if localSeqNum == 0 {
+		f.logger.Info("Local state is empty, bootstrapping from snapshot.")
 		snapshotSeqNum, err := f.bootstrapFromSnapshot(ctx)
 		if err != nil {
 			return fmt.Errorf("snapshot bootstrap failed: %w", err)
 		}
 		f.mu.Lock()
 		f.lastAppliedSeqNum = snapshotSeqNum
-		localSeqNum = snapshotSeqNum
 		f.mu.Unlock()
-	} else {
-		f.logger.Info("Follower state is recent enough, proceeding with WAL catch-up.", "local_seq_num", localSeqNum, "leader_seq_num", leaderState.GetLatestSequenceNumber(), "lag", lag)
 	}
 
 	return f.streamAndApplyWAL(ctx)
@@ -245,23 +231,16 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 	startSeqNum := f.lastAppliedSeqNum + 1
 	f.mu.RUnlock()
 
-	f.logger.Info("Attempting to stream WAL entries...", "from_seq_num", startSeqNum)
-
 	entryChan, errChan, err := f.client.StreamWAL(ctx, startSeqNum)
+	// ... (existing code)
+	reportTicker := time.NewTicker(200 * time.Millisecond) // Report progress every 200ms
+	defer reportTicker.Stop()
+
 	if err != nil {
-		// A common "good" error is that the requested WAL segment has been purged by the leader.
-		// The gRPC status code for this should be `NotFound`.
-		if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
-			f.logger.Warn("Requested WAL segment not found on leader, forcing snapshot bootstrap.", "from_seq_num", startSeqNum, "error", err)
-			// We can force a bootstrap by deleting our local data. This is a simple but effective strategy.
-			// A more advanced strategy could be to just trigger the bootstrap logic without deleting.
-			// For now, we'll just return an error that the main loop will catch, causing a full re-sync check.
-			return fmt.Errorf("wal segment purged on leader, requires bootstrap: %w", err)
-		}
 		return fmt.Errorf("cannot start WAL streaming: %w", err)
 	}
 
-	f.logger.Info("Successfully connected to WAL stream, processing entries...", "from_seq_num", startSeqNum)
+	f.logger.Info("Successfully connected to WAL stream, waiting for entries...", "from_seq_num", startSeqNum)
 
 	for {
 		select {
@@ -269,11 +248,7 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 			if !ok {
 				if err := <-errChan; err != nil {
 					return fmt.Errorf("WAL stream terminated with error: %w", err)
-				} else if ctx.Err() != nil {
-					// If the context was cancelled, the stream might close cleanly before the error is sent.
-					return ctx.Err()
 				}
-
 				f.logger.Info("WAL stream finished cleanly.")
 				return nil
 			}
@@ -288,6 +263,15 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 
 		case err := <-errChan:
 			return fmt.Errorf("WAL stream terminated with error: %w", err)
+
+		case <-reportTicker.C:
+			f.mu.RLock()
+			lastApplied := f.lastAppliedSeqNum
+			f.mu.RUnlock()
+			if lastApplied > 0 {
+				// Send progress report to leader. We ignore errors here as it's a best-effort notification.
+				f.client.grpcClient.ReportProgress(context.Background(), &apiv1.ReportProgressRequest{AppliedSequenceNumber: lastApplied})
+			}
 
 		case <-ctx.Done():
 			f.logger.Info("Replication stream cancelled.")

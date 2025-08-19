@@ -15,10 +15,19 @@ service ReplicationService {
   // GetLatestState returns the latest sequence number and WAL segment index from the leader.
   // This is used by a follower to determine its replication lag.
   rpc GetLatestState(google.protobuf.Empty) returns (LatestStateResponse) {}
-
+ 
   // GetSnapshot allows a follower to bootstrap by receiving a full snapshot of the database.
   rpc GetSnapshot(SnapshotRequest) returns (stream SnapshotChunk) {}
+ 
+  // ReportProgress allows a follower to report its latest applied sequence number to the leader.
+  // This is used for synchronous replication to unblock waiting client writes.
+  rpc ReportProgress(ReportProgressRequest) returns (google.protobuf.Empty) {}
 
+}
+
+message ReportProgressRequest {
+  // The sequence number that the follower has successfully applied.
+  uint64 applied_sequence_number = 1;
 }
 
 message StreamWALRequest {

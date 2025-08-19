@@ -23,6 +23,7 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexusbase/wal"
 )
 
@@ -168,6 +169,23 @@ func (s *ReplicationGRPCServer) GetLatestState(ctx context.Context, req *emptypb
 		LatestSequenceNumber:  seqNum,
 		LatestWalSegmentIndex: walIndex,
 	}, nil
+}
+
+// ReportProgress is called by a follower to report its replication progress.
+func (s *ReplicationGRPCServer) ReportProgress(ctx context.Context, req *apiv1.ReportProgressRequest) (*emptypb.Empty, error) {
+	// Define a local interface to get the tracker from the engine.
+	type trackerProvider interface {
+		GetReplicationTracker() *replication.ReplicationTracker
+	}
+
+	engineWithTracker, ok := s.engine.(trackerProvider)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "synchronous replication is not supported by the current storage engine")
+	}
+
+	tracker := engineWithTracker.GetReplicationTracker()
+	tracker.ReportAppliedSequence(req.GetAppliedSequenceNumber())
+	return &emptypb.Empty{}, nil
 }
 
 // GetSnapshot allows a follower to bootstrap by receiving a full snapshot.

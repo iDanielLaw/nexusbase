@@ -20,6 +20,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexuscore/utils/clock"
 
@@ -99,6 +100,7 @@ type StorageEngineOptions struct {
 	// Rules for rounding relative query time ranges for caching. Must be sorted by QueryDurationThreshold.
 	RelativeQueryRoundingRules []RoundingRule
 	CompactionFallbackStrategy levels.CompactionFallbackStrategy
+	ReplicationSyncTimeoutMs   int // New: Timeout for synchronous replication waits.
 
 	// New fields for Intra-L0 Compaction
 	IntraL0CompactionTriggerFiles     int   // Number of small files in L0 to trigger an intra-L0 compaction.
@@ -215,6 +217,7 @@ type storageEngine struct {
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
+	replicationTracker  *replication.ReplicationTracker // New: For synchronous replication
 }
 
 var _ StorageEngineInterface = (*storageEngine)(nil)
