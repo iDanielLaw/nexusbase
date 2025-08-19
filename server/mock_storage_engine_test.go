@@ -87,6 +87,14 @@ func (m *MockStorageEngine) GetSequenceNumber() uint64 {
 	return args.Get(0).(uint64)
 }
 
+func (m *MockStorageEngine) GetReplicationTracker() *core.ReplicationTracker {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(*core.ReplicationTracker)
+}
+
 func (m *MockStorageEngine) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
 	args := m.Called(metric, tags)
 	if args.Get(0) == nil {

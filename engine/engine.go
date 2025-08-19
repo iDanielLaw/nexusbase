@@ -217,6 +217,7 @@ type storageEngine struct {
 	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
+	replicationTracker  *core.ReplicationTracker // New: For synchronous replication
 }
 
 var _ StorageEngineInterface = (*storageEngine)(nil)
@@ -277,6 +278,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 			Open:     sys.Open,
 			OpenFile: sys.OpenFile,
 		},
+		replicationTracker: core.NewReplicationTracker(),
 	}
 
 	if opts.TracerProvider != nil {
@@ -1127,4 +1129,9 @@ func (e *storageEngine) SetSequenceNumber(seqNum uint64) {
 // GetSequenceNumber returns the current sequence number of the engine.
 func (e *storageEngine) GetSequenceNumber() uint64 {
 	return e.sequenceNumber.Load()
+}
+
+// GetReplicationTracker returns the engine's replication tracker.
+func (e *storageEngine) GetReplicationTracker() *core.ReplicationTracker {
+	return e.replicationTracker
 }

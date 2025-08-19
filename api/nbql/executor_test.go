@@ -187,6 +187,14 @@ func (m *MockStorageEngine) GetClock() clock.Clock {
 	return args.Get(0).(clock.Clock)
 }
 
+func (m *MockStorageEngine) GetReplicationTracker() *core.ReplicationTracker {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(*core.ReplicationTracker)
+}
+
 func (m *MockStorageEngine) ApplyReplicatedEntry(ctx context.Context, entry *core.WALEntry) error {
 	args := m.Called(ctx, entry)
 	return args.Error(0)

@@ -40,6 +40,8 @@ type StorageEngineInterface interface {
 	// SetSequenceNumber forces the engine's sequence number to a specific value.
 	// This is used after a snapshot restore.
 	SetSequenceNumber(seqNum uint64)
+	// GetReplicationTracker returns the engine's replication tracker.
+	GetReplicationTracker() *core.ReplicationTracker
 	// Introspection
 	GetMetrics() ([]string, error)
 	GetTagsForMetric(metric string) ([]string, error)
