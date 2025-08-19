@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	apiv1 "github.com/INLOpen/nexusbase/api/v1"
 )
@@ -110,3 +112,53 @@ func (c *Client) ReceiveSnapshot(ctx context.Context, destinationDir string) err
 	return nil
 }
 
+// StreamWAL connects to the leader and starts streaming WAL entries from a given sequence number.
+// It returns a read-only channel for WAL entries, a read-only channel for a potential terminal error,
+// and an initial error if the stream could not be established.
+// The caller is responsible for handling the context cancellation, which will terminate the stream.
+func (c *Client) StreamWAL(ctx context.Context, fromSeqNum uint64) (<-chan *apiv1.WALEntry, <-chan error, error) {
+	c.logger.Info("Requesting WAL stream from leader...", "from_sequence_number", fromSeqNum)
+
+	req := &apiv1.StreamWALRequest{
+		FromSequenceNumber: fromSeqNum,
+	}
+
+	stream, err := c.grpcClient.StreamWAL(ctx, req)
+	if err != nil {
+		c.logger.Error("Failed to initiate WAL stream", "error", err)
+		return nil, nil, fmt.Errorf("failed to initiate WAL stream: %w", err)
+	}
+
+	entryChan := make(chan *apiv1.WALEntry, 100) // Buffered channel for entries
+	errChan := make(chan error, 1)               // Buffered channel for the final error
+
+	// Start a goroutine to continuously receive from the stream
+	go func() {
+		defer close(entryChan)
+		defer close(errChan)
+
+		for {
+			entry, err := stream.Recv()
+			if err != nil {
+				if err == io.EOF {
+					c.logger.Info("WAL stream finished cleanly (EOF).")
+				} else if status.Code(err) == codes.Canceled || ctx.Err() != nil {
+					c.logger.Info("WAL stream cancelled by context.")
+				} else {
+					c.logger.Error("Error receiving from WAL stream", "error", err)
+					errChan <- err
+				}
+				return // Exit the goroutine
+			}
+
+			select {
+			case entryChan <- entry:
+			case <-ctx.Done():
+				c.logger.Info("Context cancelled while sending WAL entry.")
+				return
+			}
+		}
+	}()
+
+	return entryChan, errChan, nil
+}
