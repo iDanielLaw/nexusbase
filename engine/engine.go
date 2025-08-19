@@ -1124,3 +1124,8 @@ func (e *storageEngine) SetSequenceNumber(seqNum uint64) {
 	e.sequenceNumber.Store(seqNum)
 	e.logger.Info("Engine sequence number force-set", "new_seq_num", seqNum)
 }
+
+// GetReplicationTracker returns the engine's replication tracker.
+func (e *storageEngine) GetReplicationTracker() *core.ReplicationTracker {
+	return e.replicationTracker
+}
