@@ -14,6 +14,7 @@ func main() {
 	// In a real application, load this from a config file.
 	leaderAddr := "localhost:50052" // The address of the leader's replication service
 	dataDir := "./follower-data"
+	bootstrapThreshold := uint64(1_000_000) // Example: if we are more than 1M entries behind, bootstrap.
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -24,7 +25,7 @@ func main() {
 	engineOpts.Logger = logger
 
 	// Create the follower instance.
-	follower, err := replication.NewFollower(leaderAddr, engineOpts, logger)
+	follower, err := replication.NewFollower(leaderAddr, bootstrapThreshold, engineOpts, logger)
 	if err != nil {
 		logger.Error("Failed to create follower", "error", err)
 		os.Exit(1)
