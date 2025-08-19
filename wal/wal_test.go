@@ -318,22 +318,22 @@ func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
 	require.NoError(t, encodeEntryData(&entry2Buf, &entry2))
 	// Truncate the encoded entry 2 data to cause a parsing error (e.g., unexpected EOF)
 	corruptedEntry2Bytes := entry2Buf.Bytes()[:entry2Buf.Len()-5]
-	_, err := payloadBuf.Write(corruptedEntry2Bytes)
-	require.NoError(t, err)
+	_, err2 := payloadBuf.Write(corruptedEntry2Bytes)
+	require.NoError(t, err2)
 
 	// 2. Write this corrupted payload as a single, validly-checksummed record to a segment file.
-	sw, err := CreateSegment(wal.dir, 1)
-	require.NoError(t, err)
+	sw, err3 := CreateSegment(wal.dir, 1)
+	require.NoError(t, err3)
 	require.NoError(t, sw.WriteRecord(payloadBuf.Bytes()))
 	require.NoError(t, sw.Close())
 
 	// 3. Attempt to recover from the segment.
-	recoveredEntries, err := wal.recoverFromSegment(segmentPath)
+	recoveredEntries, err4 := wal.recoverFromSegment(segmentPath)
 
 	// 4. Verify the outcome.
-	require.Error(t, err, "Recovery should fail due to corruption inside the batch")
-	assert.Contains(t, err.Error(), "error decoding entry 2 in batch", "Error message should point to the corrupted entry")
-	assert.ErrorIs(t, err, io.ErrUnexpectedEOF, "Underlying error should be unexpected EOF due to truncation")
+	require.Error(t, err4, "Recovery should fail due to corruption inside the batch")
+	assert.Contains(t, err4.Error(), "error decoding entry 2 in batch", "Error message should point to the corrupted entry")
+	assert.ErrorIs(t, err4, io.ErrUnexpectedEOF, "Underlying error should be unexpected EOF due to truncation")
 
 	// We should have recovered the entries that came before the corruption.
 	require.Len(t, recoveredEntries, 1, "Should have recovered the first valid entry from the corrupted batch")

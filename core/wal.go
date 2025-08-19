@@ -6,6 +6,7 @@ type WALEntry struct {
 	Key       []byte
 	Value     []byte
 	SeqNum    uint64
+	SegmentIndex uint64
 }
 
 type WALSyncMode string
