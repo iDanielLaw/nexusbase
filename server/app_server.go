@@ -105,8 +105,8 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 
 	// 3. Initialize the Replication gRPC server if the port is configured.
 	// This assumes `ReplicationPort` is added to `config.ServerConfig`.
-	if cfg.Server.GRPCPort > 0 /* Replace with cfg.Server.ReplicationPort > 0 when added */ {
-		replicationAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort+1) // Placeholder port logic
+	if cfg.Server.ReplicationPort > 0 {
+		replicationAddr := fmt.Sprintf(":%d", cfg.Server.ReplicationPort)
 		replicationLis, err := net.Listen("tcp", replicationAddr)
 		if err != nil {
 			// Clean up previously opened listeners

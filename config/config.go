@@ -21,6 +21,7 @@ type TLSConfig struct {
 type ServerConfig struct {
 	GRPCPort            int       `yaml:"grpc_port"`
 	TCPPort             int       `yaml:"tcp_port"`
+	ReplicationPort     int       `yaml:"replication_port"`
 	HealthCheckInterval string    `yaml:"health_check_interval"`
 	TLS                 TLSConfig `yaml:"tls"`
 }
@@ -165,6 +166,7 @@ func Load(r io.Reader) (*Config, error) {
 	cfg := &Config{
 		Server: ServerConfig{
 			GRPCPort:            50051,
+			ReplicationPort:     50053, // Default replication port
 			TCPPort:             50052,
 			HealthCheckInterval: "5s",
 			TLS: TLSConfig{

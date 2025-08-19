@@ -30,9 +30,8 @@ func setupE2ETest(t *testing.T) (leaderServer *server.AppServer, follower *Follo
 
 	leaderCfg := &config.Config{
 		Server: config.ServerConfig{
-			GRPCPort: leaderGRPCPort,
-			// This is a placeholder, we need to add ReplicationPort to the config struct.
-			// For now, we'll manually adjust the address.
+			GRPCPort:        leaderGRPCPort,
+			ReplicationPort: leaderReplicationPort,
 		},
 		Engine: config.EngineConfig{
 			DataDir: leaderDir,
@@ -43,9 +42,6 @@ func setupE2ETest(t *testing.T) (leaderServer *server.AppServer, follower *Follo
 		},
 		Logging: config.LoggingConfig{Level: "error", Output: "none"},
 	}
-	// This is a hack because the config doesn't support a separate replication port yet.
-	// We will manually create the replication listener on the correct port.
-	leaderCfg.Server.TCPPort = leaderReplicationPort // Using TCPPort as a stand-in for ReplicationPort
 
 	leaderLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", "leader")
 	leaderEngineOpts := engine.DefaultStorageEngineOptions()
