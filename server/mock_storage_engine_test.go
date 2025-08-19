@@ -73,6 +73,15 @@ func (m *MockStorageEngine) Query(ctx context.Context, params core.QueryParams) 
 	return args.Get(0).(core.QueryResultIteratorInterface), args.Error(1)
 }
 
+func (m *MockStorageEngine) ApplyReplicatedEntry(ctx context.Context, entry *core.WALEntry) error {
+	args := m.Called(ctx, entry)
+	return args.Error(0)
+}
+
+func (m *MockStorageEngine) SetSequenceNumber(seqNum uint64) {
+	m.Called(seqNum)
+}
+
 func (m *MockStorageEngine) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
 	args := m.Called(metric, tags)
 	if args.Get(0) == nil {

@@ -1000,3 +1000,78 @@ func (e *storageEngine) Metrics() (*EngineMetrics, error) {
 func (e *storageEngine) GetFileManage() internalFileManage {
 	return e.internalFile
 }
+
+// ApplyReplicatedEntry applies a WAL entry received from a leader.
+// This method is central to the follower's logic. It bypasses writing to its own WAL
+// and directly applies the change to the memtable using the sequence number from the leader.
+func (e *storageEngine) ApplyReplicatedEntry(ctx context.Context, entry *core.WALEntry) error {
+	if err := e.CheckStarted(); err != nil {
+		return err
+	}
+
+	// Ensure we don't apply old entries. This is an important idempotency check.
+	if entry.SeqNum <= e.sequenceNumber.Load() {
+		e.logger.Debug("Skipping already applied WAL entry", "entry_seq_num", entry.SeqNum, "engine_seq_num", e.sequenceNumber.Load())
+		return nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	switch entry.EntryType {
+	case core.EntryTypePutEvent:
+		// The key and value are already encoded from the leader.
+		// We just need to put them into the memtable with the leader's sequence number.
+		if err := e.mutableMemtable.Put(entry.Key, entry.Value, entry.EntryType, entry.SeqNum); err != nil {
+			return fmt.Errorf("failed to apply replicated PUT to memtable: %w", err)
+		}
+
+	case core.EntryTypeDelete:
+		// Apply the point tombstone to the memtable.
+		if err := e.mutableMemtable.Put(entry.Key, nil, entry.EntryType, entry.SeqNum); err != nil {
+			return fmt.Errorf("failed to apply replicated DELETE to memtable: %w", err)
+		}
+
+	case core.EntryTypeDeleteSeries:
+		// Apply the series tombstone.
+		seriesKeyStr := string(entry.Key)
+		e.deletedSeriesMu.Lock()
+		e.deletedSeries[seriesKeyStr] = entry.SeqNum
+		e.deletedSeriesMu.Unlock()
+
+		// Remove from active series tracking and tag index.
+		seriesID, found := e.seriesIDStore.GetID(seriesKeyStr)
+		if found {
+			e.tagIndexManager.RemoveSeries(seriesID)
+			e.removeActiveSeries(seriesKeyStr)
+		}
+
+	case core.EntryTypeDeleteRange:
+		// Apply the range tombstone.
+		minTs, maxTs, err := core.DecodeRangeTombstoneValue(entry.Value)
+		if err != nil {
+			return fmt.Errorf("failed to decode replicated range tombstone: %w", err)
+		}
+		e.rangeTombstonesMu.Lock()
+		e.rangeTombstones[string(entry.Key)] = append(e.rangeTombstones[string(entry.Key)], core.RangeTombstone{
+			MinTimestamp: minTs,
+			MaxTimestamp: maxTs,
+			SeqNum:       entry.SeqNum,
+		})
+		e.rangeTombstonesMu.Unlock()
+
+	default:
+		return fmt.Errorf("unknown replicated WAL entry type: %v", entry.EntryType)
+	}
+
+	// CRITICAL: Update the engine's sequence number to the one from the leader.
+	e.sequenceNumber.Store(entry.SeqNum)
+
+	return nil
+}
+
+// SetSequenceNumber forces the engine's sequence number to a specific value.
+func (e *storageEngine) SetSequenceNumber(seqNum uint64) {
+	e.sequenceNumber.Store(seqNum)
+	e.logger.Info("Engine sequence number force-set", "new_seq_num", seqNum)
+}

@@ -31,6 +31,13 @@ type StorageEngineInterface interface {
 	Query(ctx context.Context, params core.QueryParams) (core.QueryResultIteratorInterface, error)
 	GetSeriesByTags(metric string, tags map[string]string) ([]string, error)
 
+	// Replication
+	// ApplyReplicatedEntry applies a WAL entry received from a leader node.
+	// It must bypass writing to its own WAL and use the provided sequence number.
+	ApplyReplicatedEntry(ctx context.Context, entry *core.WALEntry) error
+	// SetSequenceNumber forces the engine's sequence number to a specific value.
+	// This is used after a snapshot restore.
+	SetSequenceNumber(seqNum uint64)
 	// Introspection
 	GetMetrics() ([]string, error)
 	GetTagsForMetric(metric string) ([]string, error)
