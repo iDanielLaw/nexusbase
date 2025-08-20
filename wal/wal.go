@@ -354,6 +354,9 @@ func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
 	if err := binary.Write(w, binary.LittleEndian, entry.SeqNum); err != nil {
 		return fmt.Errorf("failed to write sequence number: %w", err)
 	}
+	if err := binary.Write(w, binary.LittleEndian, entry.SegmentIndex); err != nil {
+		return fmt.Errorf("failed to write segment index: %w", err)
+	}
 
 	// Write variable-size fields with length prefixes.
 	if err := writeUvarintPrefixed(w, entry.Key); err != nil {
@@ -381,6 +384,9 @@ func decodeEntryData(r io.Reader) (*core.WALEntry, error) {
 	}
 	if err := binary.Read(r, binary.LittleEndian, &entry.SeqNum); err != nil {
 		return nil, fmt.Errorf("failed to read sequence number: %w", err)
+	}
+	if err := binary.Read(r, binary.LittleEndian, &entry.SegmentIndex); err != nil {
+		return nil, fmt.Errorf("failed to read segment index: %w", err)
 	}
 
 	var err error

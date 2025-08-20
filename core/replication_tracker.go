@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 )
 
@@ -24,8 +25,9 @@ func NewReplicationTracker() *ReplicationTracker {
 func (t *ReplicationTracker) ReportAppliedSequence(seqNum uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
+	slog.Debug("ReportAppliedSequence called", "reported_seq", seqNum, "current_latest", t.latestAppliedSeqNum)
 	if seqNum > t.latestAppliedSeqNum {
+		slog.Debug("Updating latest applied sequence number", "from", t.latestAppliedSeqNum, "to", seqNum)
 		t.latestAppliedSeqNum = seqNum
 		// Broadcast to all waiting goroutines that the sequence number has changed.
 		t.cond.Broadcast()
@@ -36,6 +38,7 @@ func (t *ReplicationTracker) ReportAppliedSequence(seqNum uint64) {
 // or until the context is cancelled (e.g., due to a timeout).
 func (t *ReplicationTracker) WaitForSequence(ctx context.Context, waitSeqNum uint64) error {
 	t.mu.Lock()
+	slog.Debug("WaitForSequence started", "wait_for_seq", waitSeqNum, "current_latest", t.latestAppliedSeqNum)
 	defer t.mu.Unlock()
 
 	// This pattern allows waiting on a condition variable with context cancellation.
@@ -45,9 +48,12 @@ func (t *ReplicationTracker) WaitForSequence(ctx context.Context, waitSeqNum uin
 		for t.latestAppliedSeqNum < waitSeqNum {
 			// Check for context cancellation before waiting.
 			if ctx.Err() != nil {
+				slog.Debug("Context cancelled before cond.Wait()", "wait_for_seq", waitSeqNum)
 				break
 			}
+			slog.Debug("Waiting on condition variable", "wait_for_seq", waitSeqNum, "current_latest", t.latestAppliedSeqNum)
 			t.cond.Wait()
+			slog.Debug("Woke up from cond.Wait()", "wait_for_seq", waitSeqNum, "current_latest", t.latestAppliedSeqNum)
 		}
 		close(waitDone)
 	}()
@@ -55,9 +61,11 @@ func (t *ReplicationTracker) WaitForSequence(ctx context.Context, waitSeqNum uin
 	select {
 	case <-waitDone:
 		// The sequence number has been applied.
+		slog.Debug("WaitForSequence succeeded", "wait_for_seq", waitSeqNum)
 		return nil
 	case <-ctx.Done():
 		// The context was cancelled (e.g., timeout).
+		slog.Debug("WaitForSequence timed out", "wait_for_seq", waitSeqNum, "error", ctx.Err())
 		// We need to wake up our waiting goroutine so it can exit.
 		t.cond.Broadcast()
 		// Wait for the goroutine to finish its check and exit.

@@ -352,7 +352,13 @@ func (e *storageEngine) delete(ctx context.Context, key []byte) error {
 	currentSeqNum := e.sequenceNumber.Add(1)
 	e.metrics.DeleteTotal.Add(1)
 
-	walEntry := core.WALEntry{EntryType: core.EntryTypeDelete, Key: keyCopy, Value: nil, SeqNum: currentSeqNum}
+	walEntry := core.WALEntry{
+		EntryType:    core.EntryTypeDelete,
+		Key:          keyCopy,
+		Value:        nil,
+		SeqNum:       currentSeqNum,
+		SegmentIndex: e.wal.ActiveSegmentIndex(),
+	}
 	if err := e.wal.Append(walEntry); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "wal_append_failed")
@@ -680,10 +686,12 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 		return err
 	}
 
-	// 2. Assign sequence numbers to all entries in the batch.
+	// 2. Assign sequence numbers and segment index to all entries in the batch.
 	// This must be done before writing to the WAL.
+	activeSegmentIdx := e.wal.ActiveSegmentIndex()
 	for i := range walEntries {
 		walEntries[i].SeqNum = e.sequenceNumber.Add(1)
+		walEntries[i].SegmentIndex = activeSegmentIdx
 	}
 
 	// 3. Write the entire batch to the WAL as a single, atomic operation.
@@ -705,15 +713,26 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 	// --- Synchronous Replication Wait ---
 	// If synchronous replication is enabled, wait for follower confirmation.
 	if e.opts.ReplicationSyncTimeoutMs > 0 {
+		// We must sync the WAL to disk before waiting for replication,
+		// so the replication stream on the leader can read the new entries.
+		if syncErr := e.wal.Sync(); syncErr != nil {
+			err = fmt.Errorf("failed to sync WAL before waiting for replication: %w", syncErr)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "wal_sync_failed")
+			return err
+		}
 		lastSeqInBatch := walEntries[len(walEntries)-1].SeqNum
 		timeout := time.Duration(e.opts.ReplicationSyncTimeoutMs) * time.Millisecond
+		e.logger.Debug("Waiting for replication confirmation", "wait_for_seq", lastSeqInBatch, "timeout", timeout)
 		waitCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
 		if err := e.replicationTracker.WaitForSequence(waitCtx, lastSeqInBatch); err != nil {
+			e.logger.Error("Replication wait failed", "wait_for_seq", lastSeqInBatch, "error", err)
 			// The write IS durable on the leader, but the follower did not confirm in time.
 			return fmt.Errorf("write timed out waiting for follower confirmation: %w", err)
 		}
+		e.logger.Debug("Replication confirmation received", "seq", lastSeqInBatch)
 	}
 
 	// 4. Write all entries to memtable under a single lock.

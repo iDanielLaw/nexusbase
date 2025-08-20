@@ -128,9 +128,10 @@ func (s *ReplicationGRPCServer) StreamWAL(req *apiv1.StreamWALRequest, stream ap
 		}
 
 		if err := stream.Send(apiEntry); err != nil {
-			s.logger.Warn("Failed to send WAL entry to follower", "error", err)
+			s.logger.Warn("Failed to send WAL entry to follower", "seq_num", apiEntry.SequenceNumber, "error", err)
 			return err
 		}
+		s.logger.Debug("Sent WAL entry to follower", "seq_num", apiEntry.SequenceNumber)
 	}
 }
 
@@ -183,6 +184,7 @@ func (s *ReplicationGRPCServer) ReportProgress(ctx context.Context, req *apiv1.R
 	}
 
 	tracker := engineWithTracker.GetReplicationTracker()
+	s.logger.Debug("Received progress report from follower", "applied_seq_num", req.GetAppliedSequenceNumber())
 	tracker.ReportAppliedSequence(req.GetAppliedSequenceNumber())
 	return &emptypb.Empty{}, nil
 }
@@ -232,42 +234,6 @@ func (s *ReplicationGRPCServer) GetSnapshot(req *apiv1.SnapshotRequest, stream a
 	return nil
 }
 
-func (s *ReplicationGRPCServer) convertCoreWALEntryToAPI(coreEntry *core.WALEntry) (*apiv1.WALEntry, error) {
-	apiEntry := &apiv1.WALEntry{
-		SequenceNumber:  coreEntry.SeqNum,
-		WalSegmentIndex: coreEntry.SegmentIndex,
-	}
-
-	switch coreEntry.EntryType {
-	case core.EntryTypePutEvent:
-		apiEntry.Payload = &apiv1.WALEntry_PutEvent{
-			PutEvent: &apiv1.PutEvent{
-				Key:   coreEntry.Key,
-				Value: coreEntry.Value,
-			},
-		}
-	case core.EntryTypeDelete:
-		apiEntry.Payload = &apiv1.WALEntry_DeleteEvent{
-			DeleteEvent: &apiv1.DeleteEvent{
-				Key: coreEntry.Key,
-			},
-		}
-	case core.EntryTypeDeleteSeries:
-		apiEntry.Payload = &apiv1.WALEntry_DeleteSeriesEvent{
-			DeleteSeriesEvent: &apiv1.DeleteSeriesEvent{
-				KeyPrefix: coreEntry.Key,
-			},
-		}
-	case core.EntryTypeDeleteRange:
-		// TODO: The core.WALEntry for DeleteRange needs to be properly defined.
-		// Assuming the value contains the start and end timestamps.
-		return nil, status.Errorf(codes.Unimplemented, "delete range replication not yet supported")
-	default:
-		return nil, status.Errorf(codes.Internal, "unknown WAL entry type: %v", coreEntry.EntryType)
-	}
-	return apiEntry, nil
-}
-
 // streamFile reads a file from the snapshot and streams it in chunks.
 func (s *ReplicationGRPCServer) streamFile(stream apiv1.ReplicationService_GetSnapshotServer, snapshotRoot, filePath string) error {
 	relPath, err := filepath.Rel(snapshotRoot, filePath)
@@ -306,4 +272,45 @@ func (s *ReplicationGRPCServer) streamFile(stream apiv1.ReplicationService_GetSn
 		}
 	}
 	return nil
+}
+
+// convertCoreWALEntryToAPI converts the internal core.WALEntry struct to the gRPC API WALEntry message.
+func (s *ReplicationGRPCServer) convertCoreWALEntryToAPI(coreEntry *core.WALEntry) (*apiv1.WALEntry, error) {
+	apiEntry := &apiv1.WALEntry{
+		SequenceNumber:  coreEntry.SeqNum,
+		WalSegmentIndex: coreEntry.SegmentIndex,
+	}
+
+	switch coreEntry.EntryType {
+	case core.EntryTypePutEvent:
+		apiEntry.Payload = &apiv1.WALEntry_PutEvent{
+			PutEvent: &apiv1.PutEvent{
+				Key:   coreEntry.Key,
+				Value: coreEntry.Value,
+			},
+		}
+	case core.EntryTypeDelete:
+		apiEntry.Payload = &apiv1.WALEntry_DeleteEvent{
+			DeleteEvent: &apiv1.DeleteEvent{
+				Key: coreEntry.Key,
+			},
+		}
+	case core.EntryTypeDeleteSeries:
+		apiEntry.Payload = &apiv1.WALEntry_DeleteSeriesEvent{
+			DeleteSeriesEvent: &apiv1.DeleteSeriesEvent{
+				KeyPrefix: coreEntry.Key,
+			},
+		}
+	case core.EntryTypeDeleteRange:
+		minTs, maxTs, err := core.DecodeRangeTombstoneValue(coreEntry.Value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode range tombstone value for API conversion: %w", err)
+		}
+		apiEntry.Payload = &apiv1.WALEntry_DeleteRangeEvent{
+			DeleteRangeEvent: &apiv1.DeleteRangeEvent{KeyPrefix: coreEntry.Key, StartTs: minTs, EndTs: maxTs},
+		}
+	default:
+		return nil, fmt.Errorf("unknown core WAL entry type: %v", coreEntry.EntryType)
+	}
+	return apiEntry, nil
 }

@@ -28,12 +28,12 @@ type AppServer struct {
 	grpcServer        *GRPCServer
 	tcpServer         *TCP2Server
 	replicationServer *ReplicationGRPCServer
-	putWorker   *WorkerPool
-	batchWorker *WorkerPool
-	cfg         *config.Config
-	logger      *slog.Logger
-	engine      engine.StorageEngineInterface
-	cancel      context.CancelFunc
+	putWorker         *WorkerPool
+	batchWorker       *WorkerPool
+	cfg               *config.Config
+	logger            *slog.Logger
+	engine            engine.StorageEngineInterface
+	cancel            context.CancelFunc
 }
 
 // NewAppServer creates and initializes a new application server.
@@ -169,6 +169,19 @@ func (s *AppServer) Start() error {
 			}()
 			s.logger.Info("Starting gRPC server...")
 			return s.grpcServer.Start(s.grpcLis)
+		})
+	}
+
+	// Start Replication gRPC server if it exists
+	if s.replicationServer != nil {
+		g.Go(func() error {
+			go func() {
+				<-appCtx.Done()
+				s.logger.Info("Context cancelled, stopping Replication gRPC server...")
+				s.replicationServer.Stop()
+			}()
+			s.logger.Info("Starting Replication gRPC server...")
+			return s.replicationServer.Start(s.replicationLis)
 		})
 	}
 

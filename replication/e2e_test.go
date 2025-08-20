@@ -16,7 +16,14 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/server"
+	"github.com/INLOpen/nexusbase/sstable"
 )
+
+func mustNewFieldValues(t *testing.T, data map[string]interface{}) core.FieldValues {
+	fv, err := core.NewFieldValuesFromMap(data)
+	require.NoError(t, err)
+	return fv
+}
 
 // setupE2ETest sets up a full Leader-Follower environment for end-to-end testing.
 // It returns the leader's AppServer, the follower instance, and a cleanup function.
@@ -162,6 +169,78 @@ func TestReplication_E2E_BootstrapAndCatchup(t *testing.T) {
 	assert.Equal(t, leaderSeq, followerSeq, "Follower sequence number should match leader's after catch-up")
 }
 
+func TestReplication_E2E_WithDeletes(t *testing.T) {
+	leaderServer, follower, cleanup := setupE2ETest(t)
+	defer cleanup()
+
+	leaderEngine := leaderServer.GetEngine()
+	ctx := context.Background()
+
+	// --- 1. Put initial data on the leader ---
+	// Series A: will have a point deleted
+	dpA1 := mustNewDataPoint(t, "replication.test", map[string]string{"id": "A"}, 100, map[string]interface{}{"value": 10.0})
+	dpA2 := mustNewDataPoint(t, "replication.test", map[string]string{"id": "A"}, 200, map[string]interface{}{"value": 20.0})
+	// Series B: will be deleted entirely
+	dpB1 := mustNewDataPoint(t, "replication.test", map[string]string{"id": "B"}, 150, map[string]interface{}{"value": 15.0})
+	// Series C: will remain untouched, then have a point added
+	dpC1 := mustNewDataPoint(t, "replication.test", map[string]string{"id": "C"}, 180, map[string]interface{}{"value": 18.0})
+
+	require.NoError(t, leaderEngine.PutBatch(ctx, []core.DataPoint{dpA1, dpA2, dpB1, dpC1}))
+	require.NoError(t, leaderEngine.ForceFlush(ctx, true))
+	leaderInitialSeq := leaderEngine.GetSequenceNumber()
+
+	// --- 2. Start follower and wait for bootstrap ---
+	require.NoError(t, follower.Start())
+	require.Eventually(t, func() bool {
+		follower.mu.RLock()
+		defer follower.mu.RUnlock()
+		return follower.engine != nil && follower.engine.GetSequenceNumber() >= leaderInitialSeq
+	}, 5*time.Second, 100*time.Millisecond, "Follower did not bootstrap in time")
+
+	// --- 3. Perform live deletions and a put on the leader ---
+	// Point delete on Series A
+	require.NoError(t, leaderEngine.Delete(ctx, dpA1.Metric, dpA1.Tags, dpA1.Timestamp))
+	// Series delete on Series B
+	require.NoError(t, leaderEngine.DeleteSeries(ctx, dpB1.Metric, dpB1.Tags))
+	// New point on Series C
+	dpC2 := mustNewDataPoint(t, "replication.test", map[string]string{"id": "C"}, 280, map[string]interface{}{"value": 28.0})
+	require.NoError(t, leaderEngine.Put(ctx, dpC2))
+
+	finalLeaderSeq := leaderEngine.GetSequenceNumber()
+
+	// --- 4. Wait for follower to catch up to all changes ---
+	require.Eventually(t, func() bool {
+		follower.mu.RLock()
+		defer follower.mu.RUnlock()
+		return follower.engine != nil && follower.engine.GetSequenceNumber() >= finalLeaderSeq
+	}, 5*time.Second, 100*time.Millisecond, "Follower did not replicate deletions and new put in time")
+
+	followerEngine := follower.engine
+	require.NotNil(t, followerEngine)
+
+	// --- 5. Verify state on the follower ---
+	// Series A: Point at ts=100 should be gone, point at ts=200 should exist
+	_, err := followerEngine.Get(ctx, dpA1.Metric, dpA1.Tags, dpA1.Timestamp)
+	assert.ErrorIs(t, err, sstable.ErrNotFound, "Point A1 should be deleted on follower")
+
+	valA2, err := followerEngine.Get(ctx, dpA2.Metric, dpA2.Tags, dpA2.Timestamp)
+	require.NoError(t, err, "Point A2 should exist on follower")
+	assert.Equal(t, 20.0, mustGetFloat(t, valA2, "value"))
+
+	// Series B: Should be completely gone
+	_, err = followerEngine.Get(ctx, dpB1.Metric, dpB1.Tags, dpB1.Timestamp)
+	assert.ErrorIs(t, err, sstable.ErrNotFound, "Point B1 should be gone due to series delete")
+
+	// Series C: Should have both old and new points
+	valC1, err := followerEngine.Get(ctx, dpC1.Metric, dpC1.Tags, dpC1.Timestamp)
+	require.NoError(t, err, "Point C1 should exist on follower")
+	assert.Equal(t, 18.0, mustGetFloat(t, valC1, "value"))
+
+	valC2, err := followerEngine.Get(ctx, dpC2.Metric, dpC2.Tags, dpC2.Timestamp)
+	require.NoError(t, err, "Point C2 (live put) should exist on follower")
+	assert.Equal(t, 28.0, mustGetFloat(t, valC2, "value"))
+}
+
 // Helper to find a free TCP port.
 func findFreePort(t *testing.T) int {
 	t.Helper()
@@ -174,9 +253,18 @@ func findFreePort(t *testing.T) int {
 }
 
 // Helper to create FieldValues for tests, failing the test on error.
-func mustNewFieldValues(t *testing.T, data map[string]interface{}) core.FieldValues {
+func mustNewDataPoint(t *testing.T, metric string, tags map[string]string, ts int64, fields map[string]interface{}) core.DataPoint {
 	t.Helper()
-	fv, err := core.NewFieldValuesFromMap(data)
+	dp, err := core.NewSimpleDataPoint(metric, tags, ts, fields)
 	require.NoError(t, err)
-	return fv
+	return *dp
+}
+
+func mustGetFloat(t *testing.T, fv core.FieldValues, fieldName string) float64 {
+	t.Helper()
+	val, ok := fv[fieldName]
+	require.True(t, ok, "field '%s' not found", fieldName)
+	floatVal, ok := val.ValueFloat64()
+	require.True(t, ok, "field '%s' is not a float64", fieldName)
+	return floatVal
 }

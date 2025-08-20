@@ -87,9 +87,10 @@ func (e *storageEngine) DeleteSeries(ctx context.Context, metric string, tags ma
 
 	// Write tombstone to WAL
 	walEntry := core.WALEntry{
-		EntryType: core.EntryTypeDeleteSeries,
-		Key:       seriesKeyBytes,
-		SeqNum:    currentSeqNum,
+		EntryType:    core.EntryTypeDeleteSeries,
+		Key:          seriesKeyBytes,
+		SeqNum:       currentSeqNum,
+		SegmentIndex: e.wal.ActiveSegmentIndex(),
 	}
 	if err := e.wal.Append(walEntry); err != nil {
 		span.RecordError(err)
@@ -197,10 +198,11 @@ func (e *storageEngine) DeletesByTimeRange(ctx context.Context, metric string, t
 
 	// Write tombstone to WAL
 	walEntry := core.WALEntry{
-		EntryType: core.EntryTypeDeleteRange,
-		Key:       seriesKeyBytes,
-		Value:     core.EncodeRangeTombstoneValue(startTime, endTime),
-		SeqNum:    currentSeqNum,
+		EntryType:    core.EntryTypeDeleteRange,
+		Key:          seriesKeyBytes,
+		Value:        core.EncodeRangeTombstoneValue(startTime, endTime),
+		SeqNum:       currentSeqNum,
+		SegmentIndex: e.wal.ActiveSegmentIndex(),
 	}
 	if err := e.wal.Append(walEntry); err != nil {
 		span.RecordError(err)

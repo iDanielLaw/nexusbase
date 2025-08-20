@@ -19,7 +19,7 @@ import (
 // Follower manages the state of a follower node, handling the entire replication
 // process from bootstrapping via snapshot to continuous WAL streaming.
 type Follower struct {
-	leaderAddr string
+	leaderAddr         string
 	dataDir            string
 	engineOpts         engine.StorageEngineOptions // Store engine options for restarts
 	bootstrapThreshold uint64                      // If lag is > this, bootstrap from snapshot.
@@ -101,6 +101,7 @@ func (f *Follower) runReplicationLoop() {
 		}
 
 		if f.client == nil {
+			f.logger.Info("Attempting to connect to leader", "address", f.leaderAddr)
 			client, err := NewClient(f.leaderAddr, f.logger)
 			if err != nil {
 				f.logger.Error("Failed to connect to leader, retrying...", "error", err, "backoff", backoff)
@@ -111,6 +112,7 @@ func (f *Follower) runReplicationLoop() {
 				}
 				continue
 			}
+			f.logger.Info("Successfully connected to leader", "address", f.leaderAddr)
 			f.client = client
 		}
 
@@ -169,15 +171,15 @@ func (f *Follower) syncWithLeader() error {
 		}
 	}()
 
+	f.mu.RLock()
+	localSeqNum := f.lastAppliedSeqNum
+	f.mu.RUnlock()
+
 	leaderState, err := f.client.grpcClient.GetLatestState(ctx, &emptypb.Empty{})
 	if err != nil {
 		return fmt.Errorf("could not get latest state from leader: %w", err)
 	}
-	f.logger.Info("Retrieved leader state", "leader_seq_num", leaderState.GetLatestSequenceNumber())
-
-	f.mu.RLock()
-	localSeqNum := f.lastAppliedSeqNum
-	f.mu.RUnlock()
+	f.logger.Info("Retrieved leader state", "leader_seq_num", leaderState.GetLatestSequenceNumber(), "local_seq_num", localSeqNum)
 
 	// Decide whether to bootstrap or stream WAL
 	// Bootstrap if:
@@ -246,7 +248,7 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 	startSeqNum := f.lastAppliedSeqNum + 1
 	f.mu.RUnlock()
 
-	f.logger.Info("Attempting to stream WAL entries...", "from_seq_num", startSeqNum)
+	f.logger.Info("Starting WAL stream from leader", "from_seq_num", startSeqNum)
 
 	entryChan, errChan, err := f.client.StreamWAL(ctx, startSeqNum)
 	if err != nil {
@@ -279,8 +281,10 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 				f.logger.Info("WAL stream finished cleanly.")
 				return nil
 			}
+			f.logger.Debug("Received WAL entry from leader", "seq_num", entry.GetSequenceNumber())
 
 			if err := f.applier.ApplyEntry(ctx, entry); err != nil {
+				f.logger.Error("Failed to apply replicated entry", "seq_num", entry.GetSequenceNumber(), "error", err)
 				return fmt.Errorf("CRITICAL: failed to apply replicated entry %d: %w", entry.GetSequenceNumber(), err)
 			}
 
@@ -296,6 +300,7 @@ func (f *Follower) streamAndApplyWAL(ctx context.Context) error {
 			lastApplied := f.lastAppliedSeqNum
 			f.mu.RUnlock()
 			if lastApplied > 0 {
+				f.logger.Debug("Reporting progress to leader", "last_applied_seq_num", lastApplied)
 				// Use a short-lived context derived from the main loop's context for the RPC call.
 				reportCtx, reportCancel := context.WithTimeout(ctx, 1*time.Second)
 				// Send progress report to leader. We ignore errors here as it's a best-effort notification.
