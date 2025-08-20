@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package replication;
+
+option go_package = "github.com/iDanielLaw/nexusbase/replication/proto";
+
+import "google/protobuf/struct.proto";
+
+// ReplicationService นิยาม gRPC service สำหรับการทำ replication
+service ReplicationService {
+  // StreamWAL ถูกเรียกโดย follower เพื่อรับ stream ของ WAL entries จาก leader
+  // อย่างต่อเนื่อง
+  rpc StreamWAL(StreamWALRequest) returns (stream WALEntry) {}
+}
+
+// StreamWALRequest คือ message ที่ follower ส่งไปหา leader ตอนเริ่มต้น stream
+message StreamWALRequest {
+  // sequence number ของ entry ล่าสุดที่ follower ได้รับและประมวลผลสำเร็จ
+  // leader จะเริ่มส่งข้อมูลตั้งแต่ entry ที่อยู่ถัดจากหมายเลขนี้
+  uint64 from_sequence_number = 1;
+}
+
+// WALEntry คือข้อมูลการเปลี่ยนแปลงหนึ่งรายการที่ถูกส่งผ่าน stream
+message WALEntry {
+  enum EntryType {
+    // ใช้สำหรับบันทึกข้อมูลอนุกรมเวลาใหม่
+    PUT_EVENT = 0;
+    // ใช้สำหรับลบ series ทั้งหมดที่ตรงกับ metric และ tags
+    DELETE_SERIES = 1;
+    // ใช้สำหรับลบข้อมูลในช่วงเวลาที่กำหนด
+    DELETE_RANGE = 2;
+  }
+
+  uint64 sequence_number = 1;
+  EntryType entry_type = 2;
+  string metric = 3;
+  map<string, string> tags = 4;
+  int64 timestamp = 5; // สำหรับ PUT_EVENT
+  google.protobuf.Struct fields = 6; // สำหรับ PUT_EVENT
+  int64 start_time = 7; // สำหรับ DELETE_RANGE
+  int64 end_time = 8; // สำหรับ DELETE_RANGE
+}

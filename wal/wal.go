@@ -41,6 +41,24 @@ type WAL struct {
 
 var _ WALInterface = (*WAL)(nil)
 
+// NewStreamReader creates a new reader for streaming WAL entries.
+// It's designed for replication followers to tail the leader's WAL.
+func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
+	// The stream reader needs a consistent view of the segment list, so we lock.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// TODO: Implement logic to find the correct starting segment based on fromSeqNum.
+	// For now, the filtering of already-seen sequence numbers is handled
+	// within the stream reader's Next() method by checking sr.lastReadSeqNum.
+	sr := &streamReader{
+		wal:            w,
+		lastReadSeqNum: fromSeqNum,
+		logger:         w.logger.With("component", "wal_stream_reader"),
+	}
+	return sr, nil
+}
+
 // Options holds configuration for the WAL.
 type Options struct {
 	Dir            string
