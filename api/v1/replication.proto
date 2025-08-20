@@ -55,6 +55,12 @@ message WALEntry {
 message PutEvent {
   bytes key = 1;
   bytes value = 2; // Encoded FieldValues
+
+  // The following fields are added to allow a follower to reconstruct its own
+  // metadata (string/series stores) without needing to query the leader.
+  string metric = 3;
+  map<string, string> tags = 4;
+  int64 timestamp = 5;
 }
 
 message DeleteEvent {

@@ -161,19 +161,30 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 		return nil
 	}
 
-	var batchPayload bytes.Buffer
-	if err := batchPayload.WriteByte(byte(core.EntryTypePutBatch)); err != nil {
-		return fmt.Errorf("failed to write batch entry type: %w", err)
-	}
-	if err := binary.Write(&batchPayload, binary.LittleEndian, uint32(len(entries))); err != nil {
-		return fmt.Errorf("failed to write batch entry count: %w", err)
-	}
-	for i := range entries {
-		if err := encodeEntryData(&batchPayload, &entries[i]); err != nil {
-			return fmt.Errorf("failed to encode entry %d for batch: %w", i, err)
+	payloadBuf := core.BufferPool.Get()
+	defer core.BufferPool.Put(payloadBuf)
+
+	if len(entries) == 1 {
+		// Optimization: For a single entry, write it directly without batch framing.
+		// This saves space and is handled correctly by decodeBatchRecord.
+		if err := encodeEntryData(payloadBuf, &entries[0]); err != nil {
+			return fmt.Errorf("failed to encode single entry for batch append: %w", err)
+		}
+	} else {
+		// For multiple entries, write the batch header and then each entry.
+		if err := payloadBuf.WriteByte(byte(core.EntryTypePutBatch)); err != nil {
+			return fmt.Errorf("failed to write batch entry type: %w", err)
+		}
+		if err := binary.Write(payloadBuf, binary.LittleEndian, uint32(len(entries))); err != nil {
+			return fmt.Errorf("failed to write batch entry count: %w", err)
+		}
+		for i := range entries {
+			if err := encodeEntryData(payloadBuf, &entries[i]); err != nil {
+				return fmt.Errorf("failed to encode entry %d for batch: %w", i, err)
+			}
 		}
 	}
-	payloadBytes := batchPayload.Bytes()
+	payloadBytes := payloadBuf.Bytes()
 	newRecordSize := int64(len(payloadBytes) + 8) // +4 for length, +4 for checksum
 
 	if w.activeSegment == nil {
@@ -209,7 +220,6 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 
 	// Signal any waiting readers that new data is available.
 	w.readerCond.Broadcast()
-
 	if w.opts.SyncMode == core.WALSyncAlways {
 		return w.activeSegment.Sync()
 	}
@@ -365,6 +375,28 @@ func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
 	if err := writeUvarintPrefixed(w, entry.Value); err != nil {
 		return fmt.Errorf("failed to write value: %w", err)
 	}
+
+	// NEW: Encode DataPoint if it's a PutEvent for replication metadata reconstruction.
+	isPutEvent := entry.EntryType == core.EntryTypePutEvent
+	if err := binary.Write(w, binary.LittleEndian, isPutEvent); err != nil {
+		return fmt.Errorf("failed to write DataPoint presence flag: %w", err)
+	}
+
+	if isPutEvent {
+		// Metric
+		if err := writeString(w, entry.DataPoint.Metric); err != nil {
+			return err
+		}
+		// Tags
+		if err := writeStringMap(w, entry.DataPoint.Tags); err != nil {
+			return err
+		}
+		// Timestamp
+		if err := binary.Write(w, binary.BigEndian, entry.DataPoint.Timestamp); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -399,6 +431,32 @@ func decodeEntryData(r io.Reader) (*core.WALEntry, error) {
 		return nil, fmt.Errorf("failed to read value: %w", err)
 	}
 
+	// NEW: Decode DataPoint if present
+	var isPutEvent bool
+	if err := binary.Read(r, binary.LittleEndian, &isPutEvent); err != nil {
+		// For backward compatibility, if this read fails (e.g., EOF), it means it's an old WAL record.
+		if err == io.EOF {
+			return entry, nil
+		}
+		return nil, fmt.Errorf("failed to read DataPoint presence flag: %w", err)
+	}
+
+	if isPutEvent {
+		entry.DataPoint = core.DataPoint{}
+		var err error
+		entry.DataPoint.Metric, err = readString(r)
+		if err != nil {
+			return nil, err
+		}
+		entry.DataPoint.Tags, err = readStringMap(r)
+		if err != nil {
+			return nil, err
+		}
+		if err := binary.Read(r, binary.BigEndian, &entry.DataPoint.Timestamp); err != nil {
+			return nil, err
+		}
+	}
+
 	return entry, nil
 }
 
@@ -414,10 +472,6 @@ func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 		entries, err := w.recoverFromSegment(path)
 		if len(entries) > 0 {
 			allEntries = append(allEntries, entries...)
-			// Update the last known sequence number from the recovered entries
-			// This part is actually handled by the engine applying the entries,
-			// so we don't need to track it here during recovery.
-			// w.lastKnownSeqNum = entries[len(entries)-1].SeqNum
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -465,201 +519,6 @@ func (w *WAL) recoverFromSegment(filePath string) ([]core.WALEntry, error) {
 	}
 }
 
-// walReader implements the WALReader interface for streaming WAL entries.
-type walReader struct {
-	wal         *WAL
-	nextSeqNum  uint64
-	entryBuffer []core.WALEntry
-
-	currentSegReader *SegmentReader
-	currentSegIndex  uint64
-
-	mu         sync.Mutex
-	closeCh    chan struct{}
-	cancelOnce sync.Once
-}
-
-// OpenReader creates a new WAL reader starting from a given sequence number.
-// The reader will start from the oldest available segment and scan forward.
-func (w *WAL) OpenReader(fromSeqNum uint64) (WALReader, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if len(w.segmentIndexes) == 0 {
-		// This can happen if the WAL is new and no data has been written yet.
-		// The reader will just wait for the first entry.
-		w.logger.Info("Opening WAL reader on an empty WAL, will wait for data", "from_seq_num", fromSeqNum)
-	}
-
-	r := &walReader{
-		wal:        w,
-		nextSeqNum: fromSeqNum,
-		closeCh:    make(chan struct{}),
-	}
-
-	return r, nil
-}
-
-// Next returns the next available WAL entry. It blocks if no new entries are
-// available, until an entry is written, the context is cancelled, or the reader is closed.
-func (r *walReader) Next(ctx context.Context) (*core.WALEntry, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for {
-		// Check for cancellation or closed reader first.
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-r.closeCh:
-			return nil, io.EOF
-		default:
-		}
-
-		// 1. Process buffered entries first.
-		if len(r.entryBuffer) > 0 {
-			entry := r.entryBuffer[0]
-			r.entryBuffer = r.entryBuffer[1:] // Consume entry
-			if entry.SeqNum >= r.nextSeqNum {
-				r.nextSeqNum = entry.SeqNum + 1
-				return &entry, nil
-			}
-			// Stale entry, loop to get the next one from the buffer.
-			continue
-		}
-
-		// 2. Buffer is empty, ensure we have a segment reader.
-		if r.currentSegReader == nil {
-			err := r.openNextSegment()
-			if err != nil {
-				return nil, err // Propagate error (e.g., segment not found)
-			}
-			if r.currentSegReader == nil { // No error, but no segment opened (at the tip)
-				if err := r.waitForData(ctx); err != nil {
-					return nil, err
-				}
-				continue // After waiting, loop again to try opening a segment.
-			}
-		}
-
-		// 3. Read a new record from the current segment.
-		recordData, err := r.currentSegReader.ReadRecord()
-		if err == nil {
-			entries, decErr := decodeBatchRecord(recordData)
-			if decErr != nil {
-				r.wal.logger.Error("Failed to decode WAL batch record during streaming", "error", decErr, "segment", r.currentSegIndex)
-				// This is a corruption error. We should stop.
-				return nil, decErr
-			}
-			// Add segment index to all entries in the batch
-			for i := range entries {
-				entries[i].SegmentIndex = r.currentSegIndex
-			}
-			r.entryBuffer = entries
-			continue // Loop to process the newly filled buffer.
-		}
-
-		// 4. Handle read error.
-		if errors.Is(err, io.EOF) {
-			// Clean end of segment, close it and try to open the next one in the next loop iteration.
-			r.currentSegReader.Close()
-			r.currentSegReader = nil
-			continue
-		}
-
-		// Any other error is fatal for this reader.
-		r.wal.logger.Error("Unrecoverable error reading from WAL segment", "error", err, "segment", r.currentSegIndex)
-		return nil, err
-	}
-}
-
-// openNextSegment tries to open the next available WAL segment for reading.
-// It returns true if a new segment was successfully opened.
-// It returns an error if a segment is expected but not found.
-// MUST be called with the reader's lock held.
-func (r *walReader) openNextSegment() error {
-	r.wal.mu.Lock()
-	defer r.wal.mu.Unlock()
-
-	var nextSegIndex uint64
-	if r.currentSegIndex == 0 {
-		// First time opening, start from the oldest segment.
-		if len(r.wal.segmentIndexes) > 0 {
-			nextSegIndex = r.wal.segmentIndexes[0]
-		}
-	} else {
-		// Find the segment that comes after the current one.
-		for i, index := range r.wal.segmentIndexes {
-			if index == r.currentSegIndex && i+1 < len(r.wal.segmentIndexes) {
-				nextSegIndex = r.wal.segmentIndexes[i+1]
-				break
-			}
-		}
-	}
-
-	if nextSegIndex == 0 {
-		return nil // No more segments to open, we are at the tip.
-	}
-
-	path := filepath.Join(r.wal.dir, core.FormatSegmentFileName(nextSegIndex))
-	segReader, err := OpenSegmentForRead(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// This is a critical error for the reader. The segment is gone.
-			return fmt.Errorf("segment %d not found, likely purged: %w", nextSegIndex, err)
-		}
-		r.wal.logger.Error("Failed to open next segment for reading", "segment", nextSegIndex, "error", err)
-		return err
-	}
-
-	r.wal.logger.Debug("WAL reader opened new segment", "segment", nextSegIndex)
-	r.currentSegReader = segReader
-	r.currentSegIndex = nextSegIndex
-	return nil
-}
-
-// waitForData blocks until new data is written to the WAL or the context is cancelled.
-// MUST be called WITHOUT the reader's lock held.
-func (r *walReader) waitForData(ctx context.Context) error {
-	// This is a pattern to wait on a sync.Cond with context cancellation.
-	waitDone := make(chan struct{})
-	go func() {
-		r.wal.mu.Lock()
-		r.wal.readerCond.Wait()
-		r.wal.mu.Unlock()
-		close(waitDone)
-	}()
-
-	select {
-	case <-waitDone:
-		return nil // Woken up by a new write.
-	case <-ctx.Done():
-		// Context was cancelled. We need to wake up our waiting goroutine.
-		r.wal.readerCond.Broadcast() // This wakes up all waiters, including ours.
-		<-waitDone                   // Wait for the goroutine to exit.
-		return ctx.Err()
-	case <-r.closeCh:
-		// Reader was closed.
-		r.wal.readerCond.Broadcast()
-		<-waitDone
-		return io.EOF
-	}
-}
-
-// Close stops the reader and releases its resources.
-func (r *walReader) Close() error {
-	r.cancelOnce.Do(func() {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		close(r.closeCh)
-		if r.currentSegReader != nil {
-			r.currentSegReader.Close()
-			r.currentSegReader = nil
-		}
-	})
-	return nil
-}
-
 func (w *WAL) openForAppend() error {
 	if len(w.segmentIndexes) == 0 {
 		// No segments exist, create the first one.
@@ -680,6 +539,8 @@ func (w *WAL) openForAppend() error {
 
 	if stat.Size() > int64(binary.Size(core.FileHeader{})) {
 		// If the last segment has more than just a header, rotate to a new one.
+		return w.rotateLocked()
+	} else if stat.Size() == 0 {
 		return w.rotateLocked()
 	}
 
@@ -735,7 +596,13 @@ func decodeBatchRecord(recordData []byte) ([]core.WALEntry, error) {
 		return nil, fmt.Errorf("error reading entry type from WAL record: %w", err)
 	}
 	if core.EntryType(entryTypeByte) != core.EntryTypePutBatch {
-		return nil, fmt.Errorf("unexpected WAL record type: got %d, want %d (EntryTypePutBatch)", entryTypeByte, core.EntryTypePutBatch)
+		// This is not a batch record, it's a single entry record.
+		// We need to re-read the whole recordData from the start.
+		singleEntry, err := decodeEntryData(bytes.NewReader(recordData))
+		if err != nil {
+			return nil, fmt.Errorf("error decoding single WAL entry: %w", err)
+		}
+		return []core.WALEntry{*singleEntry}, nil
 	}
 
 	var numEntries uint32
@@ -752,4 +619,71 @@ func decodeBatchRecord(recordData []byte) ([]core.WALEntry, error) {
 		entries = append(entries, *entry)
 	}
 	return entries, nil
+}
+
+// --- Binary Encoding Helpers ---
+
+func writeString(w io.Writer, s string) error {
+	b := []byte(s)
+	// Write length as uint16
+	if err := binary.Write(w, binary.BigEndian, uint16(len(b))); err != nil {
+		return err
+	}
+	// Write string bytes
+	if len(b) > 0 {
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readString(r io.Reader) (string, error) {
+	var length uint16
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+		return "", err
+	}
+	if length == 0 {
+		return "", nil
+	}
+	b := make([]byte, length)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func writeStringMap(w io.Writer, m map[string]string) error {
+	if err := binary.Write(w, binary.BigEndian, uint16(len(m))); err != nil {
+		return err
+	}
+	for k, v := range m {
+		if err := writeString(w, k); err != nil {
+			return err
+		}
+		if err := writeString(w, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readStringMap(r io.Reader) (map[string]string, error) {
+	var count uint16
+	if err := binary.Read(r, binary.BigEndian, &count); err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, count)
+	for i := 0; i < int(count); i++ {
+		k, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		v, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		m[k] = v
+	}
+	return m, nil
 }

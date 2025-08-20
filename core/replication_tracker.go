@@ -41,6 +41,13 @@ func (t *ReplicationTracker) WaitForSequence(ctx context.Context, waitSeqNum uin
 	slog.Debug("WaitForSequence started", "wait_for_seq", waitSeqNum, "current_latest", t.latestAppliedSeqNum)
 	defer t.mu.Unlock()
 
+	// CRITICAL FIX: Check if the condition is already met before waiting.
+	// This prevents a race condition where the progress report arrives before we start waiting.
+	if t.latestAppliedSeqNum >= waitSeqNum {
+		slog.Debug("WaitForSequence condition already met", "wait_for_seq", waitSeqNum)
+		return nil
+	}
+
 	// This pattern allows waiting on a condition variable with context cancellation.
 	// A separate goroutine waits for the broadcast signal.
 	waitDone := make(chan struct{})

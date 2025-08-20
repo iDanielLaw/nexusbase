@@ -56,6 +56,17 @@ func (a *Applier) convertAPIToCoreWALEntry(apiEntry *apiv1.WALEntry) (*core.WALE
 		coreEntry.EntryType = core.EntryTypePutEvent
 		coreEntry.Key = payload.PutEvent.GetKey()
 		coreEntry.Value = payload.PutEvent.GetValue()
+		// NEW: Reconstruct the DataPoint on the follower side from the protobuf message.
+		// This is crucial for the engine to be able to create the necessary metadata.
+		fields, err := core.DecodeFieldsFromBytes(payload.PutEvent.GetValue())
+		if err != nil {
+			// If we can't decode the fields, we cannot proceed reliably.
+			return nil, fmt.Errorf("failed to decode fields from replicated PutEvent: %w", err)
+		}
+		coreEntry.DataPoint.Metric = payload.PutEvent.GetMetric()
+		coreEntry.DataPoint.Tags = payload.PutEvent.GetTags()
+		coreEntry.DataPoint.Timestamp = payload.PutEvent.GetTimestamp()
+		coreEntry.DataPoint.Fields = fields
 	case *apiv1.WALEntry_DeleteEvent:
 		coreEntry.EntryType = core.EntryTypeDelete
 		coreEntry.Key = payload.DeleteEvent.GetKey()

@@ -570,6 +570,7 @@ func (e *storageEngine) prepareDataPoint(ctx context.Context, p core.DataPoint) 
 		Key:       keyCopy,
 		Value:     valueCopy,
 		// SeqNum is assigned later, just before writing to WAL.
+		DataPoint: p, // Embed the original data point for replication purposes.
 	}
 
 	// --- Prepare Post-operation data ---

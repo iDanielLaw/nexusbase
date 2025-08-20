@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -1076,12 +1077,22 @@ func (e *storageEngine) ApplyReplicatedEntry(ctx context.Context, entry *core.WA
 			return fmt.Errorf("failed to apply replicated PUT to memtable: %w", err)
 		}
 
+		// Re-run the metadata creation process on the follower using the embedded DataPoint.
+		// This ensures the follower's string store, series store, and tag index are populated
+		// correctly for data that was created on the leader after the follower's last snapshot.
+		if entry.DataPoint.Metric != "" {
+			// The error is ignored because if it fails, the data is already in the memtable,
+			// and this is a best-effort metadata update. A failure here is not critical enough to stop replication.
+			if err := e.createMetadataForReplicatedPoint(entry.DataPoint); err != nil {
+				e.logger.Warn("Failed to create metadata for replicated data point", "seq_num", entry.SeqNum, "error", err)
+			}
+		}
+
 	case core.EntryTypeDelete:
 		// Apply the point tombstone to the memtable.
 		if err := e.mutableMemtable.Put(entry.Key, nil, entry.EntryType, entry.SeqNum); err != nil {
 			return fmt.Errorf("failed to apply replicated DELETE to memtable: %w", err)
 		}
-
 	case core.EntryTypeDeleteSeries:
 		// Apply the series tombstone.
 		seriesKeyStr := string(entry.Key)
@@ -1117,7 +1128,53 @@ func (e *storageEngine) ApplyReplicatedEntry(ctx context.Context, entry *core.WA
 	// CRITICAL: Update the engine's sequence number to the one from the leader.
 	e.sequenceNumber.Store(entry.SeqNum)
 
+	// Check if the memtable is full after applying the entry and trigger a flush if needed.
+	// This ensures the replication path behaves similarly to the direct write path.
+	if e.mutableMemtable.IsFull() {
+		e.logger.Debug("Memtable full after applying replicated entry, rotating for flush.", "size_bytes", e.mutableMemtable.Size())
+		e.mutableMemtable.LastWALSegmentIndex = e.wal.ActiveSegmentIndex()
+		e.immutableMemtables = append(e.immutableMemtables, e.mutableMemtable)
+		e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+		select {
+		case e.flushChan <- struct{}{}:
+		default:
+		}
+	}
+
 	return nil
+}
+
+// createMetadataForReplicatedPoint is a helper function called by ApplyReplicatedEntry.
+// It uses the full DataPoint information embedded in a WAL entry to populate the
+// follower's local metadata stores (string store, series store, tag index).
+// This is crucial for allowing followers to query data that was created on the leader
+// after the follower's last snapshot.
+func (e *storageEngine) createMetadataForReplicatedPoint(p core.DataPoint) error {
+	metricID, err := e.stringStore.GetOrCreateID(p.Metric)
+	if err != nil {
+		return fmt.Errorf("failed to get/create ID for metric '%s': %w", p.Metric, err)
+	}
+
+	tagsSlicePtr := encodedTagsPool.Get().(*[]core.EncodedSeriesTagPair)
+	defer func() {
+		*tagsSlicePtr = (*tagsSlicePtr)[:0]
+		encodedTagsPool.Put(tagsSlicePtr)
+	}()
+	encodedTags := *tagsSlicePtr
+
+	for k, v := range p.Tags {
+		keyID, _ := e.stringStore.GetOrCreateID(k)
+		valID, _ := e.stringStore.GetOrCreateID(v)
+		encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: keyID, ValueID: valID})
+	}
+	sort.Slice(encodedTags, func(i, j int) bool { return encodedTags[i].KeyID < encodedTags[j].KeyID })
+
+	seriesKeyBytes := core.EncodeSeriesKey(metricID, encodedTags)
+	seriesID, _ := e.seriesIDStore.GetOrCreateID(string(seriesKeyBytes))
+
+	e.addActiveSeries(string(seriesKeyBytes))
+
+	return e.tagIndexManager.AddEncoded(seriesID, encodedTags)
 }
 
 // SetSequenceNumber forces the engine's sequence number to a specific value.

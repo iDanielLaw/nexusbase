@@ -214,7 +214,9 @@ func (f *Follower) bootstrapFromSnapshot(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("failed to receive snapshot from leader: %w", err)
 	}
 
-	manifest, err := snapshot.ReadManifestFromDir(tempRestoreDir)
+	// Read the manifest to validate the snapshot's integrity, but we don't need its contents directly.
+	// The engine will read it again upon startup.
+	_, err := snapshot.ReadManifestFromDir(tempRestoreDir)
 	if err != nil {
 		return 0, fmt.Errorf("snapshot validation failed: %w", err)
 	}
@@ -237,9 +239,12 @@ func (f *Follower) bootstrapFromSnapshot(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("failed to restart engine after snapshot restore: %w", err)
 	}
 
-	f.engine.SetSequenceNumber(manifest.SequenceNumber)
-	f.logger.Info("Bootstrap from snapshot complete.", "snapshot_seq_num", manifest.SequenceNumber)
-	return manifest.SequenceNumber, nil
+	// The engine's sequence number is now correctly set after WAL recovery from the snapshot's WAL files.
+	// We must return this number so the follower knows its true, most up-to-date state.
+	finalSeqNum := f.engine.GetSequenceNumber()
+
+	f.logger.Info("Bootstrap from snapshot complete.", "final_seq_num", finalSeqNum)
+	return finalSeqNum, nil
 }
 
 // streamAndApplyWAL connects to the leader's WAL stream and applies entries.

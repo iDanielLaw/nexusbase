@@ -105,13 +105,20 @@ func (s *ReplicationGRPCServer) StreamWAL(req *apiv1.StreamWALRequest, stream ap
 	for {
 		coreEntry, err := reader.Next(ctx)
 		if err != nil {
+			// The new WAL reader blocks until data is available or the context is cancelled.
+			// An io.EOF error means the reader was intentionally closed, so we can exit cleanly.
+			if err == io.EOF {
+				s.logger.Info("WAL reader closed, ending stream.")
+				return nil
+			}
+
 			// NEW: Check if the error is because the requested segment was not found (purged).
 			if os.IsNotExist(errors.Unwrap(err)) {
 				s.logger.Warn("Follower requested a purged WAL segment", "from_seq_num", req.GetFromSequenceNumber(), "error", err)
 				return status.Errorf(codes.NotFound, "requested WAL segment has been purged: %v", err)
 			}
 
-			if err == io.EOF || status.Code(err) == codes.Canceled || err == context.Canceled || err == context.DeadlineExceeded {
+			if status.Code(err) == codes.Canceled || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				s.logger.Info("Stopping WAL stream", "reason", err)
 				return nil // Cleanly exit the stream
 			}
@@ -287,6 +294,11 @@ func (s *ReplicationGRPCServer) convertCoreWALEntryToAPI(coreEntry *core.WALEntr
 			PutEvent: &apiv1.PutEvent{
 				Key:   coreEntry.Key,
 				Value: coreEntry.Value,
+				// NEW: Populate DataPoint fields for the follower to reconstruct metadata.
+				// This assumes the .proto file for PutEvent has been updated with these fields.
+				Metric:    coreEntry.DataPoint.Metric,
+				Tags:      coreEntry.DataPoint.Tags,
+				Timestamp: coreEntry.DataPoint.Timestamp,
 			},
 		}
 	case core.EntryTypeDelete:
