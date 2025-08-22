@@ -663,6 +663,15 @@ func (m *mockWAL) ActiveSegmentIndex() uint64 {
 }
 func (m *mockWAL) Rotate() error { return m.Called().Error(0) }
 
+// NewStreamReader is the newly added method to satisfy the wal.WALInterface.
+func (m *mockWAL) NewStreamReader(fromSeqNum uint64) (wal.StreamReader, error) {
+	args := m.Called(fromSeqNum)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(wal.StreamReader), args.Error(1)
+}
+
 func TestStorageEngine_PurgeWALSegments(t *testing.T) {
 	testCases := []struct {
 		name               string

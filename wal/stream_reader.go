@@ -24,6 +24,10 @@ type streamReader struct {
 	currentSegmentIndex  uint64
 	lastReadSeqNum       uint64
 
+	// entryBuffer holds entries from the last physical read to serve them one by one.
+	entryBuffer []core.WALEntry
+	bufferIndex int
+
 	logger *slog.Logger
 }
 
@@ -35,15 +39,32 @@ func (sr *streamReader) Next() (*core.WALEntry, error) {
 	defer sr.wal.mu.Unlock()
 
 	for {
+		// 1. Try to serve the next valid entry from the current buffer.
+		if sr.bufferIndex < len(sr.entryBuffer) {
+			entry := &sr.entryBuffer[sr.bufferIndex]
+			sr.bufferIndex++
+			if entry.SeqNum > sr.lastReadSeqNum {
+				sr.lastReadSeqNum = entry.SeqNum
+				return entry, nil
+			}
+			// This entry was already seen (e.g., when starting from a specific SeqNum),
+			// so try the next one in the buffer.
+			continue
+		}
+
+		// 2. If the buffer is exhausted, reset it and prepare to read from disk.
+		sr.entryBuffer = nil
+		sr.bufferIndex = 0
+
 		// If there's no current segment reader, try to open one.
 		if sr.currentSegmentReader == nil {
-			err := sr.openNextSegmentLocked()
+			err := sr.openNextAvailableSegmentLocked()
 			if err != nil {
-				// If we can't open the next segment and it's the active one,
-				// it might just not have any new data yet.
-				if errors.Is(err, os.ErrNotExist) && sr.currentSegmentIndex >= sr.wal.ActiveSegmentIndex() {
+				// If the helper function signals no new entries, propagate it.
+				if errors.Is(err, ErrNoNewEntries) {
 					return nil, ErrNoNewEntries
 				}
+				// Otherwise, it's a real error.
 				return nil, fmt.Errorf("stream reader failed to open next segment: %w", err)
 			}
 		}
@@ -54,6 +75,11 @@ func (sr *streamReader) Next() (*core.WALEntry, error) {
 			// If we hit the end of the current segment file...
 			if err == io.EOF {
 				sr.currentSegmentReader.Close()
+				// On Windows, file handles might not be released immediately, which can cause
+				// locking issues if another part of the system (like the WAL writer) holds
+				// a handle to the same file. Calling a GC cycle can help expedite the
+				// release of the underlying OS handle, preventing a timeout on Close().
+				// sys.GC()
 				sr.currentSegmentReader = nil
 				// ...loop again to try opening the next segment.
 				continue
@@ -63,42 +89,58 @@ func (sr *streamReader) Next() (*core.WALEntry, error) {
 		}
 
 		// We have a record, now decode the batch.
-		entries, err := decodeBatchRecord(recordData)
+		decodedEntries, err := decodeBatchRecord(recordData)
 		if err != nil {
 			return nil, fmt.Errorf("error decoding batch record from segment %d: %w", sr.currentSegmentIndex, err)
 		}
-
-		// Find the first entry in the batch that we haven't processed yet.
-		for _, entry := range entries {
-			if entry.SeqNum > sr.lastReadSeqNum {
-				sr.lastReadSeqNum = entry.SeqNum
-				return &entry, nil
-			}
-		}
-
-		// If all entries in this batch were already processed, continue to the next record.
+		sr.entryBuffer = decodedEntries
+		// The loop will now restart and serve entries from the newly populated buffer.
 	}
 }
 
 // openNextSegmentLocked finds and opens the next segment file in sequence for reading.
 // Must be called with the WAL lock held.
-func (sr *streamReader) openNextSegmentLocked() error {
-	// TODO: Implement logic to find the correct starting segment based on sr.lastReadSeqNum.
-	// For now, we just advance to the next available segment file.
-	nextIndex := sr.findNextSegmentIndexLocked(sr.currentSegmentIndex)
-	if nextIndex == 0 {
-		return os.ErrNotExist // No more segments to read.
+func (sr *streamReader) openNextAvailableSegmentLocked() error {
+	var segmentToOpen uint64
+
+	if sr.currentSegmentIndex == 0 {
+		// First time opening. Find the first segment to read.
+		if len(sr.wal.segmentIndexes) > 0 {
+			segmentToOpen = sr.wal.segmentIndexes[0]
+		} else {
+			return ErrNoNewEntries // No segments exist at all.
+		}
+	} else {
+		// We have finished a previous segment, find the next one in the list.
+		nextKnownIndex := sr.findNextSegmentIndexLocked(sr.currentSegmentIndex)
+		if nextKnownIndex == 0 {
+			// We've read all known segments. There are no more closed segments to read.
+			return ErrNoNewEntries
+		}
+		segmentToOpen = nextKnownIndex
 	}
 
-	path := filepath.Join(sr.wal.dir, core.FormatSegmentFileName(nextIndex))
+	// CRITICAL CHECK: Do not attempt to open the segment that is currently active for writing.
+	// If the segment we are about to open is the active one, it means we have caught up
+	// to the writer. We should wait for it to be rotated and closed.
+	if segmentToOpen >= sr.wal.activeSegmentIndexLocked() {
+		return ErrNoNewEntries
+	}
+
+	path := filepath.Join(sr.wal.dir, core.FormatSegmentFileName(segmentToOpen))
 	reader, err := OpenSegmentForRead(path)
 	if err != nil {
+		// This could happen if a segment was purged between listing and opening.
+		// Treat it as if there are no new entries for now.
+		if os.IsNotExist(err) {
+			return ErrNoNewEntries
+		}
 		return err
 	}
 
-	sr.logger.Debug("Stream reader opening new segment", "index", nextIndex)
+	sr.logger.Debug("Stream reader opening segment", "index", segmentToOpen)
 	sr.currentSegmentReader = reader
-	sr.currentSegmentIndex = nextIndex
+	sr.currentSegmentIndex = segmentToOpen
 	return nil
 }
 

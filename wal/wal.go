@@ -307,15 +307,21 @@ func (w *WAL) Path() string {
 	return w.dir
 }
 
+// activeSegmentIndexLocked returns the index of the current active segment file.
+// It assumes the caller holds the WAL's mutex.
+func (w *WAL) activeSegmentIndexLocked() uint64 {
+	if w.activeSegment == nil {
+		return 0
+	}
+	return w.activeSegment.index
+}
+
 // ActiveSegmentIndex returns the index of the current active segment file.
 // It returns 0 if there is no active segment.
 func (w *WAL) ActiveSegmentIndex() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.activeSegment == nil {
-		return 0
-	}
-	return w.activeSegment.index
+	return w.activeSegmentIndexLocked()
 }
 
 // rotate creates a new segment file for writing. Must be called with lock held.
