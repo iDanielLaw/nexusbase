@@ -225,6 +225,69 @@ func TestWAL_Purge(t *testing.T) {
 	wal.Close()
 }
 
+func TestWAL_Recovery_CorruptedHeader(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	// 1. Create a WAL with good data
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("good"), SeqNum: 1}))
+	segmentPath := wal.activeSegment.path
+	require.NoError(t, wal.Close())
+
+	// 2. Corrupt the header of the segment file
+	file, err := os.OpenFile(segmentPath, os.O_WRONLY, 0644)
+	require.NoError(t, err)
+	// Overwrite the magic number with junk
+	_, err = file.WriteAt([]byte{0xDE, 0xAD, 0xBE, 0xEF}, 0)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	// 3. Attempt to recover
+	_, _, err = Open(opts)
+	require.Error(t, err, "Open should fail on a corrupted WAL header")
+	assert.Contains(t, err.Error(), "invalid magic number")
+}
+
+func TestWAL_Recovery_CorruptedChecksum(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	// 1. Create a WAL with good data
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("good1"), SeqNum: 1}))
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("good2"), SeqNum: 2}))
+	segmentPath := wal.activeSegment.path
+	require.NoError(t, wal.Close())
+
+	// 2. Corrupt the checksum of the second record
+	fileData, err := os.ReadFile(segmentPath)
+	require.NoError(t, err)
+
+	// Find the start of the second record's checksum and corrupt it
+	// This is a bit brittle as it depends on the exact encoding format.
+	// For this test, we'll corrupt the last byte of the file, which should be part of the last record's checksum.
+	if len(fileData) > 0 {
+		fileData[len(fileData)-1] ^= 0xFF // Flip the last byte
+	}
+	err = os.WriteFile(segmentPath, fileData, 0644)
+	require.NoError(t, err)
+
+	// 3. Attempt to recover
+	_, recovered, err := Open(opts)
+	require.Error(t, err, "Open should fail on a corrupted WAL record")
+	assert.Contains(t, err.Error(), "checksum mismatch")
+
+	// Should still recover the valid entries before the corruption
+	assert.Len(t, recovered, 1, "Should have recovered the first valid entry")
+	if len(recovered) > 0 {
+		assert.Equal(t, uint64(1), recovered[0].SeqNum)
+		assert.Equal(t, []byte("good1"), recovered[0].Key)
+	}
+}
+
 func TestWAL_Recovery_Corrupted(t *testing.T) {
 	tempDir := t.TempDir()
 	opts := testWALOptions(t, tempDir)
