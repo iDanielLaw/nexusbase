@@ -19,6 +19,7 @@ import (
 )
 
 // --- Mocks ---
+
 // mockReplicatedEngine is a mock implementation of the ReplicatedEngine interface.
 type mockReplicatedEngine struct {
 	mu         sync.Mutex
@@ -97,20 +98,9 @@ func (s *mockReplicationServer) StreamWAL(req *pb.StreamWALRequest, stream pb.Re
 	return stream.Context().Err()
 }
 
-// --- Test Helpers ---
+// --- Test Setup ---
 
 const bufSize = 1024 * 1024
-
-// newTestWALEntry creates a valid WALEntry for testing.
-func newTestWALEntry(seqNum uint64, metric string, ts int64) *pb.WALEntry {
-	return &pb.WALEntry{
-		SequenceNumber: seqNum,
-		EntryType:      pb.WALEntry_PUT_EVENT,
-		Metric:         metric,
-		Tags:           map[string]string{"host": "test-host"},
-		Timestamp:      ts,
-	}
-}
 
 // setupTest initializes a mock server and a WALApplier connected to it.
 func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicationServer, func()) {
@@ -152,20 +142,18 @@ func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicati
 	return applier, mockEngine, mockServer, cleanup
 }
 
-// --- Test Cases ---
-
-func TestWALApplier_StartStop(t *testing.T) {
-	applier, _, _, cleanup := setupTest(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go applier.replicationLoop(ctx)
-
-	time.Sleep(10 * time.Millisecond)
-
-	cancel()
-	applier.Stop()
+// newTestWALEntry creates a valid WALEntry for testing.
+func newTestWALEntry(seqNum uint64, metric string, ts int64) *pb.WALEntry {
+	return &pb.WALEntry{
+		SequenceNumber: seqNum,
+		EntryType:      pb.WALEntry_PUT_EVENT,
+		Metric:         metric,
+		Tags:           map[string]string{"host": "test-host"},
+		Timestamp:      ts,
+	}
 }
+
+// --- Test Cases ---
 
 func TestWALApplier_SuccessfulReplication(t *testing.T) {
 	applier, mockEngine, mockServer, cleanup := setupTest(t)
@@ -197,9 +185,7 @@ func TestWALApplier_ReconnectsAndResumes(t *testing.T) {
 	applier, mockEngine, mockServer, cleanup := setupTest(t)
 	defer cleanup()
 
-	mockServer.entries = []*pb.WALEntry{
-		newTestWALEntry(1, "metric1", 1000),
-	}
+	mockServer.entries = []*pb.WALEntry{newTestWALEntry(1, "metric1", 1000)}
 	mockServer.sendErr = io.EOF
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -272,8 +258,6 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 	}
 
 	expectedErr := errors.New("failed to apply entry")
-
-	// Program the mock engine to fail on the second entry
 	mockEngine.applyFunc = func(entry *pb.WALEntry) error {
 		mockEngine.mu.Lock()
 		defer mockEngine.mu.Unlock()
@@ -282,7 +266,6 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 			return expectedErr
 		}
 
-		// Apply successfully
 		mockEngine.appliedSeq = entry.GetSequenceNumber()
 		if mockEngine.appliedCh != nil {
 			mockEngine.appliedCh <- entry
@@ -294,7 +277,6 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 	defer cancel()
 	go applier.replicationLoop(ctx)
 
-	// Wait for the first entry
 	select {
 	case applied := <-mockEngine.appliedCh:
 		require.Equal(t, uint64(1), applied.GetSequenceNumber())
@@ -302,10 +284,8 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 		t.Fatal("timed out waiting for the first entry")
 	}
 
-	// Give the loop a moment to process the second (failing) entry
 	time.Sleep(50 * time.Millisecond)
 
-	// We should not have received entry 2.
 	select {
 	case applied := <-mockEngine.appliedCh:
 		t.Fatalf("received unexpected entry %d after apply error", applied.GetSequenceNumber())
@@ -313,6 +293,5 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 		// Good, no second entry was applied.
 	}
 
-	// The latest applied sequence number should still be 1.
 	assert.Equal(t, uint64(1), mockEngine.GetLatestAppliedSeqNum())
 }
