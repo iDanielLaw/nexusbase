@@ -4,18 +4,23 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/indexer"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
 
-// MockWAL เป็น mock object สำหรับ wal.WALInterface
+// MockWAL is a mock object for wal.WALInterface
 type MockWAL struct {
 	mock.Mock
 }
@@ -65,7 +70,7 @@ func (m *MockWAL) Rotate() error {
 	return args.Error(0)
 }
 
-// MockStreamReader เป็น mock object สำหรับ wal.StreamReader
+// MockStreamReader is a mock object for wal.StreamReader
 type MockStreamReader struct {
 	mock.Mock
 }
@@ -83,7 +88,7 @@ func (m *MockStreamReader) Close() error {
 	return args.Error(0)
 }
 
-// MockReplicationService_StreamWALServer เป็น mock object สำหรับ gRPC stream
+// MockStreamServer is a mock object for gRPC stream
 type MockStreamServer struct { // This mock implements pb.ReplicationService_StreamWALServer
 	mock.Mock
 	grpc.ServerStream
@@ -102,13 +107,59 @@ func (m *MockStreamServer) Context() context.Context { return m.ctx }
 
 func TestStreamWAL_Success(t *testing.T) {
 	// --- Setup ---
-	mockWal := new(MockWAL)             // This is now the updated mock
-	mockReader := new(MockStreamReader) // This is also updated
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tempDir := t.TempDir() // Create a temporary directory for the test
+	defer os.RemoveAll(tempDir)
 
-	server := NewServer(mockWal, logger)
+	mockWal := new(MockWAL)
+	mockReader := new(MockStreamReader)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil)) // Discard logs for clean test output
+	hookManager := hooks.NewHookManager(nil)
 
-	// สร้าง mock stream server
+	// Correctly initialize StringStore by loading it from a file (even if it's new)
+	stringStore := indexer.NewStringStore(logger, hookManager)
+	err := stringStore.LoadFromFile(tempDir)
+	require.NoError(t, err, "Failed to load string store from temp directory")
+	defer stringStore.Close()
+
+	// Create a real server instance with the now correctly initialized dependency
+	server := NewServer(mockWal, stringStore, logger)
+
+	// --- Test Data Setup ---
+	metric := "cpu.usage"
+	tags := map[string]string{"host": "server1", "region": "us-east"}
+	timestamp1 := time.Now().UnixNano()
+	fields1, _ := core.NewFieldValuesFromMap(map[string]interface{}{"value": 50.5})
+
+	// Manually encode the data just like the engine would.
+	metricID, _ := stringStore.GetOrCreateID(metric)
+	encodedTags := make([]core.EncodedSeriesTagPair, 0, len(tags))
+	for k, v := range tags {
+		kID, _ := stringStore.GetOrCreateID(k)
+		vID, _ := stringStore.GetOrCreateID(v)
+		encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: kID, ValueID: vID})
+	}
+	sort.Slice(encodedTags, func(i, j int) bool {
+		return encodedTags[i].KeyID < encodedTags[j].KeyID
+	})
+
+	keyBuf := core.GetBuffer()
+	defer core.PutBuffer(keyBuf)
+	core.EncodeTSDBKeyToBuffer(keyBuf, metricID, encodedTags, timestamp1)
+	encodedKey1 := make([]byte, keyBuf.Len())
+	copy(encodedKey1, keyBuf.Bytes())
+
+	valBuf, _ := fields1.Encode()
+	valCopy := make([]byte, len(valBuf))
+	copy(valCopy, valBuf)
+
+	walEntry1 := &core.WALEntry{
+		SeqNum:    101,
+		EntryType: core.EntryTypePutEvent,
+		Key:       encodedKey1,
+		Value:     valCopy,
+	}
+
+	// --- Mock Behavior ---
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	mockStream := &MockStreamServer{
@@ -116,19 +167,17 @@ func TestStreamWAL_Success(t *testing.T) {
 		ctx:         ctx,
 	}
 
-	// กำหนดพฤติกรรมของ mock
 	mockWal.On("NewStreamReader", uint64(100)).Return(mockReader, nil)
-	mockReader.On("Next").Return(&core.WALEntry{SeqNum: 101, Key: []byte("key1")}, nil).Once()
-	mockReader.On("Next").Return(&core.WALEntry{SeqNum: 102, Key: []byte("key2")}, nil).Once()
-	mockReader.On("Next").Return(nil, io.EOF).Once() // สิ้นสุด stream
+	mockReader.On("Next").Return(walEntry1, nil).Once()
+	mockReader.On("Next").Return(nil, io.EOF).Once()
 	mockReader.On("Close").Return(nil)
-	mockStream.On("Send", mock.AnythingOfType("*proto.WALEntry")).Return(nil).Times(2)
+	mockStream.On("Send", mock.Anything).Return(nil).Once()
 
 	// --- Act ---
-	err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 100}, mockStream)
+	err = server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 100}, mockStream)
 
 	// --- Assert ---
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	close(mockStream.SentEntries)
 
 	var receivedEntries []*pb.WALEntry
@@ -136,9 +185,21 @@ func TestStreamWAL_Success(t *testing.T) {
 		receivedEntries = append(receivedEntries, entry)
 	}
 
-	assert.Len(t, receivedEntries, 2)
-	assert.Equal(t, uint64(101), receivedEntries[0].GetSequenceNumber())
-	assert.Equal(t, uint64(102), receivedEntries[1].GetSequenceNumber())
+	require.Len(t, receivedEntries, 1, "No entries were sent on the stream")
+	received := receivedEntries[0]
+
+	assert.Equal(t, uint64(101), received.GetSequenceNumber())
+	assert.Equal(t, pb.WALEntry_PUT_EVENT, received.GetEntryType())
+	assert.Equal(t, metric, received.GetMetric())
+	assert.Equal(t, tags, received.GetTags())
+	assert.Equal(t, timestamp1, received.GetTimestamp())
+
+	// Assert fields
+	protoFields := received.GetFields()
+	require.NotNil(t, protoFields)
+	valueField, ok := protoFields.Fields["value"]
+	require.True(t, ok)
+	assert.Equal(t, 50.5, valueField.GetNumberValue())
 
 	mockWal.AssertExpectations(t)
 	mockReader.AssertExpectations(t)

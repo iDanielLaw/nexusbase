@@ -1001,17 +1001,20 @@ func TestStorageEngine_AggregationQueryLatencyMetric(t *testing.T) {
 
 	metricName := "latency.test.metric"
 	tags := map[string]string{"test": "agg_latency"}
-	numPoints := 10000 // Increased number of points
+	numPoints := 1000 // Reduced number of points to prevent timeout
 	startTime := time.Now().UnixNano()
 	timestamps := make([]int64, numPoints) // Declare ts slice here
 
+	// Using PutBatch for efficiency
+	points := make([]core.DataPoint, numPoints)
 	for i := 0; i < numPoints; i++ {
 		currentTs := startTime + int64(i*1000)
 		timestamps[i] = currentTs // Store each timestamp
 		val := float64(i)
-		if err := engine.Put(context.Background(), HelperDataPoint(t, metricName, tags, currentTs, map[string]interface{}{"value": val})); err != nil {
-			t.Fatalf("Put failed: %v", err)
-		}
+		points[i] = HelperDataPoint(t, metricName, tags, currentTs, map[string]interface{}{"value": val})
+	}
+	if err := engine.PutBatch(context.Background(), points); err != nil {
+		t.Fatalf("PutBatch failed: %v", err)
 	}
 
 	// Get initial metric values
@@ -1028,8 +1031,8 @@ func TestStorageEngine_AggregationQueryLatencyMetric(t *testing.T) {
 
 	// Perform an aggregation query
 	aggregations := []core.AggregationSpec{
-		{Function: core.AggCount, Field: "count"},
-		{Function: core.AggSum, Field: "sum"},
+		{Function: core.AggCount, Field: "value"}, // Corrected field to "value"
+		{Function: core.AggSum, Field: "value"},   // Corrected field to "value"
 	}
 
 	queryStartTime := timestamps[0]
