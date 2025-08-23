@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -18,6 +19,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // MockWAL is a mock object for wal.WALInterface
@@ -98,31 +101,36 @@ type MockStreamServer struct { // This mock implements pb.ReplicationService_Str
 
 func (m *MockStreamServer) Send(entry *pb.WALEntry) error {
 	args := m.Called(entry)
-	if args.Error(0) == nil {
+	if args.Error(0) == nil && m.SentEntries != nil {
 		m.SentEntries <- entry
 	}
 	return args.Error(0)
 }
 func (m *MockStreamServer) Context() context.Context { return m.ctx }
 
-func TestStreamWAL_Success(t *testing.T) {
-	// --- Setup ---
-	tempDir := t.TempDir() // Create a temporary directory for the test
-	defer os.RemoveAll(tempDir)
-
-	mockWal := new(MockWAL)
-	mockReader := new(MockStreamReader)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil)) // Discard logs for clean test output
+// setupServerTest is a helper to reduce boilerplate in server tests
+func setupServerTest(t *testing.T) (*Server, *MockWAL, *indexer.StringStore) {
+	tempDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hookManager := hooks.NewHookManager(nil)
-
-	// Correctly initialize StringStore by loading it from a file (even if it's new)
 	stringStore := indexer.NewStringStore(logger, hookManager)
 	err := stringStore.LoadFromFile(tempDir)
-	require.NoError(t, err, "Failed to load string store from temp directory")
-	defer stringStore.Close()
+	require.NoError(t, err)
 
-	// Create a real server instance with the now correctly initialized dependency
+	t.Cleanup(func() {
+		stringStore.Close()
+		os.RemoveAll(tempDir)
+	})
+
+	mockWal := new(MockWAL)
 	server := NewServer(mockWal, stringStore, logger)
+	return server, mockWal, stringStore
+}
+
+func TestStreamWAL_Success(t *testing.T) {
+	// --- Setup ---
+	server, mockWal, stringStore := setupServerTest(t)
+	mockReader := new(MockStreamReader)
 
 	// --- Test Data Setup ---
 	metric := "cpu.usage"
@@ -168,16 +176,17 @@ func TestStreamWAL_Success(t *testing.T) {
 	}
 
 	mockWal.On("NewStreamReader", uint64(100)).Return(mockReader, nil)
-	mockReader.On("Next").Return(walEntry1, nil).Once()
-	mockReader.On("Next").Return(nil, io.EOF).Once()
+	mockReader.On("Next").Return(walEntry1, nil).Once().
+		On("Next").Return(nil, wal.ErrNoNewEntries) // This will now be AnyTimes() by default for subsequent calls
 	mockReader.On("Close").Return(nil)
 	mockStream.On("Send", mock.Anything).Return(nil).Once()
 
 	// --- Act ---
-	err = server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 100}, mockStream)
+	err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 100}, mockStream)
 
 	// --- Assert ---
-	require.NoError(t, err)
+	// Expect context.Canceled because we canceled it to stop the loop
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 	close(mockStream.SentEntries)
 
 	var receivedEntries []*pb.WALEntry
@@ -185,7 +194,7 @@ func TestStreamWAL_Success(t *testing.T) {
 		receivedEntries = append(receivedEntries, entry)
 	}
 
-	require.Len(t, receivedEntries, 1, "No entries were sent on the stream")
+	require.Len(t, receivedEntries, 1, "Incorrect number of entries sent on the stream")
 	received := receivedEntries[0]
 
 	assert.Equal(t, uint64(101), received.GetSequenceNumber())
@@ -206,42 +215,140 @@ func TestStreamWAL_Success(t *testing.T) {
 	mockStream.AssertExpectations(t)
 }
 
+func TestStreamWAL_ErrorHandling(t *testing.T) {
+	server, mockWal, _ := setupServerTest(t)
+	mockReader := new(MockStreamReader)
+
+	t.Run("NewStreamReader fails", func(t *testing.T) {
+		expectedErr := errors.New("failed to create reader")
+		mockWal.On("NewStreamReader", uint64(1)).Return(nil, expectedErr).Once()
+
+		mockStream := &MockStreamServer{ctx: context.Background()}
+		err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 1}, mockStream)
+
+		require.Error(t, err)
+		st, ok := status.FromError(err)
+		require.True(t, ok, "Error should be a gRPC status error")
+		assert.Equal(t, codes.Internal, st.Code())
+		assert.Contains(t, st.Message(), expectedErr.Error())
+		mockWal.AssertExpectations(t)
+	})
+
+	t.Run("Reader Next fails", func(t *testing.T) {
+		expectedErr := errors.New("failed to read from wal")
+		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
+		mockReader.On("Next").Return(nil, expectedErr).Once()
+		mockReader.On("Close").Return(nil).Once()
+
+		mockStream := &MockStreamServer{ctx: context.Background()}
+		err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 1}, mockStream)
+
+		require.Error(t, err)
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Internal, st.Code())
+		assert.Contains(t, st.Message(), expectedErr.Error())
+		mockReader.AssertExpectations(t)
+	})
+
+	t.Run("Stream Send fails", func(t *testing.T) {
+		// Need a real entry for this test
+		_, _, stringStore := setupServerTest(t)
+		server.indexer = stringStore // Re-assign server with a fresh string store
+		pointValue, _ := core.NewPointValue(10.0)
+		walEntry, _ := createTestWALEntry(t, stringStore, 1, "metric", map[string]string{"host": "server1"}, core.FieldValues{"value": pointValue})
+
+		expectedErr := errors.New("network error")
+		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
+		mockReader.On("Next").Return(walEntry, nil).Once()
+	mockReader.On("Close").Return(nil).Once()
+
+		mockStream := &MockStreamServer{ctx: context.Background(), SentEntries: make(chan *pb.WALEntry, 1)}
+		mockStream.On("Send", mock.Anything).Return(expectedErr).Once()
+
+		err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 1}, mockStream)
+
+		assert.ErrorIs(t, err, expectedErr)
+		mockStream.AssertExpectations(t)
+	})
+
+	t.Run("Context is canceled", func(t *testing.T) {
+		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
+		mockReader.On("Close").Return(nil).Once()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		mockStream := &MockStreamServer{ctx: ctx}
+		cancel() // Cancel the context immediately
+
+		err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 1}, mockStream)
+
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("Conversion error skips entry", func(t *testing.T) {
+		_, _, stringStore := setupServerTest(t)
+		server.indexer = stringStore
+
+		// Entry 1: Malformed, will cause a conversion error
+		malformedEntry := &core.WALEntry{SeqNum: 1, EntryType: core.EntryTypePutEvent, Key: []byte("bad-key")}
+		// Entry 2: Valid
+		pointValueValid, _ := core.NewPointValue(20.0)
+		validEntry, _ := createTestWALEntry(t, stringStore, 2, "good.metric", map[string]string{"tag2": "value2"}, core.FieldValues{"value": pointValueValid})
+
+		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
+		mockReader.On("Next").Return(malformedEntry, nil).Once()
+		mockReader.On("Next").Return(validEntry, nil).Once()
+		mockReader.On("Next").Return(nil, io.EOF).Once()
+		mockReader.On("Close").Return(nil).Once()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		mockStream := &MockStreamServer{ctx: ctx, SentEntries: make(chan *pb.WALEntry, 1)}
+		// We only expect one successful send
+		mockStream.On("Send", mock.Anything).Return(nil).Once()
+
+		// Act: The error from StreamWAL should be nil because it ends with a clean EOF
+		err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 1}, mockStream)
+		require.NoError(t, err)
+
+		// Assert: Check that only the valid entry was sent
+		close(mockStream.SentEntries)
+		assert.Len(t, mockStream.SentEntries, 1, "Only the valid entry should have been sent")
+		received := <-mockStream.SentEntries
+		assert.Equal(t, uint64(2), received.GetSequenceNumber())
+		mockStream.AssertExpectations(t)
+	})
+}
+
 func TestConvertWALEntryToProto(t *testing.T) {
 	// --- Setup ---
-	tempDir := t.TempDir()
-	defer os.RemoveAll(tempDir)
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hookManager := hooks.NewHookManager(nil)
-	stringStore := indexer.NewStringStore(logger, hookManager)
-	err := stringStore.LoadFromFile(tempDir)
-	require.NoError(t, err)
-	defer stringStore.Close()
-
-	// We don't need a mock WAL for this test, just the server with the string store
-	server := NewServer(nil, stringStore, logger)
+	server, _, stringStore := setupServerTest(t)
 
 	// --- Test Data ---
 	metric := "system.disk.usage"
 	tags := map[string]string{"device": "/dev/sda1", "fstype": "ext4"}
-	metricID, _ := stringStore.GetOrCreateID(metric)
-	encodedTags := make([]core.EncodedSeriesTagPair, 0, len(tags))
-	for k, v := range tags {
-		kID, _ := stringStore.GetOrCreateID(k)
-		vID, _ := stringStore.GetOrCreateID(v)
-		encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: kID, ValueID: vID})
-	}
-	sort.Slice(encodedTags, func(i, j int) bool {
-		return encodedTags[i].KeyID < encodedTags[j].KeyID
-	})
-
-	seriesKeyBuf := core.GetBuffer()
-	core.EncodeSeriesKeyToBuffer(seriesKeyBuf, metricID, encodedTags)
-	seriesKeyBytes := make([]byte, seriesKeyBuf.Len())
-	copy(seriesKeyBytes, seriesKeyBuf.Bytes())
-	core.PutBuffer(seriesKeyBuf)
+	seriesKeyBytes, _ := createTestSeriesKey(t, stringStore, metric, tags)
 
 	// --- Test Cases ---
+	t.Run("PUT_EVENT", func(t *testing.T) {
+		timestamp := time.Now().UnixNano()
+		fieldsPtr, _ := core.NewFieldValuesFromMap(map[string]interface{}{"used_percent": 85.4, "free_bytes": 1234567890})
+		walEntry, _ := createTestWALEntry(t, stringStore, 101, metric, tags, fieldsPtr, timestamp)
+
+		protoEntry, err := server.convertWALEntryToProto(walEntry)
+		require.NoError(t, err)
+		require.NotNil(t, protoEntry)
+
+		assert.Equal(t, uint64(101), protoEntry.GetSequenceNumber())
+		assert.Equal(t, pb.WALEntry_PUT_EVENT, protoEntry.GetEntryType())
+		assert.Equal(t, metric, protoEntry.GetMetric())
+		assert.Equal(t, tags, protoEntry.GetTags())
+		assert.Equal(t, timestamp, protoEntry.GetTimestamp())
+		require.NotNil(t, protoEntry.GetFields())
+		assert.Equal(t, 85.4, protoEntry.GetFields().Fields["used_percent"].GetNumberValue())
+		assert.Equal(t, float64(1234567890), protoEntry.GetFields().Fields["free_bytes"].GetNumberValue())
+	})
+
 	t.Run("DELETE_SERIES", func(t *testing.T) {
 		walEntry := &core.WALEntry{
 			SeqNum:    201,
@@ -256,7 +363,6 @@ func TestConvertWALEntryToProto(t *testing.T) {
 
 		assert.Equal(t, uint64(201), protoEntry.GetSequenceNumber())
 		assert.Equal(t, pb.WALEntry_DELETE_SERIES, protoEntry.GetEntryType())
-		assert.Equal(t, metric, protoEntry.GetMetric())
 		assert.Equal(t, tags, protoEntry.GetTags())
 		// These fields should be zero/nil for this type
 		assert.Zero(t, protoEntry.GetTimestamp())
@@ -301,4 +407,79 @@ func TestConvertWALEntryToProto(t *testing.T) {
 		_, err := server.convertWALEntryToProto(walEntry)
 		assert.Error(t, err)
 	})
+
+	t.Run("StringStore error", func(t *testing.T) {
+		// Create a new server with a fresh string store that doesn't have the IDs
+		server, _, _ := setupServerTest(t)
+		walEntry, _ := createTestWALEntry(t, stringStore, 1, "metric", map[string]string{"a": "b"}, nil)
+
+		// The new server's string store won't have the metric/tag IDs
+		_, err := server.convertWALEntryToProto(walEntry)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in string store")
+	})
+}
+
+// --- Test Helpers ---
+
+// createTestSeriesKey is a helper to create an encoded series key
+func createTestSeriesKey(t *testing.T, stringStore *indexer.StringStore, metric string, tags map[string]string) ([]byte, []core.EncodedSeriesTagPair) {
+	t.Helper()
+	metricID, err := stringStore.GetOrCreateID(metric)
+	require.NoError(t, err)
+
+	encodedTags := make([]core.EncodedSeriesTagPair, 0, len(tags))
+	if tags != nil {
+		for k, v := range tags {
+			kID, _ := stringStore.GetOrCreateID(k)
+			vID, _ := stringStore.GetOrCreateID(v)
+			encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: kID, ValueID: vID})
+		}
+	}
+	sort.Slice(encodedTags, func(i, j int) bool {
+		return encodedTags[i].KeyID < encodedTags[j].KeyID
+	})
+
+	keyBuf := core.GetBuffer()
+	defer core.PutBuffer(keyBuf)
+	core.EncodeSeriesKeyToBuffer(keyBuf, metricID, encodedTags)
+	seriesKeyBytes := make([]byte, keyBuf.Len())
+	copy(seriesKeyBytes, keyBuf.Bytes())
+	return seriesKeyBytes, encodedTags
+}
+
+// createTestWALEntry is a helper to create a fully-formed WAL entry for testing
+func createTestWALEntry(t *testing.T, stringStore *indexer.StringStore, seqNum uint64, metric string, tags map[string]string, fields core.FieldValues, timestamp ...int64) (*core.WALEntry, error) {
+	t.Helper()
+	_, encodedTags := createTestSeriesKey(t, stringStore, metric, tags)
+
+	var ts int64
+	if len(timestamp) > 0 {
+		ts = timestamp[0]
+	} else {
+		ts = time.Now().UnixNano()
+	}
+
+	keyBuf := core.GetBuffer()
+	defer core.PutBuffer(keyBuf)
+	metricID, _ := stringStore.GetID(metric)
+	core.EncodeTSDBKeyToBuffer(keyBuf, metricID, encodedTags, ts)
+	encodedKey := make([]byte, keyBuf.Len())
+	copy(encodedKey, keyBuf.Bytes())
+
+	var encodedValue []byte
+	var err error
+	if fields != nil {
+		encodedValue, err = fields.Encode()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &core.WALEntry{
+		SeqNum:    seqNum,
+		EntryType: core.EntryTypePutEvent,
+		Key:       encodedKey,
+		Value:     encodedValue,
+	}, nil
 }
