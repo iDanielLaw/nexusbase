@@ -75,11 +75,6 @@ func (sr *streamReader) Next() (*core.WALEntry, error) {
 			// If we hit the end of the current segment file...
 			if err == io.EOF {
 				sr.currentSegmentReader.Close()
-				// On Windows, file handles might not be released immediately, which can cause
-				// locking issues if another part of the system (like the WAL writer) holds
-				// a handle to the same file. Calling a GC cycle can help expedite the
-				// release of the underlying OS handle, preventing a timeout on Close().
-				// sys.GC()
 				sr.currentSegmentReader = nil
 				// ...loop again to try opening the next segment.
 				continue
@@ -98,7 +93,7 @@ func (sr *streamReader) Next() (*core.WALEntry, error) {
 	}
 }
 
-// openNextSegmentLocked finds and opens the next segment file in sequence for reading.
+// openNextAvailableSegmentLocked finds and opens the next *closed* segment file in sequence for reading.
 // Must be called with the WAL lock held.
 func (sr *streamReader) openNextAvailableSegmentLocked() error {
 	var segmentToOpen uint64
@@ -122,7 +117,8 @@ func (sr *streamReader) openNextAvailableSegmentLocked() error {
 
 	// CRITICAL CHECK: Do not attempt to open the segment that is currently active for writing.
 	// If the segment we are about to open is the active one, it means we have caught up
-	// to the writer. We should wait for it to be rotated and closed.
+	// to the writer. We must wait for it to be rotated and closed before we can read it safely.
+	// This prevents reading partially written records.
 	if segmentToOpen >= sr.wal.activeSegmentIndexLocked() {
 		return ErrNoNewEntries
 	}

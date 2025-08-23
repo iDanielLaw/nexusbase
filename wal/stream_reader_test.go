@@ -48,6 +48,8 @@ func TestStreamReader_Next_Success(t *testing.T) {
 
 	// 4. Read all entries and verify
 	for i, expected := range allEntries {
+		// To make the test robust, we must rotate the WAL to ensure the last segment is closed and readable.
+		wal.Rotate()
 		entry, err := reader.Next()
 		require.NoError(t, err, "Next() should not fail for entry %d", i+1)
 		require.NotNil(t, entry)
@@ -69,7 +71,7 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 	// 1. Create a WAL and write 10 entries
 	wal, _, err := Open(opts)
 	require.NoError(t, err)
-	allEntries := createTestWALEntries(10)
+	allEntries := createTestWALEntries(10, 1)
 	require.NoError(t, wal.AppendBatch(allEntries))
 	require.NoError(t, wal.Close())
 
@@ -87,6 +89,8 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 
 	// 4. Read the remaining entries and verify
 	for i := int(startSeqNum); i < len(allEntries); i++ {
+		// To make the test robust, we must rotate the WAL to ensure the last segment is closed and readable.
+		wal.Rotate()
 		expected := allEntries[i]
 		entry, err := reader.Next()
 		require.NoError(t, err, "Next() should not fail for entry %d", i+1)
@@ -100,6 +104,49 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoNewEntries)
 }
 
+// TestStreamReader_ReadsFromActiveSegment tests that the reader can stream entries
+// after a segment is rotated.
+func TestStreamReader_ReadsFromActiveSegment(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	// 1. Create a WAL
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	defer wal.Close()
+
+	// 2. Create a stream reader
+	reader, err := wal.NewStreamReader(0)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// 3. Initially, there should be no entries
+	_, err = reader.Next()
+	require.ErrorIs(t, err, ErrNoNewEntries, "Should be no entries in a new WAL")
+
+	// 4. Append an entry to the active WAL
+	entry1 := core.WALEntry{Key: []byte("key1"), SeqNum: 1}
+	require.NoError(t, wal.Append(entry1))
+
+	// 5. The reader should still see no new entries because the segment is active
+	_, err = reader.Next()
+	require.ErrorIs(t, err, ErrNoNewEntries, "Should not read from active segment")
+
+	// 6. Rotate the WAL to make the segment readable
+	require.NoError(t, wal.Rotate())
+
+	// 7. Now, the reader should be able to read the new entry
+	readEntry1, err := reader.Next()
+	require.NoError(t, err, "Should be able to read after rotation")
+	require.NotNil(t, readEntry1)
+	assert.Equal(t, entry1.SeqNum, readEntry1.SeqNum)
+	assert.Equal(t, entry1.Key, readEntry1.Key)
+
+	// 8. There should be no more entries
+	_, err = reader.Next()
+	require.ErrorIs(t, err, ErrNoNewEntries, "Should be no more entries after reading the first one")
+}
+
 // TestStreamReader_Next_BlocksAndResumes tests the "tailing" functionality of the stream reader.
 func TestStreamReader_Next_BlocksAndResumes(t *testing.T) {
 	tempDir := t.TempDir()
@@ -110,7 +157,7 @@ func TestStreamReader_Next_BlocksAndResumes(t *testing.T) {
 	require.NoError(t, err)
 	defer wal.Close()
 
-	initialEntries := createTestWALEntries(3)
+	initialEntries := createTestWALEntries(3, 1)
 	require.NoError(t, wal.AppendBatch(initialEntries))
 
 	// Force a rotation so the initial entries are in a closed segment that the reader can access.

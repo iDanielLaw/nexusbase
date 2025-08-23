@@ -15,10 +15,18 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 )
+
+// commitRecord represents a single commit request to the WAL.
+// It bundles the entries to be written with a channel to signal completion.
+type commitRecord struct {
+	entries []core.WALEntry
+	done    chan error
+}
 
 // WAL (Write-Ahead Log) provides durability by logging operations before they are applied to memtable.
 // It manages a directory of segment files.
@@ -29,6 +37,12 @@ type WAL struct {
 
 	activeSegment  *SegmentWriter
 	segmentIndexes []uint64
+
+	// Group Commit fields
+	commitChan   chan *commitRecord
+	shutdownChan chan struct{}
+	committerWg  sync.WaitGroup
+	closeOnce    sync.Once
 
 	metricsBytesWritten   *expvar.Int
 	metricsEntriesWritten *expvar.Int
@@ -112,9 +126,15 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 
 	// 3. Prepare for appending
 	if err := w.openForAppend(); err != nil {
-		w.Close()
+		// Close is not called here because the committer goroutine hasn't been started.
 		return nil, nil, fmt.Errorf("failed to open WAL for appending: %w", err)
 	}
+
+	// 4. Start the committer goroutine for group commits.
+	w.commitChan = make(chan *commitRecord, 128) // Buffer size can be tuned.
+	w.shutdownChan = make(chan struct{})
+	w.committerWg.Add(1)
+	go w.runCommitter()
 
 	// The recovery process returns io.EOF for a clean, full read of all segments,
 	// which is not an error for the Open operation. Other errors (like UnexpectedEOF
@@ -162,112 +182,82 @@ func (w *WAL) Append(entry core.WALEntry) error {
 	return w.AppendBatch([]core.WALEntry{entry})
 }
 
-// AppendBatch writes a slice of WAL entries as a single, atomic record.
+// AppendBatch submits a slice of WAL entries to be written by the committer goroutine.
+// It blocks until the entries have been written and synced to disk.
 func (w *WAL) AppendBatch(entries []core.WALEntry) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.testingOnlyInjectAppendError != nil {
-		return w.testingOnlyInjectAppendError // ถ้ามี error ถูก inject ให้คืนค่านั้นไปเลย
-	}
-
 	if len(entries) == 0 {
 		return nil
 	}
 
-	var batchPayload bytes.Buffer
-	if err := batchPayload.WriteByte(byte(core.EntryTypePutBatch)); err != nil {
-		return fmt.Errorf("failed to write batch entry type: %w", err)
-	}
-	if err := binary.Write(&batchPayload, binary.LittleEndian, uint32(len(entries))); err != nil {
-		return fmt.Errorf("failed to write batch entry count: %w", err)
-	}
-	for i := range entries {
-		if err := encodeEntryData(&batchPayload, &entries[i]); err != nil {
-			return fmt.Errorf("failed to encode entry %d for batch: %w", i, err)
-		}
-	}
-	payloadBytes := batchPayload.Bytes()
-	newRecordSize := int64(len(payloadBytes) + 8) // +4 for length, +4 for checksum
-
-	if w.activeSegment == nil {
-		return errors.New("wal is closed or not open for writing")
+	if w.testingOnlyInjectAppendError != nil {
+		return w.testingOnlyInjectAppendError
 	}
 
-	// Check if we need to rotate the segment BEFORE writing the new record.
-	// Rotate if the current file already contains data and adding the new record would exceed the max size.
-	currentSize, err := w.activeSegment.Size()
-	if err != nil {
-		return fmt.Errorf("could not get active segment size: %w", err)
-	}
-	// The check `currentSize > int64(binary.Size(core.FileHeader{}))` ensures we only rotate
-	// if the segment already contains at least one record. This allows a single large
-	// record to be written to an empty segment, even if it exceeds the max size.
-	if currentSize > int64(binary.Size(core.FileHeader{})) && (currentSize+newRecordSize) > w.opts.MaxSegmentSize {
-		w.logger.Debug("Rotating WAL segment due to size", "current_size", currentSize, "new_record_size", newRecordSize, "max_size", w.opts.MaxSegmentSize)
-		if err := w.rotateLocked(); err != nil {
-			return fmt.Errorf("failed to rotate WAL segment: %w", err)
-		}
+	rec := &commitRecord{
+		entries: entries,
+		done:    make(chan error, 1),
 	}
 
-	if w.metricsBytesWritten != nil {
-		w.metricsBytesWritten.Add(int64(len(payloadBytes) + 8)) // +8 for length and checksum
-	}
-	if w.metricsEntriesWritten != nil {
-		w.metricsEntriesWritten.Add(int64(len(entries)))
-	}
-
-	if err := w.activeSegment.WriteRecord(payloadBytes); err != nil {
-		return err
-	}
-
-	if w.opts.SyncMode == core.WALSyncAlways {
-		return w.activeSegment.Sync()
-	}
-	return nil
+	w.commitChan <- rec
+	return <-rec.done
 }
 
-// Sync flushes data to the active segment file.
+// Sync forces a commit of all pending entries and waits for it to complete.
 func (w *WAL) Sync() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if err := w.activeSegment.Sync(); err != nil {
-		return fmt.Errorf("failed to sync WAL file: %w", err)
+	// With group commit, Sync can be implemented by sending a special empty record
+	// and waiting for it to complete. This ensures all prior writes are flushed.
+	rec := &commitRecord{
+		entries: []core.WALEntry{},
+		done:    make(chan error, 1),
 	}
-	return nil
+	w.commitChan <- rec
+	return <-rec.done
 }
 
 // Rotate manually triggers a segment rotation.
-// It closes the current segment and opens a new one for writing.
 func (w *WAL) Rotate() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.rotateLocked()
+	// To rotate, we send a nil-entry record. The committer interprets this as a rotation request.
+	rec := &commitRecord{
+		entries: nil, // A nil slice of entries signals a rotation request.
+		done:    make(chan error, 1),
+	}
+	w.commitChan <- rec
+	return <-rec.done
 }
 
-// Close closes the WAL file.
-func (w *WAL) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+// Close shuts down the committer goroutine and closes the WAL file.
+func (w *WAL) Close() (closeErr error) {
+	w.closeOnce.Do(func() {
+		// Signal the committer to shut down.
+		if w.shutdownChan != nil {
+			close(w.shutdownChan)
+		}
 
-	if w.testingOnlyInjectCloseError != nil {
-		return w.testingOnlyInjectCloseError
-	}
+		// Wait for the committer to finish processing.
+		w.committerWg.Wait()
 
-	if w.activeSegment == nil {
-		return nil // Already closed
-	}
+		w.mu.Lock()
+		defer w.mu.Unlock()
 
-	closeErr := w.activeSegment.Close()
-	w.activeSegment = nil
+		if w.testingOnlyInjectCloseError != nil {
+			closeErr = w.testingOnlyInjectCloseError
+			return
+		}
 
-	if closeErr != nil {
-		w.logger.Error("Error during WAL close.", "error", closeErr)
-	} else {
-		w.logger.Info("WAL closed.")
-	}
-	return closeErr
+		if w.activeSegment == nil {
+			return // Already closed
+		}
+
+		closeErr = w.activeSegment.Close()
+		w.activeSegment = nil
+
+		if closeErr != nil {
+			w.logger.Error("Error during WAL close.", "error", closeErr)
+		} else {
+			w.logger.Info("WAL closed.")
+		}
+	})
+	return
 }
 
 // Purge deletes segment files with index less than or equal to the given index.
@@ -325,7 +315,7 @@ func (w *WAL) ActiveSegmentIndex() uint64 {
 	return w.activeSegmentIndexLocked()
 }
 
-// rotate creates a new segment file for writing. Must be called with lock held.
+// rotateLocked creates a new segment file for writing. Must be called with lock held.
 func (w *WAL) rotateLocked() error {
 	var nextIndex uint64 = 1
 	if len(w.segmentIndexes) > 0 {
@@ -616,4 +606,159 @@ func decodeBatchRecord(recordData []byte) ([]core.WALEntry, error) {
 		entries = append(entries, *entry)
 	}
 	return entries, nil
+}
+
+// runCommitter is the heart of the group commit mechanism.
+// It runs in a dedicated goroutine, collecting write requests (commitRecords)
+// and committing them in batches.
+func (w *WAL) runCommitter() {
+	defer w.committerWg.Done()
+
+	// We use a ticker to set a maximum delay for commits, ensuring that even
+	// low-traffic periods have bounded latency.
+	ticker := time.NewTicker(10 * time.Millisecond) // Can be made configurable
+	defer ticker.Stop()
+
+	var pending []*commitRecord
+
+	for {
+		select {
+		case rec := <-w.commitChan:
+			pending = append(pending, rec)
+			// If we have a large enough batch, commit immediately without waiting for the ticker.
+			if len(pending) >= 64 { // Batch size can be made configurable
+				w.commit(pending)
+				pending = nil
+			}
+
+		case <-ticker.C:
+			if len(pending) > 0 {
+				w.commit(pending)
+				pending = nil
+			}
+
+		case <-w.shutdownChan:
+			if len(pending) > 0 {
+				// On shutdown, commit any remaining pending writes.
+				w.commit(pending)
+			}
+			return
+		}
+	}
+}
+
+// commit performs the actual writing and syncing of a batch of commit records.
+func (w *WAL) commit(records []*commitRecord) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.activeSegment == nil {
+		// This can happen if Close() is called concurrently.
+		// Notify waiters that the write failed because the WAL is closed.
+		for _, rec := range records {
+			rec.done <- errors.New("wal is closed")
+		}
+		return
+	}
+
+	// 1. Combine all entries from all records into one giant batch.
+	var allEntries []core.WALEntry
+	var shouldRotate bool
+	for _, rec := range records {
+		if rec.entries == nil {
+			// A nil entry list is a signal for rotation.
+			shouldRotate = true
+		} else {
+			allEntries = append(allEntries, rec.entries...)
+		}
+	}
+
+	// A request with an empty entry slice is a sync request.
+	// A request with a nil entry slice is a rotation request.
+	if len(allEntries) == 0 {
+		var err error
+		if shouldRotate {
+			err = w.rotateLocked()
+		} else if w.opts.SyncMode != core.WALSyncDisabled {
+			err = w.activeSegment.Sync()
+		}
+
+		// Notify all waiters.
+		for _, rec := range records {
+			rec.done <- err
+		}
+		return
+	}
+
+	// --- Actual Write Logic ---
+	var batchPayload bytes.Buffer
+	if err := batchPayload.WriteByte(byte(core.EntryTypePutBatch)); err != nil {
+		// This is a non-recoverable error, notify all waiters and return.
+		for _, rec := range records {
+			rec.done <- err
+		}
+		return
+	}
+	if err := binary.Write(&batchPayload, binary.LittleEndian, uint32(len(allEntries))); err != nil {
+		for _, rec := range records {
+			rec.done <- err
+		}
+		return
+	}
+	for i := range allEntries {
+		if err := encodeEntryData(&batchPayload, &allEntries[i]); err != nil {
+			for _, rec := range records {
+				rec.done <- err
+			}
+			return
+		}
+	}
+	payloadBytes := batchPayload.Bytes()
+	newRecordSize := int64(len(payloadBytes) + 8) // +4 for length, +4 for checksum
+
+	// Check for rotation before writing.
+	currentSize, err := w.activeSegment.Size()
+	if err != nil {
+		for _, rec := range records {
+			rec.done <- err
+		}
+		return
+	}
+	if currentSize > int64(binary.Size(core.FileHeader{})) && (currentSize+newRecordSize) > w.opts.MaxSegmentSize {
+		if err := w.rotateLocked(); err != nil {
+			for _, rec := range records {
+				rec.done <- err
+			}
+			return
+		}
+	}
+
+	// Write the single large batch record.
+	writeErr := w.activeSegment.WriteRecord(payloadBytes)
+
+	// Sync if required.
+	var syncErr error
+	if writeErr == nil && w.opts.SyncMode != core.WALSyncDisabled {
+		syncErr = w.activeSegment.Sync()
+	}
+
+	// Update metrics if the write was successful.
+	if writeErr == nil && syncErr == nil {
+		if w.metricsBytesWritten != nil {
+			w.metricsBytesWritten.Add(int64(len(payloadBytes) + 8))
+		}
+		if w.metricsEntriesWritten != nil {
+			w.metricsEntriesWritten.Add(int64(len(allEntries)))
+		}
+	}
+
+	// Notify all waiting goroutines.
+	finalErr := writeErr
+	if finalErr == nil {
+		finalErr = syncErr
+	}
+
+	for _, rec := range records {
+		rec.done <- finalErr
+	}
 }
