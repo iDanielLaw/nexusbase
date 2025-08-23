@@ -205,3 +205,100 @@ func TestStreamWAL_Success(t *testing.T) {
 	mockReader.AssertExpectations(t)
 	mockStream.AssertExpectations(t)
 }
+
+func TestConvertWALEntryToProto(t *testing.T) {
+	// --- Setup ---
+	tempDir := t.TempDir()
+	defer os.RemoveAll(tempDir)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hookManager := hooks.NewHookManager(nil)
+	stringStore := indexer.NewStringStore(logger, hookManager)
+	err := stringStore.LoadFromFile(tempDir)
+	require.NoError(t, err)
+	defer stringStore.Close()
+
+	// We don't need a mock WAL for this test, just the server with the string store
+	server := NewServer(nil, stringStore, logger)
+
+	// --- Test Data ---
+	metric := "system.disk.usage"
+	tags := map[string]string{"device": "/dev/sda1", "fstype": "ext4"}
+	metricID, _ := stringStore.GetOrCreateID(metric)
+	encodedTags := make([]core.EncodedSeriesTagPair, 0, len(tags))
+	for k, v := range tags {
+		kID, _ := stringStore.GetOrCreateID(k)
+		vID, _ := stringStore.GetOrCreateID(v)
+		encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: kID, ValueID: vID})
+	}
+	sort.Slice(encodedTags, func(i, j int) bool {
+		return encodedTags[i].KeyID < encodedTags[j].KeyID
+	})
+
+	seriesKeyBuf := core.GetBuffer()
+	core.EncodeSeriesKeyToBuffer(seriesKeyBuf, metricID, encodedTags)
+	seriesKeyBytes := make([]byte, seriesKeyBuf.Len())
+	copy(seriesKeyBytes, seriesKeyBuf.Bytes())
+	core.PutBuffer(seriesKeyBuf)
+
+	// --- Test Cases ---
+	t.Run("DELETE_SERIES", func(t *testing.T) {
+		walEntry := &core.WALEntry{
+			SeqNum:    201,
+			EntryType: core.EntryTypeDeleteSeries,
+			Key:       seriesKeyBytes, // For DeleteSeries, the key is the series key
+			Value:     nil,
+		}
+
+		protoEntry, err := server.convertWALEntryToProto(walEntry)
+		require.NoError(t, err)
+		require.NotNil(t, protoEntry)
+
+		assert.Equal(t, uint64(201), protoEntry.GetSequenceNumber())
+		assert.Equal(t, pb.WALEntry_DELETE_SERIES, protoEntry.GetEntryType())
+		assert.Equal(t, metric, protoEntry.GetMetric())
+		assert.Equal(t, tags, protoEntry.GetTags())
+		// These fields should be zero/nil for this type
+		assert.Zero(t, protoEntry.GetTimestamp())
+		assert.Nil(t, protoEntry.GetFields())
+		assert.Zero(t, protoEntry.GetStartTime())
+		assert.Zero(t, protoEntry.GetEndTime())
+	})
+
+	t.Run("DELETE_RANGE", func(t *testing.T) {
+		startTime := time.Now().Add(-1 * time.Hour).UnixNano()
+		endTime := time.Now().UnixNano()
+		encodedValue := core.EncodeRangeTombstoneValue(startTime, endTime)
+
+		walEntry := &core.WALEntry{
+			SeqNum:    202,
+			EntryType: core.EntryTypeDeleteRange,
+			Key:       seriesKeyBytes, // For DeleteRange, the key is the series key
+			Value:     encodedValue,
+		}
+
+		protoEntry, err := server.convertWALEntryToProto(walEntry)
+		require.NoError(t, err)
+		require.NotNil(t, protoEntry)
+
+		assert.Equal(t, uint64(202), protoEntry.GetSequenceNumber())
+		assert.Equal(t, pb.WALEntry_DELETE_RANGE, protoEntry.GetEntryType())
+		assert.Equal(t, metric, protoEntry.GetMetric())
+		assert.Equal(t, tags, protoEntry.GetTags())
+		assert.Equal(t, startTime, protoEntry.GetStartTime())
+		assert.Equal(t, endTime, protoEntry.GetEndTime())
+		// These fields should be zero/nil for this type
+		assert.Zero(t, protoEntry.GetTimestamp())
+		assert.Nil(t, protoEntry.GetFields())
+	})
+
+	t.Run("Unsupported Type", func(t *testing.T) {
+		walEntry := &core.WALEntry{
+			SeqNum:    203,
+			EntryType: core.EntryTypeDelete, // 'D' is not a replicable type
+		}
+
+		_, err := server.convertWALEntryToProto(walEntry)
+		assert.Error(t, err)
+	})
+}
