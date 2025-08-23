@@ -32,6 +32,9 @@ type WALApplier struct {
 	conn       *grpc.ClientConn
 	client     pb.ReplicationServiceClient
 	cancel     context.CancelFunc
+
+	// dialOpts allows injecting gRPC dial options for testing.
+	dialOpts []grpc.DialOption
 }
 
 // NewWALApplier สร้าง WAL applier ใหม่
@@ -49,25 +52,35 @@ func (a *WALApplier) Start(ctx context.Context) {
 	a.logger.Info("Starting WAL Applier")
 
 	applierCtx, cancel := context.WithCancel(ctx)
-	a.cancel = cancel
+
+	// Setup dial options. Production options are default.
+	// Tests can inject their own options via the `dialOpts` field.
+	opts := a.dialOpts
+	if opts == nil {
+		opts = []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithConnectParams(grpc.ConnectParams{
+				Backoff: backoff.Config{
+					BaseDelay:  1.0 * time.Second,
+					Multiplier: 1.6,
+					Jitter:     0.2,
+					MaxDelay:   120 * time.Second,
+				},
+				MinConnectTimeout: 20 * time.Second,
+			}),
+		}
+	}
 
 	// เชื่อมต่อไปยัง leader พร้อม retry logic
-	conn, err := grpc.DialContext(applierCtx, a.leaderAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithConnectParams(grpc.ConnectParams{
-			Backoff: backoff.Config{
-				BaseDelay:  1.0 * time.Second,
-				Multiplier: 1.6,
-				Jitter:     0.2,
-				MaxDelay:   120 * time.Second,
-			},
-			MinConnectTimeout: 20 * time.Second,
-		}),
-	)
+	conn, err := grpc.DialContext(applierCtx, a.leaderAddr, opts...)
 	if err != nil {
 		a.logger.Error("Failed to dial leader, WAL applier will not run", "error", err)
+		cancel() // Avoid leaking the context
 		return
 	}
+
+	// Only set the cancel function after a successful connection.
+	a.cancel = cancel
 	a.conn = conn
 	a.client = pb.NewReplicationServiceClient(conn)
 
