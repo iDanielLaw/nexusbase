@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 
@@ -414,30 +415,78 @@ func decodeEntryData(r io.Reader) (*core.WALEntry, error) {
 
 // recover reads all entries from all known segments.
 func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
-	var allEntries []core.WALEntry
+	segmentsToRecover := make([]uint64, 0)
 	for _, index := range w.segmentIndexes {
 		if index <= startRecoveryIndex {
 			continue // Skip segments that are already covered by a checkpoint
 		}
-		path := filepath.Join(w.dir, core.FormatSegmentFileName(index))
-		entries, err := recoverFromSegment(path, w.logger)
-		if len(entries) > 0 {
-			allEntries = append(allEntries, entries...)
-		}
-		if err != nil {
-			if err == io.EOF {
-				// Cleanly read all records in this segment, continue to the next.
-				continue
-			}
-			// For other errors (e.g., corruption, unexpected EOF), we stop recovery.
-			// The caller receives the partially recovered entries and the error,
-			// and can decide how to proceed.
-			w.logger.Warn("Recovery stopped on segment due to error", "index", index, "path", path, "error", err)
-			return allEntries, err
-		}
+		segmentsToRecover = append(segmentsToRecover, index)
 	}
-	// If we successfully read all segments without error, return EOF to signal a clean recovery.
-	return allEntries, io.EOF
+
+	if len(segmentsToRecover) == 0 {
+		return nil, nil // Nothing to recover
+	}
+
+	// --- Parallel Recovery ---
+	numWorkers := runtime.NumCPU()
+	if len(segmentsToRecover) < numWorkers {
+		numWorkers = len(segmentsToRecover)
+	}
+
+	w.logger.Info("Starting parallel WAL recovery", "segments_to_recover", len(segmentsToRecover), "workers", numWorkers)
+
+	var wg sync.WaitGroup
+	segmentChan := make(chan uint64, len(segmentsToRecover))
+	resultsChan := make(chan []core.WALEntry, len(segmentsToRecover))
+	errChan := make(chan error, numWorkers)
+
+	// Start worker goroutines
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for index := range segmentChan {
+				path := filepath.Join(w.dir, core.FormatSegmentFileName(index))
+				entries, err := recoverFromSegment(path, w.logger)
+				if len(entries) > 0 {
+					resultsChan <- entries
+				}
+				if err != nil && err != io.EOF {
+					w.logger.Error("Error recovering from segment", "worker_id", workerID, "segment_index", index, "error", err)
+					errChan <- err
+					return // Stop this worker on a hard error
+				}
+			}
+		}(i)
+	}
+
+	// Feed segments to workers
+	for _, index := range segmentsToRecover {
+		segmentChan <- index
+	}
+	close(segmentChan)
+
+	wg.Wait()
+	close(resultsChan)
+	close(errChan)
+
+	// Collect and sort all results
+	var allEntries []core.WALEntry
+	for entries := range resultsChan {
+		allEntries = append(allEntries, entries...)
+	}
+
+	// Check for the first error that occurred.
+	// We do this after collecting results so that we can return partially recovered data.
+	firstErr := <-errChan
+
+	sort.Slice(allEntries, func(i, j int) bool {
+		return allEntries[i].SeqNum < allEntries[j].SeqNum
+	})
+
+	// If there was an error, return the recovered entries along with it.
+	// Otherwise, firstErr will be nil.
+	return allEntries, firstErr
 }
 
 // recoverFromSegment reads all valid entries from a single WAL segment file.

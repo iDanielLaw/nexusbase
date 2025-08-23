@@ -399,3 +399,45 @@ func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
 	assert.Equal(t, entry1.Key, recoveredEntries[0].Key)
 	assert.Equal(t, entry1.SeqNum, recoveredEntries[0].SeqNum)
 }
+
+func TestWAL_ParallelRecovery(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	opts.MaxSegmentSize = 1024 // Small size to force many rotations
+
+	// 1. Create a WAL and write enough data to create many segments
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+
+	totalEntries := 500
+	expectedEntries := make([]core.WALEntry, totalEntries)
+	for i := 0; i < totalEntries; i++ {
+		entry := core.WALEntry{
+			EntryType: core.EntryTypePutEvent,
+			Key:       []byte(fmt.Sprintf("key-%d", i)),
+			Value:     []byte("some-value-to-ensure-rotation-happens-eventually-and-this-is-it"),
+			SeqNum:    uint64(i + 1),
+		}
+		require.NoError(t, wal.Append(entry))
+		expectedEntries[i] = entry
+	}
+
+	numSegments := wal.ActiveSegmentIndex()
+	require.Greater(t, numSegments, uint64(10), "Should have created many segments to test parallelism")
+	t.Logf("Created %d WAL segments for parallel recovery test.", numSegments)
+
+	require.NoError(t, wal.Close())
+
+	// 2. Re-open the WAL, which triggers the parallel recovery process.
+	wal2, recovered, err := Open(opts)
+	require.NoError(t, err)
+	defer wal2.Close()
+
+	// 3. Verify the results
+	require.Len(t, recovered, totalEntries, "Should recover all entries")
+
+	for i := 0; i < totalEntries; i++ {
+		assert.Equal(t, expectedEntries[i].SeqNum, recovered[i].SeqNum, "Sequence number mismatch at index %d", i)
+		assert.Equal(t, expectedEntries[i].Key, recovered[i].Key, "Key mismatch at index %d", i)
+	}
+}
