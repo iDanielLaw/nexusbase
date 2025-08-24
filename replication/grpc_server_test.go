@@ -123,7 +123,7 @@ func setupServerTest(t *testing.T) (*Server, *MockWAL, *indexer.StringStore) {
 	})
 
 	mockWal := new(MockWAL)
-	server := NewServer(mockWal, stringStore, logger)
+	server := NewServer(mockWal, stringStore, nil, "", logger)
 	return server, mockWal, stringStore
 }
 

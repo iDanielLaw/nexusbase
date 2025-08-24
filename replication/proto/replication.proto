@@ -5,12 +5,19 @@ package replication;
 option go_package = "github.com/iDanielLaw/nexusbase/replication/proto";
 
 import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
 
 // ReplicationService นิยาม gRPC service สำหรับการทำ replication
 service ReplicationService {
   // StreamWAL ถูกเรียกโดย follower เพื่อรับ stream ของ WAL entries จาก leader
   // อย่างต่อเนื่อง
   rpc StreamWAL(StreamWALRequest) returns (stream WALEntry) {}
+
+  // GetLatestSnapshotInfo ให้ follower สอบถามข้อมูล metadata ของ snapshot ล่าสุดของ leader
+  rpc GetLatestSnapshotInfo(GetLatestSnapshotInfoRequest) returns (SnapshotInfo) {}
+
+  // StreamSnapshot ให้ follower ดาวน์โหลด snapshot ทั้งหมดจาก leader
+  rpc StreamSnapshot(StreamSnapshotRequest) returns (stream SnapshotChunk) {}
 }
 
 // StreamWALRequest คือ message ที่ follower ส่งไปหา leader ตอนเริ่มต้น stream
@@ -39,4 +46,34 @@ message WALEntry {
   google.protobuf.Struct fields = 6; // สำหรับ PUT_EVENT
   int64 start_time = 7; // สำหรับ DELETE_RANGE
   int64 end_time = 8; // สำหรับ DELETE_RANGE
+}
+
+// --- Snapshot RPC Messages ---
+
+message GetLatestSnapshotInfoRequest {}
+
+message SnapshotInfo {
+  string id = 1;
+  uint64 last_wal_sequence_number = 2;
+  google.protobuf.Timestamp created_at = 3;
+  int64 size_bytes = 4;
+}
+
+message StreamSnapshotRequest {
+  // ID ของ snapshot ที่ต้องการจะ stream ซึ่งได้มาจาก GetLatestSnapshotInfo
+  string id = 1;
+}
+
+message SnapshotChunk {
+  oneof content {
+    // message แรกใน stream จะเป็น metadata ของไฟล์
+    FileInfo file_info = 1;
+    // message ต่อๆ ไปจะเป็นส่วนของเนื้อหาไฟล์
+    bytes chunk_data = 2;
+  }
+}
+
+message FileInfo {
+  // path ของไฟล์ที่สัมพันธ์กับไดเรกทอรีของ snapshot
+  string path = 1;
 }

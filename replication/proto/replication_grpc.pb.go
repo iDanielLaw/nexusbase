@@ -19,7 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ReplicationService_StreamWAL_FullMethodName = "/replication.ReplicationService/StreamWAL"
+	ReplicationService_StreamWAL_FullMethodName             = "/replication.ReplicationService/StreamWAL"
+	ReplicationService_GetLatestSnapshotInfo_FullMethodName = "/replication.ReplicationService/GetLatestSnapshotInfo"
+	ReplicationService_StreamSnapshot_FullMethodName        = "/replication.ReplicationService/StreamSnapshot"
 )
 
 // ReplicationServiceClient is the client API for ReplicationService service.
@@ -31,6 +33,10 @@ type ReplicationServiceClient interface {
 	// StreamWAL ถูกเรียกโดย follower เพื่อรับ stream ของ WAL entries จาก leader
 	// อย่างต่อเนื่อง
 	StreamWAL(ctx context.Context, in *StreamWALRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WALEntry], error)
+	// GetLatestSnapshotInfo ให้ follower สอบถามข้อมูล metadata ของ snapshot ล่าสุดของ leader
+	GetLatestSnapshotInfo(ctx context.Context, in *GetLatestSnapshotInfoRequest, opts ...grpc.CallOption) (*SnapshotInfo, error)
+	// StreamSnapshot ให้ follower ดาวน์โหลด snapshot ทั้งหมดจาก leader
+	StreamSnapshot(ctx context.Context, in *StreamSnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotChunk], error)
 }
 
 type replicationServiceClient struct {
@@ -60,6 +66,35 @@ func (c *replicationServiceClient) StreamWAL(ctx context.Context, in *StreamWALR
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_StreamWALClient = grpc.ServerStreamingClient[WALEntry]
 
+func (c *replicationServiceClient) GetLatestSnapshotInfo(ctx context.Context, in *GetLatestSnapshotInfoRequest, opts ...grpc.CallOption) (*SnapshotInfo, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SnapshotInfo)
+	err := c.cc.Invoke(ctx, ReplicationService_GetLatestSnapshotInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *replicationServiceClient) StreamSnapshot(ctx context.Context, in *StreamSnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ReplicationService_ServiceDesc.Streams[1], ReplicationService_StreamSnapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StreamSnapshotRequest, SnapshotChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_StreamSnapshotClient = grpc.ServerStreamingClient[SnapshotChunk]
+
 // ReplicationServiceServer is the server API for ReplicationService service.
 // All implementations must embed UnimplementedReplicationServiceServer
 // for forward compatibility.
@@ -69,6 +104,10 @@ type ReplicationServiceServer interface {
 	// StreamWAL ถูกเรียกโดย follower เพื่อรับ stream ของ WAL entries จาก leader
 	// อย่างต่อเนื่อง
 	StreamWAL(*StreamWALRequest, grpc.ServerStreamingServer[WALEntry]) error
+	// GetLatestSnapshotInfo ให้ follower สอบถามข้อมูล metadata ของ snapshot ล่าสุดของ leader
+	GetLatestSnapshotInfo(context.Context, *GetLatestSnapshotInfoRequest) (*SnapshotInfo, error)
+	// StreamSnapshot ให้ follower ดาวน์โหลด snapshot ทั้งหมดจาก leader
+	StreamSnapshot(*StreamSnapshotRequest, grpc.ServerStreamingServer[SnapshotChunk]) error
 	mustEmbedUnimplementedReplicationServiceServer()
 }
 
@@ -81,6 +120,12 @@ type UnimplementedReplicationServiceServer struct{}
 
 func (UnimplementedReplicationServiceServer) StreamWAL(*StreamWALRequest, grpc.ServerStreamingServer[WALEntry]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamWAL not implemented")
+}
+func (UnimplementedReplicationServiceServer) GetLatestSnapshotInfo(context.Context, *GetLatestSnapshotInfoRequest) (*SnapshotInfo, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetLatestSnapshotInfo not implemented")
+}
+func (UnimplementedReplicationServiceServer) StreamSnapshot(*StreamSnapshotRequest, grpc.ServerStreamingServer[SnapshotChunk]) error {
+	return status.Errorf(codes.Unimplemented, "method StreamSnapshot not implemented")
 }
 func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
 func (UnimplementedReplicationServiceServer) testEmbeddedByValue()                            {}
@@ -114,17 +159,56 @@ func _ReplicationService_StreamWAL_Handler(srv interface{}, stream grpc.ServerSt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_StreamWALServer = grpc.ServerStreamingServer[WALEntry]
 
+func _ReplicationService_GetLatestSnapshotInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLatestSnapshotInfoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).GetLatestSnapshotInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_GetLatestSnapshotInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).GetLatestSnapshotInfo(ctx, req.(*GetLatestSnapshotInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ReplicationService_StreamSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(StreamSnapshotRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ReplicationServiceServer).StreamSnapshot(m, &grpc.GenericServerStream[StreamSnapshotRequest, SnapshotChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_StreamSnapshotServer = grpc.ServerStreamingServer[SnapshotChunk]
+
 // ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "replication.ReplicationService",
 	HandlerType: (*ReplicationServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetLatestSnapshotInfo",
+			Handler:    _ReplicationService_GetLatestSnapshotInfo_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "StreamWAL",
 			Handler:       _ReplicationService_StreamWAL_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamSnapshot",
+			Handler:       _ReplicationService_StreamSnapshot_Handler,
 			ServerStreams: true,
 		},
 	},

@@ -10,6 +10,7 @@ import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	structpb "google.golang.org/protobuf/types/known/structpb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -222,11 +223,289 @@ func (x *WALEntry) GetEndTime() int64 {
 	return 0
 }
 
+type GetLatestSnapshotInfoRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetLatestSnapshotInfoRequest) Reset() {
+	*x = GetLatestSnapshotInfoRequest{}
+	mi := &file_replication_proto_replication_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetLatestSnapshotInfoRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetLatestSnapshotInfoRequest) ProtoMessage() {}
+
+func (x *GetLatestSnapshotInfoRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_replication_proto_replication_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetLatestSnapshotInfoRequest.ProtoReflect.Descriptor instead.
+func (*GetLatestSnapshotInfoRequest) Descriptor() ([]byte, []int) {
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{2}
+}
+
+type SnapshotInfo struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	Id                    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	LastWalSequenceNumber uint64                 `protobuf:"varint,2,opt,name=last_wal_sequence_number,json=lastWalSequenceNumber,proto3" json:"last_wal_sequence_number,omitempty"`
+	CreatedAt             *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	SizeBytes             int64                  `protobuf:"varint,4,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *SnapshotInfo) Reset() {
+	*x = SnapshotInfo{}
+	mi := &file_replication_proto_replication_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotInfo) ProtoMessage() {}
+
+func (x *SnapshotInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_replication_proto_replication_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotInfo.ProtoReflect.Descriptor instead.
+func (*SnapshotInfo) Descriptor() ([]byte, []int) {
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SnapshotInfo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SnapshotInfo) GetLastWalSequenceNumber() uint64 {
+	if x != nil {
+		return x.LastWalSequenceNumber
+	}
+	return 0
+}
+
+func (x *SnapshotInfo) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *SnapshotInfo) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+type StreamSnapshotRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ID ของ snapshot ที่ต้องการจะ stream ซึ่งได้มาจาก GetLatestSnapshotInfo
+	Id            string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamSnapshotRequest) Reset() {
+	*x = StreamSnapshotRequest{}
+	mi := &file_replication_proto_replication_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamSnapshotRequest) ProtoMessage() {}
+
+func (x *StreamSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_replication_proto_replication_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*StreamSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *StreamSnapshotRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type SnapshotChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Content:
+	//
+	//	*SnapshotChunk_FileInfo
+	//	*SnapshotChunk_ChunkData
+	Content       isSnapshotChunk_Content `protobuf_oneof:"content"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotChunk) Reset() {
+	*x = SnapshotChunk{}
+	mi := &file_replication_proto_replication_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotChunk) ProtoMessage() {}
+
+func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_replication_proto_replication_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotChunk.ProtoReflect.Descriptor instead.
+func (*SnapshotChunk) Descriptor() ([]byte, []int) {
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *SnapshotChunk) GetContent() isSnapshotChunk_Content {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *SnapshotChunk) GetFileInfo() *FileInfo {
+	if x != nil {
+		if x, ok := x.Content.(*SnapshotChunk_FileInfo); ok {
+			return x.FileInfo
+		}
+	}
+	return nil
+}
+
+func (x *SnapshotChunk) GetChunkData() []byte {
+	if x != nil {
+		if x, ok := x.Content.(*SnapshotChunk_ChunkData); ok {
+			return x.ChunkData
+		}
+	}
+	return nil
+}
+
+type isSnapshotChunk_Content interface {
+	isSnapshotChunk_Content()
+}
+
+type SnapshotChunk_FileInfo struct {
+	// message แรกใน stream จะเป็น metadata ของไฟล์
+	FileInfo *FileInfo `protobuf:"bytes,1,opt,name=file_info,json=fileInfo,proto3,oneof"`
+}
+
+type SnapshotChunk_ChunkData struct {
+	// message ต่อๆ ไปจะเป็นส่วนของเนื้อหาไฟล์
+	ChunkData []byte `protobuf:"bytes,2,opt,name=chunk_data,json=chunkData,proto3,oneof"`
+}
+
+func (*SnapshotChunk_FileInfo) isSnapshotChunk_Content() {}
+
+func (*SnapshotChunk_ChunkData) isSnapshotChunk_Content() {}
+
+type FileInfo struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// path ของไฟล์ที่สัมพันธ์กับไดเรกทอรีของ snapshot
+	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileInfo) Reset() {
+	*x = FileInfo{}
+	mi := &file_replication_proto_replication_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileInfo) ProtoMessage() {}
+
+func (x *FileInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_replication_proto_replication_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
+func (*FileInfo) Descriptor() ([]byte, []int) {
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *FileInfo) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
 var File_replication_proto_replication_proto protoreflect.FileDescriptor
 
 const file_replication_proto_replication_proto_rawDesc = "" +
 	"\n" +
-	"#replication/proto/replication.proto\x12\vreplication\x1a\x1cgoogle/protobuf/struct.proto\"D\n" +
+	"#replication/proto/replication.proto\x12\vreplication\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"D\n" +
 	"\x10StreamWALRequest\x120\n" +
 	"\x14from_sequence_number\x18\x01 \x01(\x04R\x12fromSequenceNumber\"\xc3\x03\n" +
 	"\bWALEntry\x12'\n" +
@@ -246,9 +525,28 @@ const file_replication_proto_replication_proto_rawDesc = "" +
 	"\tEntryType\x12\r\n" +
 	"\tPUT_EVENT\x10\x00\x12\x11\n" +
 	"\rDELETE_SERIES\x10\x01\x12\x10\n" +
-	"\fDELETE_RANGE\x10\x022[\n" +
+	"\fDELETE_RANGE\x10\x02\"\x1e\n" +
+	"\x1cGetLatestSnapshotInfoRequest\"\xb1\x01\n" +
+	"\fSnapshotInfo\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x127\n" +
+	"\x18last_wal_sequence_number\x18\x02 \x01(\x04R\x15lastWalSequenceNumber\x129\n" +
+	"\n" +
+	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\"'\n" +
+	"\x15StreamSnapshotRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"q\n" +
+	"\rSnapshotChunk\x124\n" +
+	"\tfile_info\x18\x01 \x01(\v2\x15.replication.FileInfoH\x00R\bfileInfo\x12\x1f\n" +
+	"\n" +
+	"chunk_data\x18\x02 \x01(\fH\x00R\tchunkDataB\t\n" +
+	"\acontent\"\x1e\n" +
+	"\bFileInfo\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path2\x92\x02\n" +
 	"\x12ReplicationService\x12E\n" +
-	"\tStreamWAL\x12\x1d.replication.StreamWALRequest\x1a\x15.replication.WALEntry\"\x000\x01B3Z1github.com/iDanielLaw/nexusbase/replication/protob\x06proto3"
+	"\tStreamWAL\x12\x1d.replication.StreamWALRequest\x1a\x15.replication.WALEntry\"\x000\x01\x12_\n" +
+	"\x15GetLatestSnapshotInfo\x12).replication.GetLatestSnapshotInfoRequest\x1a\x19.replication.SnapshotInfo\"\x00\x12T\n" +
+	"\x0eStreamSnapshot\x12\".replication.StreamSnapshotRequest\x1a\x1a.replication.SnapshotChunk\"\x000\x01B3Z1github.com/iDanielLaw/nexusbase/replication/protob\x06proto3"
 
 var (
 	file_replication_proto_replication_proto_rawDescOnce sync.Once
@@ -263,25 +561,37 @@ func file_replication_proto_replication_proto_rawDescGZIP() []byte {
 }
 
 var file_replication_proto_replication_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_replication_proto_replication_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_replication_proto_replication_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_replication_proto_replication_proto_goTypes = []any{
-	(WALEntry_EntryType)(0),  // 0: replication.WALEntry.EntryType
-	(*StreamWALRequest)(nil), // 1: replication.StreamWALRequest
-	(*WALEntry)(nil),         // 2: replication.WALEntry
-	nil,                      // 3: replication.WALEntry.TagsEntry
-	(*structpb.Struct)(nil),  // 4: google.protobuf.Struct
+	(WALEntry_EntryType)(0),              // 0: replication.WALEntry.EntryType
+	(*StreamWALRequest)(nil),             // 1: replication.StreamWALRequest
+	(*WALEntry)(nil),                     // 2: replication.WALEntry
+	(*GetLatestSnapshotInfoRequest)(nil), // 3: replication.GetLatestSnapshotInfoRequest
+	(*SnapshotInfo)(nil),                 // 4: replication.SnapshotInfo
+	(*StreamSnapshotRequest)(nil),        // 5: replication.StreamSnapshotRequest
+	(*SnapshotChunk)(nil),                // 6: replication.SnapshotChunk
+	(*FileInfo)(nil),                     // 7: replication.FileInfo
+	nil,                                  // 8: replication.WALEntry.TagsEntry
+	(*structpb.Struct)(nil),              // 9: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),        // 10: google.protobuf.Timestamp
 }
 var file_replication_proto_replication_proto_depIdxs = []int32{
-	0, // 0: replication.WALEntry.entry_type:type_name -> replication.WALEntry.EntryType
-	3, // 1: replication.WALEntry.tags:type_name -> replication.WALEntry.TagsEntry
-	4, // 2: replication.WALEntry.fields:type_name -> google.protobuf.Struct
-	1, // 3: replication.ReplicationService.StreamWAL:input_type -> replication.StreamWALRequest
-	2, // 4: replication.ReplicationService.StreamWAL:output_type -> replication.WALEntry
-	4, // [4:5] is the sub-list for method output_type
-	3, // [3:4] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	0,  // 0: replication.WALEntry.entry_type:type_name -> replication.WALEntry.EntryType
+	8,  // 1: replication.WALEntry.tags:type_name -> replication.WALEntry.TagsEntry
+	9,  // 2: replication.WALEntry.fields:type_name -> google.protobuf.Struct
+	10, // 3: replication.SnapshotInfo.created_at:type_name -> google.protobuf.Timestamp
+	7,  // 4: replication.SnapshotChunk.file_info:type_name -> replication.FileInfo
+	1,  // 5: replication.ReplicationService.StreamWAL:input_type -> replication.StreamWALRequest
+	3,  // 6: replication.ReplicationService.GetLatestSnapshotInfo:input_type -> replication.GetLatestSnapshotInfoRequest
+	5,  // 7: replication.ReplicationService.StreamSnapshot:input_type -> replication.StreamSnapshotRequest
+	2,  // 8: replication.ReplicationService.StreamWAL:output_type -> replication.WALEntry
+	4,  // 9: replication.ReplicationService.GetLatestSnapshotInfo:output_type -> replication.SnapshotInfo
+	6,  // 10: replication.ReplicationService.StreamSnapshot:output_type -> replication.SnapshotChunk
+	8,  // [8:11] is the sub-list for method output_type
+	5,  // [5:8] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_replication_proto_replication_proto_init() }
@@ -289,13 +599,17 @@ func file_replication_proto_replication_proto_init() {
 	if File_replication_proto_replication_proto != nil {
 		return
 	}
+	file_replication_proto_replication_proto_msgTypes[5].OneofWrappers = []any{
+		(*SnapshotChunk_FileInfo)(nil),
+		(*SnapshotChunk_ChunkData)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_replication_proto_replication_proto_rawDesc), len(file_replication_proto_replication_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   3,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

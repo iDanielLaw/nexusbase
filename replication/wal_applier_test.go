@@ -14,8 +14,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -29,6 +31,9 @@ type mockReplicatedEngine struct {
 	appliedCh  chan *pb.WALEntry
 	applyFunc  func(entry *pb.WALEntry) error // Function hook for custom logic
 }
+
+func (m *mockReplicatedEngine) Close() error { return nil }
+func (m *mockReplicatedEngine) ReplaceWithSnapshot(snapshotDir string) error { return nil }
 
 func newMockReplicatedEngine(appliedCh chan *pb.WALEntry) *mockReplicatedEngine {
 	return &mockReplicatedEngine{
@@ -73,6 +78,15 @@ type mockReplicationServer struct {
 	entries      []*pb.WALEntry
 	streamReqCh  chan *pb.StreamWALRequest // Channel to notify on new stream requests
 	streamStopCh chan struct{}             // Channel to stop a stream from the server side
+}
+
+func (s *mockReplicationServer) GetLatestSnapshotInfo(ctx context.Context, req *pb.GetLatestSnapshotInfoRequest) (*pb.SnapshotInfo, error) {
+	// For most existing tests, we want the applier to think there are no snapshots.
+	return nil, status.Errorf(codes.NotFound, "no snapshots on mock")
+}
+
+func (s *mockReplicationServer) StreamSnapshot(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+	return status.Errorf(codes.Unimplemented, "not implemented in mock")
 }
 
 func (s *mockReplicationServer) StreamWAL(req *pb.StreamWALRequest, stream pb.ReplicationService_StreamWALServer) error {
@@ -137,7 +151,7 @@ func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicati
 		return lis.DialContext(ctx)
 	}
 
-	applier := NewWALApplier(lis.Addr().String(), mockEngine, logger)
+	applier := NewWALApplier(lis.Addr().String(), mockEngine, nil, t.TempDir(), logger)
 	applier.retrySleep = 50 * time.Millisecond // Use short retry for tests
 	applier.dialOpts = []grpc.DialOption{
 		grpc.WithContextDialer(dialer),
@@ -355,7 +369,7 @@ func setupTestForLifecycle(t *testing.T) (*WALApplier, *mockReplicatedEngine, *m
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	applier := NewWALApplier(lis.Addr().String(), mockEngine, logger)
+	applier := NewWALApplier(lis.Addr().String(), mockEngine, nil, t.TempDir(), logger)
 	applier.dialOpts = []grpc.DialOption{
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -379,7 +393,7 @@ func TestWALApplier_Start_DialError(t *testing.T) {
 	mockEngine := newMockReplicatedEngine(nil)
 
 	// Use an invalid address to force a dial error.
-	applier := NewWALApplier("invalid-address:12345", mockEngine, logger)
+	applier := NewWALApplier("invalid-address:12345", mockEngine, nil, t.TempDir(), logger)
 	// Inject a dial option that will time out quickly.
 	applier.dialOpts = []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

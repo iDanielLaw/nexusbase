@@ -1,19 +1,24 @@
 package replication
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/indexer"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/wal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Server คือการ implement gRPC service สำหรับ Replication ฝั่ง Leader
@@ -21,18 +26,124 @@ type Server struct {
 	// ต้องฝัง UnimplementedReplicationServiceServer เพื่อให้เข้ากันได้กับ gRPC เวอร์ชันใหม่ๆ
 	pb.UnimplementedReplicationServiceServer
 
-	wal     wal.WALInterface
-	indexer *indexer.StringStore // เพิ่ม dependency ไปยัง StringStore
-	logger  *slog.Logger
+	wal         wal.WALInterface
+	indexer     *indexer.StringStore
+	snapshotMgr snapshot.ManagerInterface
+	snapshotDir string // Base directory where snapshots are stored
+	logger      *slog.Logger
 }
 
 // NewServer สร้าง instance ใหม่ของ gRPC Replication Server
-func NewServer(w wal.WALInterface, indexer *indexer.StringStore, logger *slog.Logger) *Server {
+func NewServer(w wal.WALInterface, indexer *indexer.StringStore, snapshotMgr snapshot.ManagerInterface, snapshotDir string, logger *slog.Logger) *Server {
 	return &Server{
-		wal:     w,
-		indexer: indexer,
-		logger:  logger.With("component", "replication_grpc_server"),
+		wal:         w,
+		indexer:     indexer,
+		snapshotMgr: snapshotMgr,
+		snapshotDir: snapshotDir,
+		logger:      logger.With("component", "replication_grpc_server"),
 	}
+}
+
+// GetLatestSnapshotInfo คืนค่า metadata ของ snapshot ล่าสุดที่มีอยู่
+func (s *Server) GetLatestSnapshotInfo(ctx context.Context, req *pb.GetLatestSnapshotInfoRequest) (*pb.SnapshotInfo, error) {
+	infos, err := s.snapshotMgr.ListSnapshots(s.snapshotDir)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to list snapshots: %v", err)
+	}
+
+	if len(infos) == 0 {
+		return nil, status.Errorf(codes.NotFound, "no snapshots found")
+	}
+
+	// ค้นหา snapshot ล่าสุด
+	var latest snapshot.Info
+	found := false
+	for _, info := range infos {
+		if !found || info.CreatedAt.After(latest.CreatedAt) {
+			latest = info
+			found = true
+		}
+	}
+
+	if !found {
+		return nil, status.Errorf(codes.NotFound, "no suitable snapshots found")
+	}
+
+	// อ่าน manifest เพื่อเอา sequence number
+	manifestPath := filepath.Join(s.snapshotDir, latest.ID, "MANIFEST")
+	f, err := os.Open(manifestPath)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to open snapshot manifest %s: %v", manifestPath, err)
+	}
+	defer f.Close()
+
+	manifest, err := snapshot.ReadManifestBinary(f)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to read snapshot manifest %s: %v", manifestPath, err)
+	}
+
+	return &pb.SnapshotInfo{
+		Id:                    latest.ID,
+		LastWalSequenceNumber: manifest.SequenceNumber,
+		CreatedAt:             timestamppb.New(latest.CreatedAt),
+		SizeBytes:             latest.TotalChainSize, // ใช้ขนาดของ chain ทั้งหมดเพื่อให้เห็นภาพรวม
+	}, nil
+}
+
+// StreamSnapshot สตรีมเนื้อหาของ snapshot ไปยัง follower
+func (s *Server) StreamSnapshot(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+	s.logger.Info("Follower requested snapshot stream", "snapshot_id", req.Id)
+
+	snapshotPath := filepath.Join(s.snapshotDir, req.Id)
+
+	// ทำการ Walk ใน snapshot directory เพื่อสตรีมไฟล์แต่ละไฟล์
+	return filepath.Walk(snapshotPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// เราจะสตรีมเฉพาะ regular files เท่านั้น
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
+		// หา relative path เพื่อส่งไปให้ follower
+		relPath, err := filepath.Rel(snapshotPath, path)
+		if err != nil {
+			return err
+		}
+
+		// 1. ส่ง file metadata ไปก่อน
+		fileInfo := &pb.FileInfo{Path: relPath}
+		if err := stream.Send(&pb.SnapshotChunk{Content: &pb.SnapshotChunk_FileInfo{FileInfo: fileInfo}}); err != nil {
+			return err
+		}
+
+		// 2. สตรีมเนื้อหาไฟล์เป็นส่วนๆ (chunks)
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		buf := make([]byte, 1024*64) // 64KB chunks
+		for {
+			n, err := f.Read(buf)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+
+			chunk := &pb.SnapshotChunk{Content: &pb.SnapshotChunk_ChunkData{ChunkData: buf[:n]}}
+			if err := stream.Send(chunk); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 // StreamWAL คือเมธอดหลักที่ Follower เรียกใช้เพื่อรับข้อมูล WAL อย่างต่อเนื่อง
