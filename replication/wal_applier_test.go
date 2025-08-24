@@ -85,6 +85,8 @@ func (s *mockReplicationServer) StreamWAL(req *pb.StreamWALRequest, stream pb.Re
 	s.mu.Unlock()
 
 	if s.streamErr != nil {
+		// Introduce a small delay before returning the error
+		time.Sleep(50 * time.Millisecond)
 		return s.streamErr
 	}
 
@@ -97,29 +99,27 @@ func (s *mockReplicationServer) StreamWAL(req *pb.StreamWALRequest, stream pb.Re
 	}
 
 	if s.sendErr != nil {
+		// Introduce a small delay before returning the error
+		time.Sleep(50 * time.Millisecond)
 		return s.sendErr
 	}
 
-	// Wait for either the client or the test to cancel the context
-	select {
-	case <-stream.Context().Done():
-		return stream.Context().Err()
-	case <-s.streamStopCh:
-		return errors.New("stream stopped by server")
-	}
+	// Simulate end of stream if no explicit error is set
+	// The client will receive io.EOF on Recv() when the handler returns nil.
+	return nil
 }
 
 // --- Test Setup ---
 
 const bufSize = 1024 * 1024
 
-// setupTest initializes a mock server and a WALApplier connected to it.
+// setupTest initializes a mock server and a WALApplier configured to connect to it.
 func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicationServer, func()) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	appliedCh := make(chan *pb.WALEntry, 10)
-
 	mockEngine := newMockReplicatedEngine(appliedCh)
 	mockServer := &mockReplicationServer{
+		streamReqCh:  make(chan *pb.StreamWALRequest, 10),
 		streamStopCh: make(chan struct{}),
 	}
 
@@ -128,28 +128,29 @@ func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicati
 	pb.RegisterReplicationServiceServer(s, mockServer)
 
 	go func() {
-		if err := s.Serve(lis); err != nil {
-			// Expected error on server stop
+		if err := s.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			t.Logf("gRPC server error: %v", err)
 		}
 	}()
 
-	dialer := func(context.Context, string) (net.Conn, error) {
-		return lis.Dial()
+	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+		return lis.DialContext(ctx)
 	}
 
-	applier := NewWALApplier("bufnet", mockEngine, logger)
-
-	conn, err := grpc.DialContext(context.Background(), "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-
-	applier.conn = conn
-	applier.client = pb.NewReplicationServiceClient(conn)
+	applier := NewWALApplier(lis.Addr().String(), mockEngine, logger)
+	applier.retrySleep = 50 * time.Millisecond // Use short retry for tests
+	applier.dialOpts = []grpc.DialOption{
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	}
 
 	cleanup := func() {
 		applier.Stop()
 		s.Stop()
 		lis.Close()
 		close(appliedCh)
+		close(mockServer.streamReqCh)
 		close(mockServer.streamStopCh)
 	}
 
@@ -180,7 +181,8 @@ func TestWALApplier_SuccessfulReplication(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go applier.replicationLoop(ctx)
+	defer cancel()
+	go applier.Start(ctx)
 
 	for i := 0; i < len(mockServer.entries); i++ {
 		select {
@@ -192,47 +194,48 @@ func TestWALApplier_SuccessfulReplication(t *testing.T) {
 	}
 
 	assert.Equal(t, uint64(3), mockEngine.GetLatestAppliedSeqNum())
-	cancel() // Stop the loop
 }
 
 func TestWALApplier_ReconnectsAndResumes(t *testing.T) {
 	applier, mockEngine, mockServer, cleanup := setupTest(t)
 	defer cleanup()
 
+	// --- First Connection ---
+	// Server will send one entry, then gracefully close the stream (io.EOF).
 	mockServer.entries = []*pb.WALEntry{newTestWALEntry(1, "metric1", 1000)}
-	mockServer.sendErr = io.EOF // Simulate clean stream end
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go applier.replicationLoop(ctx)
+	defer cancel()
+	go applier.Start(ctx)
 
+	// Wait for the first entry to be applied.
 	select {
 	case applied := <-mockEngine.appliedCh:
-		assert.Equal(t, uint64(1), applied.GetSequenceNumber())
-	case <-time.After(1 * time.Second):
+		require.Equal(t, uint64(1), applied.GetSequenceNumber(), "first entry should be applied")
+	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the first entry")
 	}
-	assert.Equal(t, uint64(1), mockEngine.GetLatestAppliedSeqNum())
+	require.Equal(t, uint64(1), mockEngine.GetLatestAppliedSeqNum(), "sequence number should be 1")
 
-	// Give the loop time to retry
-	time.Sleep(100 * time.Millisecond)
-
+	// --- Second Connection ---
+	// After the first stream ends, the applier should try to reconnect.
+	// We'll set up the server to send a new entry for the second connection.
 	mockServer.mu.Lock()
-	mockServer.sendErr = nil
 	mockServer.entries = []*pb.WALEntry{
-		newTestWALEntry(1, "metric1", 1000), // Server might resend old entries
+		newTestWALEntry(1, "metric1", 1000), // The server can resend old entries
 		newTestWALEntry(2, "metric1", 2000),
 	}
 	mockServer.mu.Unlock()
 
+	// Wait for the second entry to be applied.
+	// The applier will reconnect, ask for seq > 1, and should receive entry 2.
 	select {
 	case applied := <-mockEngine.appliedCh:
-		assert.Equal(t, uint64(2), applied.GetSequenceNumber())
-	case <-time.After(6 * time.Second): // The retry has a 5s sleep
+		require.Equal(t, uint64(2), applied.GetSequenceNumber(), "second entry should be applied after reconnect")
+	case <-time.After(4 * time.Second): // Give it a bit more time to handle the reconnect logic
 		t.Fatal("timed out waiting for the second entry after reconnect")
 	}
-
-	assert.Equal(t, uint64(2), mockEngine.GetLatestAppliedSeqNum())
-	cancel()
+	require.Equal(t, uint64(2), mockEngine.GetLatestAppliedSeqNum(), "sequence number should be 2")
 }
 
 func TestWALApplier_HandlesOutOfOrderEntry(t *testing.T) {
@@ -245,9 +248,10 @@ func TestWALApplier_HandlesOutOfOrderEntry(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go applier.replicationLoop(ctx)
 	defer cancel()
+	go applier.Start(ctx)
 
+	// Wait for the first entry
 	select {
 	case applied := <-mockEngine.appliedCh:
 		assert.Equal(t, uint64(1), applied.GetSequenceNumber())
@@ -255,12 +259,12 @@ func TestWALApplier_HandlesOutOfOrderEntry(t *testing.T) {
 		t.Fatal("timed out waiting for the first entry")
 	}
 
-	// The loop should be stuck retrying after the out-of-order error
+	// The loop should be stopped by the critical out-of-order error.
 	select {
 	case applied := <-mockEngine.appliedCh:
 		t.Fatalf("received unexpected entry %d", applied.GetSequenceNumber())
-	case <-time.After(100 * time.Millisecond):
-		// Expected
+	case <-time.After(200 * time.Millisecond):
+		// Expected to not receive anything else.
 	}
 
 	assert.Equal(t, uint64(1), mockEngine.GetLatestAppliedSeqNum())
@@ -276,12 +280,16 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 	}
 
 	expectedErr := errors.New("failed to apply entry")
+	applyCallCount := 0
 	mockEngine.applyFunc = func(entry *pb.WALEntry) error {
 		mockEngine.mu.Lock()
 		defer mockEngine.mu.Unlock()
 
 		if entry.GetSequenceNumber() == 2 {
-			return expectedErr
+			applyCallCount++
+			if applyCallCount <= 3 { // Simulate failure for the first 3 attempts
+				return expectedErr
+			}
 		}
 
 		mockEngine.appliedSeq = entry.GetSequenceNumber()
@@ -292,9 +300,12 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go applier.replicationLoop(ctx)
 	defer cancel()
 
+	// Start the replication loop in a separate goroutine
+	go applier.Start(ctx)
+
+	// Wait for the first entry to be applied
 	select {
 	case applied := <-mockEngine.appliedCh:
 		require.Equal(t, uint64(1), applied.GetSequenceNumber())
@@ -302,17 +313,21 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 		t.Fatal("timed out waiting for the first entry")
 	}
 
-	// The loop should be stuck retrying after the apply error
-	time.Sleep(50 * time.Millisecond)
+	// Now, the applier should try to apply entry 2, fail, and retry.
+	// It should retry maxApplyRetries (3) times, with 1s sleep between retries.
+	// So, it should take at least 3 seconds for the loop to return an error.
+	// We'll wait for the applier to stop, which it should after the critical error.
+	assert.Eventually(t, func() bool {
+		// The applier should stop after repeated apply failures.
+		// We check if the connection is shut down.
+		return applier.conn.GetState() == connectivity.Shutdown
+	}, 5*time.Second, 100*time.Millisecond, "applier should stop after critical apply error")
 
-	select {
-	case applied := <-mockEngine.appliedCh:
-		t.Fatalf("received unexpected entry %d after apply error", applied.GetSequenceNumber())
-	case <-time.After(50 * time.Millisecond):
-		// Good, no second entry was applied.
-	}
+	// Assert that the apply function for entry 2 was called maxApplyRetries times
+	assert.Equal(t, 3, applyCallCount, "ApplyReplicatedEntry for entry 2 should be called maxApplyRetries times")
 
-	assert.Equal(t, uint64(1), mockEngine.GetLatestAppliedSeqNum())
+	// Assert that the sequence number remains at 1 (entry 2 was never successfully applied)
+	assert.Equal(t, uint64(1), mockEngine.GetLatestAppliedSeqNum(), "Sequence number should remain at 1")
 }
 
 // --- New Lifecycle and Error Path Tests ---
@@ -421,11 +436,12 @@ func TestWALApplier_Lifecycle_StartReplicateStop(t *testing.T) {
 func TestWALApplier_ReplicationLoop_StreamErrorRetry(t *testing.T) {
 	applier, _, mockServer, cleanup := setupTestForLifecycle(t)
 	defer cleanup()
+	applier.retrySleep = 50 * time.Millisecond // Fast retries
 
 	// Configure server to return an error on the first stream attempt
 	mockServer.streamErr = errors.New("transient gRPC error")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second) // 7s > 5s retry sleep
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go applier.Start(ctx)
 
@@ -460,8 +476,8 @@ func TestWALApplier_ProcessStream_RecvError(t *testing.T) {
 	mockServer.sendErr = errors.New("recv error")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go applier.replicationLoop(ctx)
 	defer cancel()
+	go applier.Start(ctx)
 
 	// Wait for the first entry to be applied
 	select {
@@ -471,16 +487,13 @@ func TestWALApplier_ProcessStream_RecvError(t *testing.T) {
 		t.Fatal("timed out waiting for the first entry")
 	}
 
-	// The loop should retry after the Recv error
-	// Give it time to do so
-	time.Sleep(100 * time.Millisecond)
-
-	// Check that no more entries were applied
+	// The loop should retry after the Recv error.
+	// We can check for the next stream request.
 	select {
-	case e := <-mockEngine.appliedCh:
-		t.Fatalf("should not have applied more entries, but got %v", e)
-	default:
-		// OK
+	case <-mockServer.streamReqCh:
+		// Expected
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for retry stream request")
 	}
 }
 
