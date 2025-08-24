@@ -76,4 +76,6 @@ message SnapshotChunk {
 message FileInfo {
   // path ของไฟล์ที่สัมพันธ์กับไดเรกทอรีของ snapshot
   string path = 1;
+  // SHA256 checksum ของเนื้อหาไฟล์ทั้งหมดในรูปแบบ hex string
+  string checksum = 2;
 }

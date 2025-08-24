@@ -459,7 +459,9 @@ func (*SnapshotChunk_ChunkData) isSnapshotChunk_Content() {}
 type FileInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// path ของไฟล์ที่สัมพันธ์กับไดเรกทอรีของ snapshot
-	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// SHA256 checksum ของเนื้อหาไฟล์ทั้งหมดในรูปแบบ hex string
+	Checksum      string `protobuf:"bytes,2,opt,name=checksum,proto3" json:"checksum,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -497,6 +499,13 @@ func (*FileInfo) Descriptor() ([]byte, []int) {
 func (x *FileInfo) GetPath() string {
 	if x != nil {
 		return x.Path
+	}
+	return ""
+}
+
+func (x *FileInfo) GetChecksum() string {
+	if x != nil {
+		return x.Checksum
 	}
 	return ""
 }
@@ -540,9 +549,10 @@ const file_replication_proto_replication_proto_rawDesc = "" +
 	"\tfile_info\x18\x01 \x01(\v2\x15.replication.FileInfoH\x00R\bfileInfo\x12\x1f\n" +
 	"\n" +
 	"chunk_data\x18\x02 \x01(\fH\x00R\tchunkDataB\t\n" +
-	"\acontent\"\x1e\n" +
+	"\acontent\":\n" +
 	"\bFileInfo\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path2\x92\x02\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
+	"\bchecksum\x18\x02 \x01(\tR\bchecksum2\x92\x02\n" +
 	"\x12ReplicationService\x12E\n" +
 	"\tStreamWAL\x12\x1d.replication.StreamWALRequest\x1a\x15.replication.WALEntry\"\x000\x01\x12_\n" +
 	"\x15GetLatestSnapshotInfo\x12).replication.GetLatestSnapshotInfoRequest\x1a\x19.replication.SnapshotInfo\"\x00\x12T\n" +

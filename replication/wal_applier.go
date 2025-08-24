@@ -2,6 +2,8 @@ package replication
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -98,7 +100,6 @@ func (a *WALApplier) Start(ctx context.Context) {
 		err := a.manageReplication(applierCtx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			a.logger.Error("Replication management loop failed", "error", err)
-			// In a real scenario, this might trigger a more robust recovery or alert.
 			a.Stop()
 		}
 	}()
@@ -117,10 +118,8 @@ func (a *WALApplier) manageReplication(ctx context.Context) error {
 func (a *WALApplier) bootstrap(ctx context.Context) error {
 	a.logger.Info("Starting bootstrap process...")
 
-	// 1. Get leader's latest snapshot info
 	leaderSnapshotInfo, err := a.client.GetLatestSnapshotInfo(ctx, &pb.GetLatestSnapshotInfoRequest{})
 	if err != nil {
-		// If the leader has no snapshots, that's okay. We can just stream the WAL.
 		if status.Code(err) == codes.NotFound {
 			a.logger.Info("Leader has no snapshots, proceeding with WAL streaming.")
 			return nil
@@ -129,7 +128,6 @@ func (a *WALApplier) bootstrap(ctx context.Context) error {
 	}
 	a.logger.Info("Got latest snapshot info from leader", "snapshot_id", leaderSnapshotInfo.Id, "snapshot_seq_num", leaderSnapshotInfo.LastWalSequenceNumber)
 
-	// 2. Compare with local state
 	localSeqNum := a.engine.GetLatestAppliedSeqNum()
 	if localSeqNum >= leaderSnapshotInfo.LastWalSequenceNumber {
 		a.logger.Info("Local state is up-to-date or ahead of the latest snapshot, no bootstrap needed.", "local_seq_num", localSeqNum)
@@ -138,7 +136,6 @@ func (a *WALApplier) bootstrap(ctx context.Context) error {
 
 	a.logger.Info("Local state is behind leader's snapshot, starting snapshot download.", "local_seq_num", localSeqNum, "snapshot_seq_num", leaderSnapshotInfo.LastWalSequenceNumber)
 
-	// 3. Download and restore snapshot
 	if err := a.downloadAndRestoreSnapshot(ctx, leaderSnapshotInfo.Id); err != nil {
 		return fmt.Errorf("snapshot download and restore failed: %w", err)
 	}
@@ -149,7 +146,6 @@ func (a *WALApplier) bootstrap(ctx context.Context) error {
 
 // downloadAndRestoreSnapshot handles the entire process of getting a snapshot from the leader.
 func (a *WALApplier) downloadAndRestoreSnapshot(ctx context.Context, snapshotId string) error {
-	// Create a temporary directory for the download
 	tempSnapDir := filepath.Join(a.snapshotDir, fmt.Sprintf("download-%s-%d", snapshotId, time.Now().UnixNano()))
 	if err := os.MkdirAll(tempSnapDir, 0755); err != nil {
 		return fmt.Errorf("failed to create temp snapshot dir: %w", err)
@@ -165,10 +161,29 @@ func (a *WALApplier) downloadAndRestoreSnapshot(ctx context.Context, snapshotId 
 
 	var currentFile *os.File
 	var currentPath string
+	var currentHasher = sha256.New()
+	var expectedChecksum string
+
+	finalizeFile := func() error {
+		if currentFile == nil {
+			return nil
+		}
+		// Verify checksum of the previous file
+		actualChecksum := hex.EncodeToString(currentHasher.Sum(nil))
+		if actualChecksum != expectedChecksum {
+			currentFile.Close()
+			return fmt.Errorf("checksum mismatch for file %s: expected %s, got %s", currentPath, expectedChecksum, actualChecksum)
+		}
+		a.logger.Info("File verified", "path", currentPath, "checksum", actualChecksum)
+		return currentFile.Close()
+	}
 
 	for {
 		chunk, err := stream.Recv()
 		if err == io.EOF {
+			if err := finalizeFile(); err != nil {
+				return err
+			}
 			break // Stream finished successfully
 		}
 		if err != nil {
@@ -180,10 +195,14 @@ func (a *WALApplier) downloadAndRestoreSnapshot(ctx context.Context, snapshotId 
 
 		switch content := chunk.Content.(type) {
 		case *pb.SnapshotChunk_FileInfo:
-			if currentFile != nil {
-				currentFile.Close()
+			if err := finalizeFile(); err != nil {
+				return err
 			}
+
 			currentPath = filepath.Join(tempSnapDir, content.FileInfo.Path)
+			expectedChecksum = content.FileInfo.Checksum
+			currentHasher.Reset()
+
 			if err := os.MkdirAll(filepath.Dir(currentPath), 0755); err != nil {
 				return fmt.Errorf("failed to create dir for snapshot file: %w", err)
 			}
@@ -195,24 +214,20 @@ func (a *WALApplier) downloadAndRestoreSnapshot(ctx context.Context, snapshotId 
 			if currentFile == nil {
 				return errors.New("received chunk data before file info")
 			}
-			if _, err := currentFile.Write(content.ChunkData); err != nil {
+			// Write to both file and hasher
+			if _, err := io.MultiWriter(currentFile, currentHasher).Write(content.ChunkData); err != nil {
 				currentFile.Close()
 				return fmt.Errorf("failed to write to snapshot file %s: %w", currentPath, err)
 			}
 		}
 	}
-	if currentFile != nil {
-		currentFile.Close()
-	}
 
 	a.logger.Info("Snapshot download complete. Restoring engine state.")
 
-	// The engine needs to be closed before it can be replaced.
 	if err := a.engine.Close(); err != nil {
 		return fmt.Errorf("failed to close engine before snapshot restore: %w", err)
 	}
 
-	// Replace the engine state with the new snapshot.
 	if err := a.engine.ReplaceWithSnapshot(tempSnapDir); err != nil {
 		return fmt.Errorf("failed to restore engine from snapshot: %w", err)
 	}

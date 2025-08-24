@@ -2,7 +2,10 @@ package replication
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -113,18 +116,30 @@ func (s *Server) StreamSnapshot(req *pb.StreamSnapshotRequest, stream pb.Replica
 			return err
 		}
 
-		// 1. ส่ง file metadata ไปก่อน
-		fileInfo := &pb.FileInfo{Path: relPath}
-		if err := stream.Send(&pb.SnapshotChunk{Content: &pb.SnapshotChunk_FileInfo{FileInfo: fileInfo}}); err != nil {
-			return err
-		}
-
-		// 2. สตรีมเนื้อหาไฟล์เป็นส่วนๆ (chunks)
+		// คำนวณ checksum ของไฟล์ก่อนส่ง
 		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
+
+		hasher := sha256.New()
+		if _, err := io.Copy(hasher, f); err != nil {
+			return fmt.Errorf("failed to calculate checksum for %s: %w", path, err)
+		}
+		checksum := hex.EncodeToString(hasher.Sum(nil))
+
+		// 1. ส่ง file metadata (พร้อม checksum) ไปก่อน
+		fileInfo := &pb.FileInfo{Path: relPath, Checksum: checksum}
+		if err := stream.Send(&pb.SnapshotChunk{Content: &pb.SnapshotChunk_FileInfo{FileInfo: fileInfo}}); err != nil {
+			return err
+		}
+
+		// 2. สตรีมเนื้อหาไฟล์เป็นส่วนๆ (chunks)
+		// Reset file pointer to the beginning
+		if _, err := f.Seek(0, 0); err != nil {
+			return err
+		}
 
 		buf := make([]byte, 1024*64) // 64KB chunks
 		for {
