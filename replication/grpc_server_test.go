@@ -2,10 +2,13 @@ package replication
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -108,8 +112,68 @@ func (m *MockStreamServer) Send(entry *pb.WALEntry) error {
 }
 func (m *MockStreamServer) Context() context.Context { return m.ctx }
 
+// MockSnapshotManager is a mock for snapshot.ManagerInterface
+type MockSnapshotManager struct {
+	mock.Mock
+}
+
+func (m *MockSnapshotManager) CreateFull(ctx context.Context, snapshotDir string) error {
+	args := m.Called(ctx, snapshotDir)
+	return args.Error(0)
+}
+
+func (m *MockSnapshotManager) CreateIncremental(ctx context.Context, snapshotsBaseDir string) error {
+	args := m.Called(ctx, snapshotsBaseDir)
+	return args.Error(0)
+}
+
+func (m *MockSnapshotManager) ListSnapshots(snapshotsBaseDir string) ([]snapshot.Info, error) {
+	args := m.Called(snapshotsBaseDir)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]snapshot.Info), args.Error(1)
+}
+
+func (m *MockSnapshotManager) Validate(snapshotDir string) error {
+	args := m.Called(snapshotDir)
+	return args.Error(0)
+}
+
+func (m *MockSnapshotManager) Prune(ctx context.Context, snapshotsBaseDir string, opts snapshot.PruneOptions) ([]string, error) {
+	args := m.Called(ctx, snapshotsBaseDir, opts)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]string), args.Error(1)
+}
+
+func (m *MockSnapshotManager) RestoreFrom(ctx context.Context, snapshotPath string) error {
+	args := m.Called(ctx, snapshotPath)
+	return args.Error(0)
+}
+
+// MockSnapshotStreamServer is a mock for the snapshot streaming server
+type MockSnapshotStreamServer struct {
+	grpc.ServerStream
+	SentChunks chan *pb.SnapshotChunk
+	ctx        context.Context
+}
+
+func (m *MockSnapshotStreamServer) Send(chunk *pb.SnapshotChunk) error {
+	if m.SentChunks != nil {
+		m.SentChunks <- chunk
+	}
+	return nil
+}
+
+func (m *MockSnapshotStreamServer) Context() context.Context {
+	return m.ctx
+}
+
 // setupServerTest is a helper to reduce boilerplate in server tests
 func setupServerTest(t *testing.T) (*Server, *MockWAL, *indexer.StringStore) {
+	t.Helper()
 	tempDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hookManager := hooks.NewHookManager(nil)
@@ -125,6 +189,166 @@ func setupServerTest(t *testing.T) (*Server, *MockWAL, *indexer.StringStore) {
 	mockWal := new(MockWAL)
 	server := NewServer(mockWal, stringStore, nil, "", logger)
 	return server, mockWal, stringStore
+}
+
+func TestGetLatestSnapshotInfo(t *testing.T) {
+	server, _, _ := setupServerTest(t)
+	mockSnapshotMgr := new(MockSnapshotManager)
+	server.snapshotMgr = mockSnapshotMgr
+	snapshotDir := t.TempDir()
+	server.snapshotDir = snapshotDir
+
+	t.Run("Success", func(t *testing.T) {
+		// --- Setup ---
+		now := time.Now()
+		infos := []snapshot.Info{
+			{ID: "snap-1", CreatedAt: now.Add(-1 * time.Hour)},
+			{ID: "snap-3-latest", CreatedAt: now},
+			{ID: "snap-2", CreatedAt: now.Add(-30 * time.Minute)},
+		}
+		mockSnapshotMgr.On("ListSnapshots", snapshotDir).Return(infos, nil).Once()
+
+		// Create a dummy manifest file for the latest snapshot
+		latestSnapPath := filepath.Join(snapshotDir, "snap-3-latest")
+		require.NoError(t, os.MkdirAll(latestSnapPath, 0755))
+		manifest := &core.SnapshotManifest{SequenceNumber: 12345}
+		manifestFile, err := os.Create(filepath.Join(latestSnapPath, "MANIFEST"))
+		require.NoError(t, err)
+		err = snapshot.WriteManifestBinary(manifestFile, manifest)
+		require.NoError(t, err)
+		manifestFile.Close()
+
+		// --- Act ---
+		resp, err := server.GetLatestSnapshotInfo(context.Background(), &pb.GetLatestSnapshotInfoRequest{})
+
+		// --- Assert ---
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, "snap-3-latest", resp.Id)
+		assert.Equal(t, uint64(12345), resp.LastWalSequenceNumber)
+		mockSnapshotMgr.AssertExpectations(t)
+	})
+
+	t.Run("ListSnapshots fails", func(t *testing.T) {
+		expectedErr := errors.New("disk on fire")
+		mockSnapshotMgr.On("ListSnapshots", snapshotDir).Return(nil, expectedErr).Once()
+
+		_, err := server.GetLatestSnapshotInfo(context.Background(), &pb.GetLatestSnapshotInfoRequest{})
+
+		require.Error(t, err)
+		st, _ := status.FromError(err)
+		assert.Equal(t, codes.Internal, st.Code())
+		assert.Contains(t, st.Message(), expectedErr.Error())
+		mockSnapshotMgr.AssertExpectations(t)
+	})
+
+	t.Run("No snapshots found", func(t *testing.T) {
+		mockSnapshotMgr.On("ListSnapshots", snapshotDir).Return([]snapshot.Info{}, nil).Once()
+
+		_, err := server.GetLatestSnapshotInfo(context.Background(), &pb.GetLatestSnapshotInfoRequest{})
+
+		require.Error(t, err)
+		st, _ := status.FromError(err)
+		assert.Equal(t, codes.NotFound, st.Code())
+		mockSnapshotMgr.AssertExpectations(t)
+	})
+
+	t.Run("Manifest file missing", func(t *testing.T) {
+		infos := []snapshot.Info{{ID: "snap-no-manifest", CreatedAt: time.Now()}}
+		mockSnapshotMgr.On("ListSnapshots", snapshotDir).Return(infos, nil).Once()
+		// Ensure the directory exists but the manifest does not
+		require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "snap-no-manifest"), 0755))
+
+		_, err := server.GetLatestSnapshotInfo(context.Background(), &pb.GetLatestSnapshotInfoRequest{})
+
+		require.Error(t, err)
+		st, _ := status.FromError(err)
+		assert.Equal(t, codes.Internal, st.Code())
+		assert.Contains(t, st.Message(), "failed to open snapshot manifest")
+		mockSnapshotMgr.AssertExpectations(t)
+	})
+
+	t.Run("Manifest file corrupted", func(t *testing.T) {
+		infos := []snapshot.Info{{ID: "snap-corrupt-manifest", CreatedAt: time.Now()}}
+		mockSnapshotMgr.On("ListSnapshots", snapshotDir).Return(infos, nil).Once()
+		corruptSnapPath := filepath.Join(snapshotDir, "snap-corrupt-manifest")
+		require.NoError(t, os.MkdirAll(corruptSnapPath, 0755))
+		// Write a bad manifest file
+		require.NoError(t, os.WriteFile(filepath.Join(corruptSnapPath, "MANIFEST"), []byte("not a real manifest"), 0644))
+
+		_, err := server.GetLatestSnapshotInfo(context.Background(), &pb.GetLatestSnapshotInfoRequest{})
+
+		require.Error(t, err)
+		st, _ := status.FromError(err)
+		assert.Equal(t, codes.Internal, st.Code())
+		assert.Contains(t, st.Message(), "failed to read snapshot manifest")
+		mockSnapshotMgr.AssertExpectations(t)
+	})
+}
+
+func TestStreamSnapshot(t *testing.T) {
+	server, _, _ := setupServerTest(t)
+	snapshotDir := t.TempDir()
+	server.snapshotDir = snapshotDir
+
+	// --- Setup a dummy snapshot directory ---
+	snapID := "test-snap-123"
+	snapPath := filepath.Join(snapshotDir, snapID)
+	require.NoError(t, os.MkdirAll(snapPath, 0755))
+
+	file1Content := "hello world"
+	file1Path := filepath.Join(snapPath, "file1.txt")
+	require.NoError(t, os.WriteFile(file1Path, []byte(file1Content), 0644))
+
+	subdirPath := filepath.Join(snapPath, "subdir")
+	require.NoError(t, os.MkdirAll(subdirPath, 0755))
+	file2Content := "data in subdirectory"
+	file2Path := filepath.Join(subdirPath, "file2.log")
+	require.NoError(t, os.WriteFile(file2Path, []byte(file2Content), 0644))
+
+	// --- Act ---
+	mockStream := &MockSnapshotStreamServer{
+		SentChunks: make(chan *pb.SnapshotChunk, 10),
+		ctx:        context.Background(),
+	}
+
+	err := server.StreamSnapshot(&pb.StreamSnapshotRequest{Id: snapID}, mockStream)
+	close(mockStream.SentChunks)
+
+	// --- Assert ---
+	require.NoError(t, err)
+
+	// Collect all chunks
+	receivedChunks := make([]*pb.SnapshotChunk, 0)
+	for chunk := range mockStream.SentChunks {
+		receivedChunks = append(receivedChunks, chunk)
+	}
+
+	require.GreaterOrEqual(t, len(receivedChunks), 2, "Should have received at least two file_info chunks")
+
+	// Verify File 1
+	file1Info, ok := receivedChunks[0].Content.(*pb.SnapshotChunk_FileInfo)
+	require.True(t, ok)
+	assert.Equal(t, "file1.txt", file1Info.FileInfo.Path)
+	hasher1 := sha256.New()
+	hasher1.Write([]byte(file1Content))
+	assert.Equal(t, hex.EncodeToString(hasher1.Sum(nil)), file1Info.FileInfo.Checksum)
+
+	file1Data, ok := receivedChunks[1].Content.(*pb.SnapshotChunk_ChunkData)
+	require.True(t, ok)
+	assert.Equal(t, file1Content, string(file1Data.ChunkData))
+
+	// Verify File 2
+	file2Info, ok := receivedChunks[2].Content.(*pb.SnapshotChunk_FileInfo)
+	require.True(t, ok)
+	assert.Equal(t, filepath.Join("subdir", "file2.log"), file2Info.FileInfo.Path)
+	hasher2 := sha256.New()
+	hasher2.Write([]byte(file2Content))
+	assert.Equal(t, hex.EncodeToString(hasher2.Sum(nil)), file2Info.FileInfo.Checksum)
+
+	file2Data, ok := receivedChunks[3].Content.(*pb.SnapshotChunk_ChunkData)
+	require.True(t, ok)
+	assert.Equal(t, file2Content, string(file2Data.ChunkData))
 }
 
 func TestStreamWAL_Success(t *testing.T) {
@@ -261,7 +485,7 @@ func TestStreamWAL_ErrorHandling(t *testing.T) {
 		expectedErr := errors.New("network error")
 		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
 		mockReader.On("Next").Return(walEntry, nil).Once()
-	mockReader.On("Close").Return(nil).Once()
+		mockReader.On("Close").Return(nil).Once()
 
 		mockStream := &MockStreamServer{ctx: context.Background(), SentEntries: make(chan *pb.WALEntry, 1)}
 		mockStream.On("Send", mock.Anything).Return(expectedErr).Once()

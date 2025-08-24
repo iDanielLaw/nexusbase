@@ -97,10 +97,10 @@ func (a *WALApplier) Start(ctx context.Context) {
 
 	// Run the main management loop in a goroutine.
 	go func() {
+		defer a.Stop() // Ensure Stop is called on exit
 		err := a.manageReplication(applierCtx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			a.logger.Error("Replication management loop failed", "error", err)
-			a.Stop()
 		}
 	}()
 }
