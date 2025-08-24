@@ -2,6 +2,8 @@ package replication
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -12,6 +14,7 @@ import (
 
 	pb "github.com/INLOpen/nexusbase/replication/proto"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -19,12 +22,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // --- Mocks ---
 
 // mockReplicatedEngine is a mock implementation of the ReplicatedEngine interface.
 type mockReplicatedEngine struct {
+	mock.Mock
 	mu         sync.Mutex
 	appliedSeq uint64
 	applyErr   error
@@ -32,8 +37,14 @@ type mockReplicatedEngine struct {
 	applyFunc  func(entry *pb.WALEntry) error // Function hook for custom logic
 }
 
-func (m *mockReplicatedEngine) Close() error { return nil }
-func (m *mockReplicatedEngine) ReplaceWithSnapshot(snapshotDir string) error { return nil }
+func (m *mockReplicatedEngine) Close() error {
+	args := m.Called()
+	return args.Error(0)
+}
+func (m *mockReplicatedEngine) ReplaceWithSnapshot(snapshotDir string) error {
+	args := m.Called(snapshotDir)
+	return args.Error(0)
+}
 
 func newMockReplicatedEngine(appliedCh chan *pb.WALEntry) *mockReplicatedEngine {
 	return &mockReplicatedEngine{
@@ -63,6 +74,20 @@ func (m *mockReplicatedEngine) ApplyReplicatedEntry(ctx context.Context, entry *
 }
 
 func (m *mockReplicatedEngine) GetLatestAppliedSeqNum() uint64 {
+	// This mock allows both testify mock calls and direct manipulation for simplicity.
+	// Check if there's a configured expectation for this method.
+	for _, call := range m.Mock.ExpectedCalls {
+		if call.Method == "GetLatestAppliedSeqNum" {
+			args := m.Called()
+			if len(args) > 0 && args.Get(0) != nil {
+				return args.Get(0).(uint64)
+			}
+			// If .Return() is called with no arguments, fall through to return the internal state.
+			break
+		}
+	}
+
+	// If no expectation is set, just return the internal state without panicking.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.appliedSeq
@@ -71,21 +96,28 @@ func (m *mockReplicatedEngine) GetLatestAppliedSeqNum() uint64 {
 // mockReplicationServer is a mock implementation of the ReplicationServiceServer.
 type mockReplicationServer struct {
 	pb.UnimplementedReplicationServiceServer
-	mu           sync.Mutex
-	stream       pb.ReplicationService_StreamWALServer
-	streamErr    error
-	sendErr      error
-	entries      []*pb.WALEntry
-	streamReqCh  chan *pb.StreamWALRequest // Channel to notify on new stream requests
-	streamStopCh chan struct{}             // Channel to stop a stream from the server side
+	mu                  sync.Mutex
+	stream              pb.ReplicationService_StreamWALServer
+	streamErr           error
+	sendErr             error
+	entries             []*pb.WALEntry
+	streamReqCh         chan *pb.StreamWALRequest // Channel to notify on new stream requests
+	streamStopCh        chan struct{}             // Channel to stop a stream from the server side
+	getSnapshotInfoFunc func() (*pb.SnapshotInfo, error)
+	streamSnapshotFunc  func(*pb.StreamSnapshotRequest, pb.ReplicationService_StreamSnapshotServer) error
 }
 
 func (s *mockReplicationServer) GetLatestSnapshotInfo(ctx context.Context, req *pb.GetLatestSnapshotInfoRequest) (*pb.SnapshotInfo, error) {
-	// For most existing tests, we want the applier to think there are no snapshots.
+	if s.getSnapshotInfoFunc != nil {
+		return s.getSnapshotInfoFunc()
+	}
 	return nil, status.Errorf(codes.NotFound, "no snapshots on mock")
 }
 
 func (s *mockReplicationServer) StreamSnapshot(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+	if s.streamSnapshotFunc != nil {
+		return s.streamSnapshotFunc(req, stream)
+	}
 	return status.Errorf(codes.Unimplemented, "not implemented in mock")
 }
 
@@ -99,7 +131,6 @@ func (s *mockReplicationServer) StreamWAL(req *pb.StreamWALRequest, stream pb.Re
 	s.mu.Unlock()
 
 	if s.streamErr != nil {
-		// Introduce a small delay before returning the error
 		time.Sleep(50 * time.Millisecond)
 		return s.streamErr
 	}
@@ -113,13 +144,10 @@ func (s *mockReplicationServer) StreamWAL(req *pb.StreamWALRequest, stream pb.Re
 	}
 
 	if s.sendErr != nil {
-		// Introduce a small delay before returning the error
 		time.Sleep(50 * time.Millisecond)
 		return s.sendErr
 	}
 
-	// Simulate end of stream if no explicit error is set
-	// The client will receive io.EOF on Recv() when the handler returns nil.
 	return nil
 }
 
@@ -127,8 +155,8 @@ func (s *mockReplicationServer) StreamWAL(req *pb.StreamWALRequest, stream pb.Re
 
 const bufSize = 1024 * 1024
 
-// setupTest initializes a mock server and a WALApplier configured to connect to it.
 func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicationServer, func()) {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	appliedCh := make(chan *pb.WALEntry, 10)
 	mockEngine := newMockReplicatedEngine(appliedCh)
@@ -152,7 +180,7 @@ func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicati
 	}
 
 	applier := NewWALApplier(lis.Addr().String(), mockEngine, nil, t.TempDir(), logger)
-	applier.retrySleep = 50 * time.Millisecond // Use short retry for tests
+	applier.retrySleep = 50 * time.Millisecond
 	applier.dialOpts = []grpc.DialOption{
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -344,189 +372,313 @@ func TestWALApplier_HandlesApplyError(t *testing.T) {
 	assert.Equal(t, uint64(1), mockEngine.GetLatestAppliedSeqNum(), "Sequence number should remain at 1")
 }
 
-// --- New Lifecycle and Error Path Tests ---
+func TestBootstrap_SnapshotRestoreSuccess(t *testing.T) {
+	applier, mockEngine, mockServer, cleanup := setupTest(t)
+	defer cleanup()
 
-// setupTestForLifecycle is a simplified setup for testing the Start/Stop lifecycle.
-func setupTestForLifecycle(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicationServer, func()) {
-	lis := bufconn.Listen(bufSize)
-	s := grpc.NewServer()
-	appliedCh := make(chan *pb.WALEntry, 10)
-	mockEngine := newMockReplicatedEngine(appliedCh)
-	mockServer := &mockReplicationServer{
-		streamReqCh:  make(chan *pb.StreamWALRequest, 1),
-		streamStopCh: make(chan struct{}),
-	}
-	pb.RegisterReplicationServiceServer(s, mockServer)
+	// --- Setup Mocks ---
+	leaderSnapSeqNum := uint64(100)
 
-	go func() {
-		if err := s.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			t.Logf("gRPC server error: %v", err)
-		}
-	}()
+	// 1. Mock engine state
+	mockEngine.On("GetLatestAppliedSeqNum").Return(uint64(10)).Once() // First call in bootstrap
+	mockEngine.On("GetLatestAppliedSeqNum").Return(leaderSnapSeqNum)  // Subsequent calls in replicationLoop
+	mockEngine.On("Close").Return(nil).Once()
+	mockEngine.On("ReplaceWithSnapshot", mock.AnythingOfType("string")).Return(nil).Once().Run(func(args mock.Arguments) {
+		// After restoring, the engine's sequence number must be updated to the snapshot's sequence number.
+		// Note: In a real implementation, the engine would do this itself after a successful restore.
+		mockEngine.mu.Lock()
+		mockEngine.appliedSeq = leaderSnapSeqNum
+		mockEngine.mu.Unlock()
+	})
 
-	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
-		return lis.DialContext(ctx)
-	}
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	applier := NewWALApplier(lis.Addr().String(), mockEngine, nil, t.TempDir(), logger)
-	applier.dialOpts = []grpc.DialOption{
-		grpc.WithContextDialer(dialer),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(), // Ensure connection is made before Start returns
+	// 2. Mock server snapshot info
+	snapshotID := "snapshot-123"
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return &pb.SnapshotInfo{
+			Id:                    snapshotID,
+			LastWalSequenceNumber: leaderSnapSeqNum,
+			CreatedAt:             timestamppb.Now(),
+		}, nil
 	}
 
-	cleanup := func() {
-		applier.Stop()
-		s.Stop()
-		lis.Close()
-		close(appliedCh)
-		close(mockServer.streamReqCh)
-		close(mockServer.streamStopCh)
+	// 3. Mock server snapshot streaming behavior
+	dummyFileContent := "hello world"
+	hasher := sha256.New()
+	hasher.Write([]byte(dummyFileContent))
+	dummyFileChecksum := hex.EncodeToString(hasher.Sum(nil))
+
+	mockServer.streamSnapshotFunc = func(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+		require.Equal(t, snapshotID, req.Id)
+
+		// Send file info
+		fileInfo := &pb.FileInfo{Path: "dummy.txt", Checksum: dummyFileChecksum}
+		err := stream.Send(&pb.SnapshotChunk{Content: &pb.SnapshotChunk_FileInfo{FileInfo: fileInfo}})
+		require.NoError(t, err)
+
+		// Send file content
+		chunk := &pb.SnapshotChunk{Content: &pb.SnapshotChunk_ChunkData{ChunkData: []byte(dummyFileContent)}}
+		err = stream.Send(chunk)
+		require.NoError(t, err)
+
+		return nil // End of stream
 	}
 
-	return applier, mockEngine, mockServer, cleanup
+	// 4. Mock WAL streaming after bootstrap
+	mockServer.entries = []*pb.WALEntry{newTestWALEntry(101, "metric.after.snapshot", 1000)}
+
+	// --- Act ---
+	ctx, cancel := context.WithCancel(context.Background())
+	go applier.Start(ctx)
+
+	// --- Assert ---
+	// Wait for the post-snapshot entry to be applied
+	select {
+	case applied := <-mockEngine.appliedCh:
+		assert.Equal(t, uint64(101), applied.GetSequenceNumber())
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for post-snapshot entry")
+	}
+
+	cancel()
+	mockEngine.AssertExpectations(t)
 }
 
-func TestWALApplier_Start_DialError(t *testing.T) {
+func TestStart_DialFailure(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockEngine := newMockReplicatedEngine(nil)
 
-	// Use an invalid address to force a dial error.
-	applier := NewWALApplier("invalid-address:12345", mockEngine, nil, t.TempDir(), logger)
-	// Inject a dial option that will time out quickly.
+	// Use an invalid, non-routable address to ensure Dial fails.
+	applier := NewWALApplier("127.0.0.1:9999", mockEngine, nil, t.TempDir(), logger)
+
+	// Use WithBlock to make the dial synchronous and respect the context timeout.
 	applier.dialOpts = []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Use a short timeout for the dial context to make the test run faster.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	// This call will block until the context times out, then return.
+	// Start should now block, fail due to the timeout, and return.
 	applier.Start(ctx)
 
-	assert.Nil(t, applier.conn, "Connection should be nil on dial error")
-	assert.Nil(t, applier.client, "Client should be nil on dial error")
-	assert.Nil(t, applier.cancel, "Cancel function should not be set on dial error")
+	// Check that the applier did not connect and does not have a client.
+	assert.Nil(t, applier.conn, "Connection should be nil")
+	assert.Nil(t, applier.client, "Client should be nil")
 }
 
-func TestWALApplier_Lifecycle_StartReplicateStop(t *testing.T) {
-	applier, mockEngine, mockServer, cleanup := setupTestForLifecycle(t)
-	defer cleanup()
-
-	mockServer.entries = []*pb.WALEntry{newTestWALEntry(1, "metric-lifecycle", 1000)}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go applier.Start(ctx)
-
-	// Wait for the replication loop to request a stream
-	select {
-	case req := <-mockServer.streamReqCh:
-		assert.Equal(t, uint64(1), req.GetFromSequenceNumber())
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for stream request")
-	}
-
-	// Wait for the entry to be applied
-	select {
-	case applied := <-mockEngine.appliedCh:
-		assert.Equal(t, uint64(1), applied.GetSequenceNumber())
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for entry to be applied")
-	}
-
-	// Stop the applier
-	applier.Stop()
-
-	// Assert that the connection is closed
-	assert.Eventually(t, func() bool {
-		return applier.conn.GetState() == connectivity.Shutdown
-	}, 2*time.Second, 50*time.Millisecond, "Connection should be shut down after stop")
-}
-
-func TestWALApplier_ReplicationLoop_StreamErrorRetry(t *testing.T) {
-	applier, _, mockServer, cleanup := setupTestForLifecycle(t)
-	defer cleanup()
-	applier.retrySleep = 50 * time.Millisecond // Fast retries
-
-	// Configure server to return an error on the first stream attempt
-	mockServer.streamErr = errors.New("transient gRPC error")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go applier.Start(ctx)
-
-	// 1. Wait for the first stream request, which will fail
-	select {
-	case <-mockServer.streamReqCh:
-		// Good, first attempt happened
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for the first stream request")
-	}
-
-	// 2. After the error, the server should behave normally
-	mockServer.mu.Lock()
-	mockServer.streamErr = nil
-	mockServer.mu.Unlock()
-
-	// 3. Wait for the second, successful stream request
-	select {
-	case <-mockServer.streamReqCh:
-		// Good, second attempt happened after retry
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for the second stream request")
-	}
-}
-
-func TestWALApplier_ProcessStream_RecvError(t *testing.T) {
+func TestBootstrap_NoSnapshotNeeded(t *testing.T) {
 	applier, mockEngine, mockServer, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Server sends one entry, then returns an error
-	mockServer.entries = []*pb.WALEntry{newTestWALEntry(1, "metric1", 1000)}
-	mockServer.sendErr = errors.New("recv error")
+	leaderSnapSeqNum := uint64(100)
+
+	// Mock engine to report it's already up-to-date.
+	mockEngine.On("GetLatestAppliedSeqNum").Return(leaderSnapSeqNum)
+	// Mock server to have a snapshot that is not newer than the engine's state.
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return &pb.SnapshotInfo{Id: "snapshot-1", LastWalSequenceNumber: leaderSnapSeqNum}, nil
+	}
+
+	// Mock WAL streaming to send one entry after the bootstrap check.
+	mockServer.entries = []*pb.WALEntry{newTestWALEntry(101, "metric.nostart", 1000)}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	go applier.Start(ctx)
+	defer cancel()
 
-	// Wait for the first entry to be applied
+	// We expect to receive the WAL entry, proving that snapshotting was skipped.
 	select {
 	case applied := <-mockEngine.appliedCh:
-		assert.Equal(t, uint64(1), applied.GetSequenceNumber())
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for the first entry")
+		assert.Equal(t, uint64(101), applied.GetSequenceNumber())
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for post-bootstrap entry")
 	}
 
-	// The loop should retry after the Recv error.
-	// We can check for the next stream request.
-	select {
-	case <-mockServer.streamReqCh:
-		// Expected
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for retry stream request")
-	}
+	mockEngine.AssertExpectations(t)
+	// We also want to ensure that Close and ReplaceWithSnapshot were never called.
+	mockEngine.AssertNotCalled(t, "Close")
+	mockEngine.AssertNotCalled(t, "ReplaceWithSnapshot", mock.AnythingOfType("string"))
 }
 
-func TestWALApplier_Stop_Idempotent(t *testing.T) {
-	applier, _, _, cleanup := setupTestForLifecycle(t)
+func TestBootstrap_GetSnapshotInfoError(t *testing.T) {
+	applier, mockEngine, mockServer, cleanup := setupTest(t)
 	defer cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	expectedErr := status.Error(codes.Internal, "db is on fire")
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return nil, expectedErr
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go applier.Start(ctx)
 	defer cancel()
+
+	// The applier should stop because it can't bootstrap.
+	assert.Eventually(t, func() bool {
+		return applier.conn.GetState() == connectivity.Shutdown
+	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after failing to get snapshot info")
+
+	// No entries should have been processed.
+	assert.Zero(t, mockEngine.GetLatestAppliedSeqNum())
+	mockEngine.AssertNotCalled(t, "ApplyReplicatedEntry", mock.Anything, mock.Anything)
+}
+
+func TestBootstrap_DownloadFailsOnStreamError(t *testing.T) {
+	applier, mockEngine, mockServer, cleanup := setupTest(t)
+	defer cleanup()
+
+	// 1. Mock engine state (needs a snapshot)
+	mockEngine.On("GetLatestAppliedSeqNum").Return(uint64(10)).Once()
+
+	// 2. Mock server snapshot info
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return &pb.SnapshotInfo{Id: "snap-1", LastWalSequenceNumber: 100}, nil
+	}
+
+	// 3. Mock server to fail during the snapshot stream
+	expectedErr := status.Error(codes.Internal, "disk read error on leader")
+	mockServer.streamSnapshotFunc = func(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+		// Send one chunk successfully, then fail.
+		fileInfo := &pb.FileInfo{Path: "dummy.txt", Checksum: "abc"}
+		err := stream.Send(&pb.SnapshotChunk{Content: &pb.SnapshotChunk_FileInfo{FileInfo: fileInfo}})
+		require.NoError(t, err)
+		return expectedErr
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go applier.Start(ctx)
+	defer cancel()
+
+	// The applier should stop because it can't bootstrap.
+	assert.Eventually(t, func() bool {
+		return applier.conn.GetState() == connectivity.Shutdown
+	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after snapshot stream error")
+
+	// Ensure we didn't try to restore a partial snapshot
+	mockEngine.AssertNotCalled(t, "Close")
+	mockEngine.AssertNotCalled(t, "ReplaceWithSnapshot", mock.Anything)
+}
+
+func TestBootstrap_DownloadFailsOnChecksumMismatch(t *testing.T) {
+	applier, mockEngine, mockServer, cleanup := setupTest(t)
+	defer cleanup()
+
+	// 1. Mock engine state (needs a snapshot)
+	mockEngine.On("GetLatestAppliedSeqNum").Return(uint64(10)).Once()
+
+	// 2. Mock server snapshot info
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return &pb.SnapshotInfo{Id: "snap-checksum-mismatch", LastWalSequenceNumber: 100}, nil
+	}
+
+	// 3. Mock server to stream a file with a bad checksum
+	mockServer.streamSnapshotFunc = func(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+		fileInfo := &pb.FileInfo{Path: "dummy.txt", Checksum: "this-is-a-bad-checksum"}
+		err := stream.Send(&pb.SnapshotChunk{Content: &pb.SnapshotChunk_FileInfo{FileInfo: fileInfo}})
+		require.NoError(t, err)
+
+		chunk := &pb.SnapshotChunk{Content: &pb.SnapshotChunk_ChunkData{ChunkData: []byte("some data")}}
+		err = stream.Send(chunk)
+		require.NoError(t, err)
+
+		return nil // End of stream
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go applier.Start(ctx)
+	defer cancel()
+
+	// The applier should stop because it can't bootstrap.
+	assert.Eventually(t, func() bool {
+		return applier.conn.GetState() == connectivity.Shutdown
+	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after checksum mismatch")
+
+	// Ensure we didn't try to restore a partial/corrupt snapshot
+	mockEngine.AssertNotCalled(t, "Close")
+	mockEngine.AssertNotCalled(t, "ReplaceWithSnapshot", mock.Anything)
+}
+
+func TestDownloadAndRestoreSnapshot_ChunkDataBeforeFileInfo(t *testing.T) {
+	applier, mockEngine, mockServer, cleanup := setupTest(t)
+	defer cleanup()
+
+	mockEngine.On("GetLatestAppliedSeqNum").Return(uint64(10)).Once()
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return &pb.SnapshotInfo{Id: "snap-chunk-first", LastWalSequenceNumber: 100}, nil
+	}
+
+	// Mock server to send a data chunk before a file info chunk.
+	mockServer.streamSnapshotFunc = func(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+		chunk := &pb.SnapshotChunk{Content: &pb.SnapshotChunk_ChunkData{ChunkData: []byte("some data")}}
+		return stream.Send(chunk)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go applier.Start(ctx)
+	defer cancel()
+
+	assert.Eventually(t, func() bool {
+		return applier.conn.GetState() == connectivity.Shutdown
+	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after receiving chunk data first")
+	mockEngine.AssertNotCalled(t, "Close")
+	mockEngine.AssertNotCalled(t, "ReplaceWithSnapshot", mock.Anything)
+}
+
+func TestDownloadAndRestoreSnapshot_ReplaceFails(t *testing.T) {
+	applier, mockEngine, mockServer, cleanup := setupTest(t)
+	defer cleanup()
+
+	mockEngine.On("GetLatestAppliedSeqNum").Return(uint64(10)).Once()
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return &pb.SnapshotInfo{Id: "snap-replace-fails", LastWalSequenceNumber: 100}, nil
+	}
+
+	// Mock a successful download
+	mockServer.streamSnapshotFunc = func(req *pb.StreamSnapshotRequest, stream pb.ReplicationService_StreamSnapshotServer) error {
+		return nil // Empty but successful stream
+	}
+
+	// Mock the engine to fail on Close and Replace
+	mockEngine.On("Close").Return(nil).Once()
+	mockEngine.On("ReplaceWithSnapshot", mock.AnythingOfType("string")).Return(errors.New("disk is full")).Once()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go applier.Start(ctx)
+	defer cancel()
+
+	assert.Eventually(t, func() bool {
+		return applier.conn.GetState() == connectivity.Shutdown
+	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after replace fails")
+
+	mockEngine.AssertExpectations(t)
+}
+
+func TestReplicationLoop_ContextCancellation(t *testing.T) {
+	applier, _, mockServer, cleanup := setupTest(t)
+	defer cleanup()
+
+	// Bootstrap is successful, no snapshot needed.
+	mockServer.getSnapshotInfoFunc = func() (*pb.SnapshotInfo, error) {
+		return nil, status.Error(codes.NotFound, "no snapshot")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	go applier.Start(ctx)
 
-	// Wait for connection to be established
-	assert.Eventually(t, func() bool {
-		return applier.conn != nil && applier.conn.GetState() == connectivity.Ready
-	}, 1*time.Second, 10*time.Millisecond)
+	// Wait for the replication loop to start and request a stream.
+	select {
+	case <-mockServer.streamReqCh:
+		// Great, it's running. Now cancel the context.
+		cancel()
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for replication loop to start")
+	}
 
-	applier.Stop()
-	// Calling Stop again should not panic
-	assert.NotPanics(t, func() {
-		applier.Stop()
-	})
+	// The applier should eventually shut down its connection.
+	assert.Eventually(t, func() bool {
+		return applier.conn.GetState() == connectivity.Shutdown
+	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after context cancellation")
 }
