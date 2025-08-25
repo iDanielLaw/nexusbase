@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -268,4 +270,80 @@ func TestWAL_GroupCommit_ConfigurableOptions(t *testing.T) {
 		defer wal2.Close()
 		assert.Len(t, recovered, 1, "Should recover the single entry")
 	})
+}
+
+func TestWAL_Purge(t *testing.T) {
+	// Setup: Create a WAL with 4 segments
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	// Use a small segment size to make rotation easy
+	opts.MaxSegmentSize = 128
+
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+
+	// Write some data to create segment 1
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), Value: []byte("a"), SeqNum: 1}))
+	// Rotate to segment 2
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(2), wal.ActiveSegmentIndex())
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("b"), Value: []byte("b"), SeqNum: 2}))
+	// Rotate to segment 3
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(3), wal.ActiveSegmentIndex())
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("c"), Value: []byte("c"), SeqNum: 3}))
+	// Rotate to segment 4
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(4), wal.ActiveSegmentIndex())
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("d"), Value: []byte("d"), SeqNum: 4}))
+
+	// At this point, we have 4 segment files: 000001.wal, 000002.wal, 000003.wal, 000004.wal
+	// Active segment is 4.
+	require.Len(t, wal.segmentIndexes, 4, "Should have 4 segments before purge")
+
+	t.Run("Purge old segments", func(t *testing.T) {
+		// Purge segments up to index 2. This should delete 1 and 2.
+		err := wal.Purge(2)
+		require.NoError(t, err)
+
+		// Check internal state
+		assert.Len(t, wal.segmentIndexes, 2, "Should have 2 segments remaining")
+		assert.Equal(t, []uint64{3, 4}, wal.segmentIndexes, "Remaining segments should be 3 and 4")
+
+		// Check filesystem
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(1)))
+		assert.True(t, os.IsNotExist(err), "Segment 1 should be deleted")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(2)))
+		assert.True(t, os.IsNotExist(err), "Segment 2 should be deleted")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(3)))
+		assert.NoError(t, err, "Segment 3 should still exist")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(4)))
+		assert.NoError(t, err, "Segment 4 (active) should still exist")
+	})
+
+	t.Run("Try to purge active segment", func(t *testing.T) {
+		// Try to purge up to index 4. This should delete 3, but spare 4 (the active one).
+		err := wal.Purge(4)
+		require.NoError(t, err)
+
+		// Check internal state
+		assert.Len(t, wal.segmentIndexes, 1, "Should have 1 segment remaining")
+		assert.Equal(t, []uint64{4}, wal.segmentIndexes, "Only segment 4 should remain")
+
+		// Check filesystem
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(3)))
+		assert.True(t, os.IsNotExist(err), "Segment 3 should be deleted")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(4)))
+		assert.NoError(t, err, "Segment 4 (active) should still exist")
+	})
+
+	t.Run("Purge with no matching segments", func(t *testing.T) {
+		// At this point, only segment 4 exists. Purging up to 3 should do nothing.
+		err := wal.Purge(3)
+		require.NoError(t, err)
+		assert.Len(t, wal.segmentIndexes, 1, "Length should not change")
+		assert.Equal(t, []uint64{4}, wal.segmentIndexes)
+	})
+
+	require.NoError(t, wal.Close())
 }
