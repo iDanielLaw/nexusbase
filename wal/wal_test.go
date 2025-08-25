@@ -347,3 +347,59 @@ func TestWAL_Purge(t *testing.T) {
 
 	require.NoError(t, wal.Close())
 }
+
+func TestWAL_Rotate_EdgeCases(t *testing.T) {
+	t.Run("Rapid repeated rotations", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		require.Equal(t, uint64(1), wal.ActiveSegmentIndex())
+
+		// Rotate 3 times in a row
+		require.NoError(t, wal.Rotate())
+		require.Equal(t, uint64(2), wal.ActiveSegmentIndex())
+
+		require.NoError(t, wal.Rotate())
+		require.Equal(t, uint64(3), wal.ActiveSegmentIndex())
+
+		require.NoError(t, wal.Rotate())
+		require.Equal(t, uint64(4), wal.ActiveSegmentIndex())
+
+		// Check internal state
+		assert.Equal(t, []uint64{1, 2, 3, 4}, wal.segmentIndexes)
+
+		// Check filesystem
+		for i := uint64(1); i <= 4; i++ {
+			_, err := os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(i)))
+			assert.NoError(t, err, "Segment %d should exist", i)
+		}
+
+		require.NoError(t, wal.Close())
+	})
+
+	t.Run("Rotation fails if cannot create new segment", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		originalActiveIndex := wal.ActiveSegmentIndex()
+		require.Equal(t, uint64(1), originalActiveIndex)
+
+		// Manually create a directory where the next segment file should be.
+		// This will cause the call to os.OpenFile in CreateSegment to fail.
+		nextSegmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(originalActiveIndex+1))
+		require.NoError(t, os.MkdirAll(nextSegmentPath, 0755))
+
+		err = wal.Rotate()
+		require.Error(t, err, "Rotate should fail when the next segment path is a directory")
+
+		// Check that the state has not changed
+		assert.Equal(t, originalActiveIndex, wal.ActiveSegmentIndex(), "Active segment index should not change on failure")
+		assert.Len(t, wal.segmentIndexes, 1, "Segment indexes should not change on failure")
+
+		require.NoError(t, wal.Close())
+	})
+}
