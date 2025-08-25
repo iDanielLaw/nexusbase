@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/stretchr/testify/assert"
@@ -198,5 +199,73 @@ func TestWAL_Close(t *testing.T) {
 	// A second close should be a no-op and not cause a panic.
 	require.NotPanics(t, func() {
 		assert.NoError(t, wal.Close())
+	})
+}
+
+func TestWAL_GroupCommit_ConfigurableOptions(t *testing.T) {
+	t.Run("CommitMaxBatchSize", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		opts.CommitMaxBatchSize = 5 // Force commit after 5 records
+
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		// Append 4 entries, they should be held pending by the committer
+		// We use a wait group to know when the goroutines are done.
+		var wg sync.WaitGroup
+		for i := 0; i < opts.CommitMaxBatchSize-1; i++ {
+			wg.Add(1)
+			go func(num int) {
+				defer wg.Done()
+				// These appends will block until the batch is committed.
+				err := wal.Append(core.WALEntry{Key: []byte(fmt.Sprintf("key-%d", num)), SeqNum: uint64(num + 1)})
+				assert.NoError(t, err)
+			}(i)
+		}
+
+		// The 5th entry should trigger the batch commit, unblocking the other goroutines.
+		err = wal.Append(core.WALEntry{Key: []byte("key-trigger"), SeqNum: uint64(opts.CommitMaxBatchSize)})
+		require.NoError(t, err)
+
+		// Wait for the initial goroutines to complete.
+		wg.Wait()
+
+		// Close the WAL to ensure everything is flushed.
+		require.NoError(t, wal.Close())
+
+		// Re-open and verify.
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
+		assert.Len(t, recovered, opts.CommitMaxBatchSize, "Should recover all entries from the batch")
+	})
+
+	t.Run("CommitMaxDelay", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		opts.CommitMaxDelay = 5 * time.Millisecond // Force commit after a short delay
+
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		start := time.Now()
+		// This append will block until the ticker forces the commit.
+		err = wal.Append(core.WALEntry{Key: []byte("key-delay"), SeqNum: 1})
+		duration := time.Since(start)
+
+		require.NoError(t, err)
+		// The duration should be slightly longer than the delay, accounting for processing time.
+		assert.GreaterOrEqual(t, duration, opts.CommitMaxDelay)
+		// It shouldn't be excessively long either.
+		assert.Less(t, duration, opts.CommitMaxDelay*20) // Increased multiplier for CI
+
+		require.NoError(t, wal.Close())
+
+		// Re-open and verify.
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
+		assert.Len(t, recovered, 1, "Should recover the single entry")
 	})
 }

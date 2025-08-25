@@ -76,12 +76,14 @@ func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
 
 // Options holds configuration for the WAL.
 type Options struct {
-	Dir            string
-	SyncMode       core.WALSyncMode
-	MaxSegmentSize int64
-	BytesWritten   *expvar.Int
-	EntriesWritten *expvar.Int
-	Logger         *slog.Logger
+	Dir                string
+	SyncMode           core.WALSyncMode
+	MaxSegmentSize     int64
+	BytesWritten       *expvar.Int
+	EntriesWritten     *expvar.Int
+	Logger             *slog.Logger
+	CommitMaxDelay     time.Duration // Max delay before a pending batch is committed.
+	CommitMaxBatchSize int           // Max number of records in a batch before a commit is forced.
 	// StartRecoveryIndex tells the WAL to only recover entries from segments with an index greater than this value.
 	StartRecoveryIndex uint64
 	HookManager        hooks.HookManager
@@ -98,9 +100,11 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 	if opts.MaxSegmentSize == 0 {
 		opts.MaxSegmentSize = core.WALMaxSegmentSize
 	}
-
-	if err := os.MkdirAll(opts.Dir, 0755); err != nil {
-		return nil, nil, fmt.Errorf("failed to create WAL directory %s: %w", opts.Dir, err)
+	if opts.CommitMaxDelay == 0 {
+		opts.CommitMaxDelay = 10 * time.Millisecond
+	}
+	if opts.CommitMaxBatchSize == 0 {
+		opts.CommitMaxBatchSize = 64
 	}
 
 	w := &WAL{
@@ -616,7 +620,7 @@ func (w *WAL) runCommitter() {
 
 	// We use a ticker to set a maximum delay for commits, ensuring that even
 	// low-traffic periods have bounded latency.
-	ticker := time.NewTicker(10 * time.Millisecond) // Can be made configurable
+	ticker := time.NewTicker(w.opts.CommitMaxDelay)
 	defer ticker.Stop()
 
 	var pending []*commitRecord
@@ -626,7 +630,7 @@ func (w *WAL) runCommitter() {
 		case rec := <-w.commitChan:
 			pending = append(pending, rec)
 			// If we have a large enough batch, commit immediately without waiting for the ticker.
-			if len(pending) >= 64 { // Batch size can be made configurable
+			if len(pending) >= w.opts.CommitMaxBatchSize {
 				w.commit(pending)
 				pending = nil
 			}
