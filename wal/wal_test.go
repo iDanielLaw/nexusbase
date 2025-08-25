@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -402,4 +404,70 @@ func TestWAL_Rotate_EdgeCases(t *testing.T) {
 
 		require.NoError(t, wal.Close())
 	})
+}
+
+func TestWAL_Rotate_Hook(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	// 1. Setup HookManager and listener
+	hm := hooks.NewHookManager(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	payloadChan := make(chan hooks.PostWALRotatePayload, 1)
+
+	listener := &testHookListener{
+		payloadChan: payloadChan,
+	}
+	hm.Register(hooks.EventPostWALRotate, listener)
+
+	opts.HookManager = hm
+
+	// 2. Open WAL. This creates segment 1 but should NOT trigger the hook.
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), wal.ActiveSegmentIndex())
+
+	// Verify hook was not called
+	select {
+	case <-payloadChan:
+		t.Fatal("Hook should not be called on initial WAL open")
+	default:
+		// Good, no event
+	}
+
+	// 3. Rotate to segment 2. This SHOULD trigger the hook.
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(2), wal.ActiveSegmentIndex())
+
+	// 4. Verify hook was called with correct payload
+	select {
+	case payload := <-payloadChan:
+		assert.Equal(t, uint64(1), payload.OldSegmentIndex)
+		assert.Equal(t, uint64(2), payload.NewSegmentIndex)
+		expectedPath := filepath.Join(tempDir, core.FormatSegmentFileName(2))
+		assert.Equal(t, expectedPath, payload.NewSegmentPath)
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timed out waiting for PostWALRotate hook to be called")
+	}
+
+	require.NoError(t, wal.Close())
+}
+
+// testHookListener is a simple implementation of hooks.HookListener for testing.
+type testHookListener struct {
+	payloadChan chan<- hooks.PostWALRotatePayload
+}
+
+func (l *testHookListener) OnEvent(ctx context.Context, event hooks.HookEvent) error {
+	if p, ok := event.Payload().(hooks.PostWALRotatePayload); ok {
+		l.payloadChan <- p
+	}
+	return nil
+}
+
+func (l *testHookListener) Priority() int {
+	return 0
+}
+
+func (l *testHookListener) IsAsync() bool {
+	return false
 }

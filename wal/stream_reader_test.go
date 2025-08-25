@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -375,4 +377,37 @@ func TestStreamReader_ContextCancellation(t *testing.T) {
 
 	// If we reach here without the test timing out or erroring, it means
 	// the goroutine successfully exited upon context cancellation.
+}
+
+func TestStreamReader_OpenSegmentError(t *testing.T) {
+	// Setup: Create a WAL with 2 segments
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	defer wal.Close()
+
+	// Write to segment 1 and rotate to create segment 2
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), SeqNum: 1}))
+	require.NoError(t, wal.Rotate())
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("b"), SeqNum: 2}))
+	require.Equal(t, uint64(2), wal.ActiveSegmentIndex(), "Active segment should be 2")
+
+	// Create a stream reader. It will know about segments 1 and 2.
+	sr, err := wal.NewStreamReader(0)
+	require.NoError(t, err)
+	defer sr.Close()
+
+	// Corrupt the setup AFTER the reader has been created:
+	// Replace the first segment file with a directory.
+	segment1Path := filepath.Join(tempDir, core.FormatSegmentFileName(1))
+	require.NoError(t, os.Remove(segment1Path))
+	require.NoError(t, os.Mkdir(segment1Path, 0755))
+
+	// Act: Call Next(), which should trigger openNextAvailableSegmentLocked and fail.
+	_, err = sr.Next()
+
+	// Assert: Check for a genuine error, not ErrNoNewEntries
+	require.Error(t, err, "Next() should return an error")
+	assert.NotErrorIs(t, err, ErrNoNewEntries, "Error should be a file system error, not ErrNoNewEntries")
 }
