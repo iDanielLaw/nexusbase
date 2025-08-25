@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
@@ -43,6 +44,7 @@ type WAL struct {
 	shutdownChan chan struct{}
 	committerWg  sync.WaitGroup
 	closeOnce    sync.Once
+	isClosing    atomic.Bool
 
 	metricsBytesWritten   *expvar.Int
 	metricsEntriesWritten *expvar.Int
@@ -107,6 +109,10 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 		opts.CommitMaxBatchSize = 64
 	}
 
+	if err := os.MkdirAll(opts.Dir, 0755); err != nil {
+		return nil, nil, fmt.Errorf("failed to create WAL directory %s: %w", opts.Dir, err)
+	}
+
 	w := &WAL{
 		dir:                   opts.Dir,
 		opts:                  opts,
@@ -115,6 +121,7 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 		metricsEntriesWritten: opts.EntriesWritten,
 		hookManager:           opts.HookManager,
 	}
+	w.isClosing.Store(false)
 
 	// 1. Discover existing segments
 	if err := w.loadSegments(); err != nil {
@@ -189,6 +196,9 @@ func (w *WAL) Append(entry core.WALEntry) error {
 // AppendBatch submits a slice of WAL entries to be written by the committer goroutine.
 // It blocks until the entries have been written and synced to disk.
 func (w *WAL) AppendBatch(entries []core.WALEntry) error {
+	if w.isClosing.Load() {
+		return errors.New("wal is closed")
+	}
 	if len(entries) == 0 {
 		return nil
 	}
@@ -208,6 +218,9 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 
 // Sync forces a commit of all pending entries and waits for it to complete.
 func (w *WAL) Sync() error {
+	if w.isClosing.Load() {
+		return errors.New("wal is closed")
+	}
 	// With group commit, Sync can be implemented by sending a special empty record
 	// and waiting for it to complete. This ensures all prior writes are flushed.
 	rec := &commitRecord{
@@ -220,6 +233,9 @@ func (w *WAL) Sync() error {
 
 // Rotate manually triggers a segment rotation.
 func (w *WAL) Rotate() error {
+	if w.isClosing.Load() {
+		return errors.New("wal is closed")
+	}
 	// To rotate, we send a nil-entry record. The committer interprets this as a rotation request.
 	rec := &commitRecord{
 		entries: nil, // A nil slice of entries signals a rotation request.
@@ -232,6 +248,8 @@ func (w *WAL) Rotate() error {
 // Close shuts down the committer goroutine and closes the WAL file.
 func (w *WAL) Close() (closeErr error) {
 	w.closeOnce.Do(func() {
+		w.isClosing.Store(true)
+
 		// Signal the committer to shut down.
 		if w.shutdownChan != nil {
 			close(w.shutdownChan)
@@ -656,7 +674,7 @@ func (w *WAL) commit(records []*commitRecord) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.activeSegment == nil {
+	if w.activeSegment == nil || w.isClosing.Load() {
 		// This can happen if Close() is called concurrently.
 		// Notify waiters that the write failed because the WAL is closed.
 		for _, rec := range records {

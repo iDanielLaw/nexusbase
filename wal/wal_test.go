@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -470,4 +472,84 @@ func (l *testHookListener) Priority() int {
 
 func (l *testHookListener) IsAsync() bool {
 	return false
+}
+
+func TestWAL_Commit_AllWaitersNotified(t *testing.T) {
+	t.Run("AllNotifiedOnSuccess", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		// Use a longer commit delay to ensure requests group together
+		opts.CommitMaxDelay = 50 * time.Millisecond
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		var wg sync.WaitGroup
+		numGoroutines := 50
+		wg.Add(numGoroutines)
+
+		var seqNum uint64
+
+		for i := 0; i < numGoroutines; i++ {
+			go func(i int) {
+				defer wg.Done()
+				// Mix up the operations
+				op := rand.Intn(3)
+				switch op {
+				case 0:
+					// Append a single entry
+					n := atomic.AddUint64(&seqNum, 1)
+					err := wal.Append(core.WALEntry{Key: []byte(fmt.Sprintf("k-%d", n)), SeqNum: n})
+					assert.NoError(t, err)
+				case 1:
+					// Sync
+					err := wal.Sync()
+					assert.NoError(t, err)
+				case 2:
+					// Rotate
+					err := wal.Rotate()
+					assert.NoError(t, err)
+				}
+			}(i)
+		}
+
+		// This Wait will only complete if all goroutines finish, which means
+		// all `done` channels in the commit function were notified.
+		wg.Wait()
+	})
+
+	t.Run("AllNotifiedOnClose", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		// Set a long delay so appends will block waiting for commit
+		opts.CommitMaxDelay = 1 * time.Second
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		numGoroutines := 10
+		wg.Add(numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func(i int) {
+				defer wg.Done()
+				// This append will block in the commit queue
+				err := wal.Append(core.WALEntry{Key: []byte("k"), SeqNum: uint64(i + 1)})
+				// We expect an error because the WAL will be closed
+				assert.Error(t, err)
+				if err != nil { // Check err is not nil before checking content
+					assert.Contains(t, err.Error(), "wal is closed")
+				}
+			}(i)
+		}
+
+		// Give goroutines a moment to queue up
+		time.Sleep(50 * time.Millisecond)
+
+		// Close the WAL, which should unblock all waiting goroutines
+		wal.Close()
+
+		// This Wait will only complete if Close() correctly notifies all waiters.
+		wg.Wait()
+	})
 }
