@@ -556,7 +556,7 @@ const file_replication_proto_replication_proto_rawDesc = "" +
 	"\x12ReplicationService\x12E\n" +
 	"\tStreamWAL\x12\x1d.replication.StreamWALRequest\x1a\x15.replication.WALEntry\"\x000\x01\x12_\n" +
 	"\x15GetLatestSnapshotInfo\x12).replication.GetLatestSnapshotInfoRequest\x1a\x19.replication.SnapshotInfo\"\x00\x12T\n" +
-	"\x0eStreamSnapshot\x12\".replication.StreamSnapshotRequest\x1a\x1a.replication.SnapshotChunk\"\x000\x01B3Z1github.com/iDanielLaw/nexusbase/replication/protob\x06proto3"
+	"\x0eStreamSnapshot\x12\".replication.StreamSnapshotRequest\x1a\x1a.replication.SnapshotChunk\"\x000\x01B0Z.github.com/INLOpen/nexusbase/replication/protob\x06proto3"
 
 var (
 	file_replication_proto_replication_proto_rawDescOnce sync.Once

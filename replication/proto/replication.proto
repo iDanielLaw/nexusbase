@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package replication;
 
-option go_package = "github.com/iDanielLaw/nexusbase/replication/proto";
+option go_package = "github.com/INLOpen/nexusbase/replication/proto";
 
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
