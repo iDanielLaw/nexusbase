@@ -664,6 +664,13 @@ func (w *WAL) runCommitter() {
 				// On shutdown, commit any remaining pending writes.
 				w.commit(pending)
 			}
+			// After shutting down, reject any new requests that might have arrived.
+			// This handles a race condition where requests arrive after the shutdown signal
+			// but before the committer loop fully exits.
+			for len(w.commitChan) > 0 {
+				rec := <-w.commitChan
+				rec.done <- errors.New("wal is closed")
+			}
 			return
 		}
 	}
@@ -675,28 +682,23 @@ func (w *WAL) commit(records []*commitRecord) {
 	defer w.mu.Unlock()
 
 	if w.activeSegment == nil || w.isClosing.Load() {
-		// This can happen if Close() is called concurrently.
-		// Notify waiters that the write failed because the WAL is closed.
+		err := errors.New("wal is closed")
 		for _, rec := range records {
-			rec.done <- errors.New("wal is closed")
+			rec.done <- err
 		}
 		return
 	}
 
-	// 1. Combine all entries from all records into one giant batch.
 	var allEntries []core.WALEntry
 	var shouldRotate bool
 	for _, rec := range records {
 		if rec.entries == nil {
-			// A nil entry list is a signal for rotation.
 			shouldRotate = true
 		} else {
 			allEntries = append(allEntries, rec.entries...)
 		}
 	}
 
-	// A request with an empty entry slice is a sync request.
-	// A request with a nil entry slice is a rotation request.
 	if len(allEntries) == 0 {
 		var err error
 		if shouldRotate {
@@ -704,18 +706,14 @@ func (w *WAL) commit(records []*commitRecord) {
 		} else if w.opts.SyncMode != core.WALSyncDisabled {
 			err = w.activeSegment.Sync()
 		}
-
-		// Notify all waiters.
 		for _, rec := range records {
 			rec.done <- err
 		}
 		return
 	}
 
-	// --- Actual Write Logic ---
 	var batchPayload bytes.Buffer
 	if err := batchPayload.WriteByte(byte(core.EntryTypePutBatch)); err != nil {
-		// This is a non-recoverable error, notify all waiters and return.
 		for _, rec := range records {
 			rec.done <- err
 		}
@@ -736,9 +734,8 @@ func (w *WAL) commit(records []*commitRecord) {
 		}
 	}
 	payloadBytes := batchPayload.Bytes()
-	newRecordSize := int64(len(payloadBytes) + 8) // +4 for length, +4 for checksum
+	newRecordSize := int64(len(payloadBytes) + 8)
 
-	// Check for rotation before writing.
 	currentSize, err := w.activeSegment.Size()
 	if err != nil {
 		for _, rec := range records {
@@ -755,17 +752,19 @@ func (w *WAL) commit(records []*commitRecord) {
 		}
 	}
 
-	// Write the single large batch record.
 	writeErr := w.activeSegment.WriteRecord(payloadBytes)
 
-	// Sync if required.
 	var syncErr error
 	if writeErr == nil && w.opts.SyncMode != core.WALSyncDisabled {
 		syncErr = w.activeSegment.Sync()
 	}
 
-	// Update metrics if the write was successful.
-	if writeErr == nil && syncErr == nil {
+	var rotateErr error
+	if writeErr == nil && syncErr == nil && shouldRotate {
+		rotateErr = w.rotateLocked()
+	}
+
+	if writeErr == nil && syncErr == nil && rotateErr == nil {
 		if w.metricsBytesWritten != nil {
 			w.metricsBytesWritten.Add(int64(len(payloadBytes) + 8))
 		}
@@ -774,10 +773,12 @@ func (w *WAL) commit(records []*commitRecord) {
 		}
 	}
 
-	// Notify all waiting goroutines.
 	finalErr := writeErr
 	if finalErr == nil {
 		finalErr = syncErr
+	}
+	if finalErr == nil {
+		finalErr = rotateErr
 	}
 
 	for _, rec := range records {

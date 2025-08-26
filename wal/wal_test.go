@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -551,5 +552,82 @@ func TestWAL_Commit_AllWaitersNotified(t *testing.T) {
 
 		// This Wait will only complete if Close() correctly notifies all waiters.
 		wg.Wait()
+	})
+
+	t.Run("AllNotifiedOnError", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		// Ensure all requests are processed in a single batch by setting a high
+		// batch size and a reasonable delay.
+		opts.CommitMaxDelay = 100 * time.Millisecond
+		opts.CommitMaxBatchSize = 20 // Larger than numWaiters
+
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		// Create the failure condition *before* starting the waiters.
+		// This avoids timing issues where waiters could be processed before the failure is ready.
+		nextSegmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(wal.ActiveSegmentIndex()+1))
+		require.NoError(t, os.Mkdir(nextSegmentPath, 0755))
+
+		var wg sync.WaitGroup
+		numWaiters := 10
+		wg.Add(numWaiters)
+
+		errChan := make(chan error, numWaiters)
+
+		// Launch all waiters, including the one that will fail, concurrently.
+		// The last one will perform the rotation.
+		for i := 0; i < numWaiters; i++ {
+			go func(isRotateRequest bool) {
+				defer wg.Done()
+				var err error
+				if isRotateRequest {
+					// This Rotate call will be batched with the Appends, fail,
+					// and the error should be broadcast to all waiters.
+					err = wal.Rotate()
+				} else {
+					// SeqNum can be random as it's not relevant to the test logic.
+					err = wal.Append(core.WALEntry{Key: []byte("k"), SeqNum: uint64(rand.Intn(1000))})
+				}
+				errChan <- err
+			}(i == numWaiters-1) // The last goroutine will trigger the failing rotation.
+		}
+
+		// Wait for all goroutines to finish. They will only finish when the
+		// commit batch is processed and the error is broadcast.
+		wg.Wait()
+		close(errChan)
+
+		// Verification: Check that all goroutines received the same error.
+		var firstErr error
+		var once sync.Once
+		count := 0
+		for err := range errChan {
+			// This is the key check. If it fails, it means the implementation
+			// might be notifying some waiters of success before an operation
+			// in the same batch fails, which is incorrect.
+			require.Error(t, err, "Every waiter should have received an error")
+
+			once.Do(func() {
+				firstErr = err
+				// Check that the error is the one we expect from the failing rotation.
+				// The error message differs between OSes.
+				if runtime.GOOS == "windows" {
+					// On Windows, trying to create a file where a directory exists gives "Access is denied".
+					require.ErrorContains(t, err, "Access is denied")
+				} else {
+					// On POSIX systems, it gives an error containing "exists" or "is a directory".
+					// We'll check for "exists" as it was the original check.
+					require.ErrorContains(t, err, "exists")
+				}
+			})
+
+			// All errors in the batch should be the same.
+			assert.Equal(t, firstErr.Error(), err.Error(), "All waiters in the batch should receive the same error")
+			count++
+		}
+		assert.Equal(t, numWaiters, count, "The number of checked waiters should match the total")
 	})
 }
