@@ -29,6 +29,12 @@ type commitRecord struct {
 	done    chan error
 }
 
+// streamerRegistration holds the information needed to notify a single stream reader.
+type streamerRegistration struct {
+	id      uint64
+	notifyC chan []core.WALEntry
+}
+
 // WAL (Write-Ahead Log) provides durability by logging operations before they are applied to memtable.
 // It manages a directory of segment files.
 type WAL struct {
@@ -46,6 +52,11 @@ type WAL struct {
 	closeOnce    sync.Once
 	isClosing    atomic.Bool
 
+	// Replication Streamer fields
+	streamerIDCounter atomic.Uint64
+	streamerMu        sync.Mutex
+	streamers         map[uint64]*streamerRegistration
+
 	metricsBytesWritten   *expvar.Int
 	metricsEntriesWritten *expvar.Int
 
@@ -59,21 +70,39 @@ type WAL struct {
 var _ WALInterface = (*WAL)(nil)
 
 // NewStreamReader creates a new reader for streaming WAL entries.
-// It's designed for replication followers to tail the leader's WAL.
+// It registers the reader to receive live notifications of new WAL entries.
 func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
-	// The stream reader needs a consistent view of the segment list, so we lock.
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	w.streamerMu.Lock()
+	defer w.streamerMu.Unlock()
 
-	// TODO: Implement logic to find the correct starting segment based on fromSeqNum.
-	// For now, the filtering of already-seen sequence numbers is handled
-	// within the stream reader's Next() method by checking sr.lastReadSeqNum.
+	id := w.streamerIDCounter.Add(1)
+	reg := &streamerRegistration{
+		id:      id,
+		notifyC: make(chan []core.WALEntry, 256), // Buffered channel to avoid blocking the committer
+	}
+
+	w.streamers[id] = reg
+	w.logger.Info("New WAL stream reader registered", "streamer_id", id)
+
 	sr := &streamReader{
 		wal:            w,
-		lastReadSeqNum: fromSeqNum,
-		logger:         w.logger.With("component", "wal_stream_reader"),
+		lastReadSeqNum: fromSeqNum, // A follower requesting from N needs to see N+1, so lastRead should be N.
+		logger:         w.logger.With("component", "wal_stream_reader", "streamer_id", id),
+		registration:   reg,
 	}
 	return sr, nil
+}
+
+// unregisterStreamer removes a streamer from the WAL's notification list.
+func (w *WAL) unregisterStreamer(reg *streamerRegistration) {
+	w.streamerMu.Lock()
+	defer w.streamerMu.Unlock()
+
+	if _, ok := w.streamers[reg.id]; ok {
+		close(reg.notifyC) // Close the channel to signal the reader to stop
+		delete(w.streamers, reg.id)
+		w.logger.Info("WAL stream reader unregistered", "streamer_id", reg.id)
+	}
 }
 
 // Options holds configuration for the WAL.
@@ -86,13 +115,11 @@ type Options struct {
 	Logger             *slog.Logger
 	CommitMaxDelay     time.Duration // Max delay before a pending batch is committed.
 	CommitMaxBatchSize int           // Max number of records in a batch before a commit is forced.
-	// StartRecoveryIndex tells the WAL to only recover entries from segments with an index greater than this value.
 	StartRecoveryIndex uint64
 	HookManager        hooks.HookManager
 }
 
 // Open creates or opens a WAL directory.
-// It recovers entries from existing segments and prepares for appending.
 func Open(opts Options) (*WAL, []core.WALEntry, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default().With("component", "WAL_default")
@@ -120,43 +147,31 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 		metricsBytesWritten:   opts.BytesWritten,
 		metricsEntriesWritten: opts.EntriesWritten,
 		hookManager:           opts.HookManager,
+		streamers:             make(map[uint64]*streamerRegistration),
 	}
 	w.isClosing.Store(false)
 
-	// 1. Discover existing segments
 	if err := w.loadSegments(); err != nil {
 		return nil, nil, fmt.Errorf("failed to load WAL segments: %w", err)
 	}
 
-	// 2. Perform recovery
 	recoveredEntries, recoveryErr := w.recover(opts.StartRecoveryIndex)
-	// We will return recoveryErr at the end, but we continue with initialization.
-	// The caller (StorageEngine) will decide if the error is fatal.
-	// An io.EOF error means a clean end of all segments was reached.
-	// Other errors (e.g., io.ErrUnexpectedEOF) indicate potential truncation.
 
-	// 3. Prepare for appending
 	if err := w.openForAppend(); err != nil {
-		// Close is not called here because the committer goroutine hasn't been started.
 		return nil, nil, fmt.Errorf("failed to open WAL for appending: %w", err)
 	}
 
-	// 4. Start the committer goroutine for group commits.
-	w.commitChan = make(chan *commitRecord, 128) // Buffer size can be tuned.
+	w.commitChan = make(chan *commitRecord, 128)
 	w.shutdownChan = make(chan struct{})
 	w.committerWg.Add(1)
 	go w.runCommitter()
 
-	// The recovery process returns io.EOF for a clean, full read of all segments,
-	// which is not an error for the Open operation. Other errors (like UnexpectedEOF
-	// on a non-last segment) are real problems.
 	if recoveryErr == io.EOF {
 		return w, recoveredEntries, nil
 	}
 	return w, recoveredEntries, recoveryErr
 }
 
-// loadSegments scans the WAL directory and populates the segmentIndexes slice.
 func (w *WAL) loadSegments() error {
 	files, err := os.ReadDir(w.dir)
 	if err != nil {
@@ -179,7 +194,6 @@ func (w *WAL) loadSegments() error {
 	return nil
 }
 
-// SetTestingOnlyInjectCloseError sets an error that will be returned by the Close() method.
 func (w *WAL) SetTestingOnlyInjectCloseError(err error) {
 	w.testingOnlyInjectCloseError = err
 }
@@ -188,13 +202,10 @@ func (w *WAL) SetTestingOnlyInjectAppendError(err error) {
 	w.testingOnlyInjectAppendError = err
 }
 
-// Append writes a single WALEntry to the log. It's a convenience wrapper around AppendBatch.
 func (w *WAL) Append(entry core.WALEntry) error {
 	return w.AppendBatch([]core.WALEntry{entry})
 }
 
-// AppendBatch submits a slice of WAL entries to be written by the committer goroutine.
-// It blocks until the entries have been written and synced to disk.
 func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 	if w.isClosing.Load() {
 		return errors.New("wal is closed")
@@ -216,13 +227,10 @@ func (w *WAL) AppendBatch(entries []core.WALEntry) error {
 	return <-rec.done
 }
 
-// Sync forces a commit of all pending entries and waits for it to complete.
 func (w *WAL) Sync() error {
 	if w.isClosing.Load() {
 		return errors.New("wal is closed")
 	}
-	// With group commit, Sync can be implemented by sending a special empty record
-	// and waiting for it to complete. This ensures all prior writes are flushed.
 	rec := &commitRecord{
 		entries: []core.WALEntry{},
 		done:    make(chan error, 1),
@@ -231,32 +239,34 @@ func (w *WAL) Sync() error {
 	return <-rec.done
 }
 
-// Rotate manually triggers a segment rotation.
 func (w *WAL) Rotate() error {
 	if w.isClosing.Load() {
 		return errors.New("wal is closed")
 	}
-	// To rotate, we send a nil-entry record. The committer interprets this as a rotation request.
 	rec := &commitRecord{
-		entries: nil, // A nil slice of entries signals a rotation request.
+		entries: nil,
 		done:    make(chan error, 1),
 	}
 	w.commitChan <- rec
 	return <-rec.done
 }
 
-// Close shuts down the committer goroutine and closes the WAL file.
 func (w *WAL) Close() (closeErr error) {
 	w.closeOnce.Do(func() {
 		w.isClosing.Store(true)
 
-		// Signal the committer to shut down.
 		if w.shutdownChan != nil {
 			close(w.shutdownChan)
 		}
 
-		// Wait for the committer to finish processing.
 		w.committerWg.Wait()
+
+		w.streamerMu.Lock()
+		for _, streamer := range w.streamers {
+			close(streamer.notifyC)
+		}
+		w.streamers = make(map[uint64]*streamerRegistration)
+		w.streamerMu.Unlock()
 
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -267,7 +277,7 @@ func (w *WAL) Close() (closeErr error) {
 		}
 
 		if w.activeSegment == nil {
-			return // Already closed
+			return
 		}
 
 		closeErr = w.activeSegment.Close()
@@ -282,7 +292,6 @@ func (w *WAL) Close() (closeErr error) {
 	return
 }
 
-// Purge deletes segment files with index less than or equal to the given index.
 func (w *WAL) Purge(upToIndex uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -291,7 +300,6 @@ func (w *WAL) Purge(upToIndex uint64) error {
 	var purgedCount int
 	for _, index := range w.segmentIndexes {
 		if index <= upToIndex {
-			// Don't delete the active segment
 			if w.activeSegment != nil && w.activeSegment.index == index {
 				w.logger.Warn("Skipping purge of active WAL segment", "index", index)
 				remainingIndexes = append(remainingIndexes, index)
@@ -299,7 +307,6 @@ func (w *WAL) Purge(upToIndex uint64) error {
 			}
 			path := filepath.Join(w.dir, core.FormatSegmentFileName(index))
 			if err := os.Remove(path); err != nil {
-				// Log error but continue trying to delete others
 				w.logger.Error("Failed to purge WAL segment", "path", path, "error", err)
 			} else {
 				purgedCount++
@@ -315,13 +322,10 @@ func (w *WAL) Purge(upToIndex uint64) error {
 	return nil
 }
 
-// Path returns the directory path of the WAL.
 func (w *WAL) Path() string {
 	return w.dir
 }
 
-// activeSegmentIndexLocked returns the index of the current active segment file.
-// It assumes the caller holds the WAL's mutex.
 func (w *WAL) activeSegmentIndexLocked() uint64 {
 	if w.activeSegment == nil {
 		return 0
@@ -329,15 +333,12 @@ func (w *WAL) activeSegmentIndexLocked() uint64 {
 	return w.activeSegment.index
 }
 
-// ActiveSegmentIndex returns the index of the current active segment file.
-// It returns 0 if there is no active segment.
 func (w *WAL) ActiveSegmentIndex() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.activeSegmentIndexLocked()
 }
 
-// rotateLocked creates a new segment file for writing. Must be called with lock held.
 func (w *WAL) rotateLocked() error {
 	var nextIndex uint64 = 1
 	if len(w.segmentIndexes) > 0 {
@@ -354,29 +355,24 @@ func (w *WAL) rotateLocked() error {
 		oldIndex = w.activeSegment.index
 		if err := w.activeSegment.Close(); err != nil {
 			w.logger.Error("failed to close active segment during rotation", "path", w.activeSegment.path, "error", err)
-			// Continue anyway, we need a new segment
 		}
 	}
 
 	w.activeSegment = newSegment
 	w.segmentIndexes = append(w.segmentIndexes, nextIndex)
 	w.logger.Info("Rotated to new WAL segment", "index", nextIndex, "path", newSegment.path)
-	// --- Post-WAL-Rotate Hook ---
 	if w.hookManager != nil && oldIndex > 0 {
 		payload := hooks.PostWALRotatePayload{
 			OldSegmentIndex: oldIndex,
 			NewSegmentIndex: newSegment.index,
 			NewSegmentPath:  newSegment.path,
 		}
-		// Use background context as this is an internal, non-request-driven event.
 		w.hookManager.Trigger(context.Background(), hooks.NewPostWALRotateEvent(payload))
 	}
 	return nil
 }
 
-// encodeEntryData serializes a single WALEntry's data part into a writer.
 func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
-	// Write fixed-size fields first.
 	if err := binary.Write(w, binary.LittleEndian, entry.EntryType); err != nil {
 		return fmt.Errorf("failed to write entry type: %w", err)
 	}
@@ -384,7 +380,6 @@ func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
 		return fmt.Errorf("failed to write sequence number: %w", err)
 	}
 
-	// Write variable-size fields with length prefixes.
 	if err := writeUvarintPrefixed(w, entry.Key); err != nil {
 		return fmt.Errorf("failed to write key: %w", err)
 	}
@@ -394,14 +389,11 @@ func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
 	return nil
 }
 
-// decodeEntryData deserializes a single WALEntry's data part from a reader.
 func decodeEntryData(r io.Reader) (*core.WALEntry, error) {
 	entry := &core.WALEntry{}
 
-	// Explicitly read the EntryType as a single byte.
 	byteReader, ok := r.(io.ByteReader)
 	if !ok {
-		// Wrap the reader if it doesn't implement io.ByteReader, which is needed for ReadUvarint.
 		byteReader = bufio.NewReader(r)
 	}
 
@@ -425,21 +417,19 @@ func decodeEntryData(r io.Reader) (*core.WALEntry, error) {
 	return entry, nil
 }
 
-// recover reads all entries from all known segments.
 func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 	segmentsToRecover := make([]uint64, 0)
 	for _, index := range w.segmentIndexes {
 		if index <= startRecoveryIndex {
-			continue // Skip segments that are already covered by a checkpoint
+			continue
 		}
 		segmentsToRecover = append(segmentsToRecover, index)
 	}
 
 	if len(segmentsToRecover) == 0 {
-		return nil, nil // Nothing to recover
+		return nil, nil
 	}
 
-	// --- Parallel Recovery ---
 	numWorkers := runtime.NumCPU()
 	if len(segmentsToRecover) < numWorkers {
 		numWorkers = len(segmentsToRecover)
@@ -452,7 +442,6 @@ func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 	resultsChan := make(chan []core.WALEntry, len(segmentsToRecover))
 	errChan := make(chan error, numWorkers)
 
-	// Start worker goroutines
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -466,13 +455,12 @@ func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 				if err != nil && err != io.EOF {
 					w.logger.Error("Error recovering from segment", "worker_id", workerID, "segment_index", index, "error", err)
 					errChan <- err
-					return // Stop this worker on a hard error
+					return
 				}
 			}
 		}(i)
 	}
 
-	// Feed segments to workers
 	for _, index := range segmentsToRecover {
 		segmentChan <- index
 	}
@@ -482,35 +470,26 @@ func (w *WAL) recover(startRecoveryIndex uint64) ([]core.WALEntry, error) {
 	close(resultsChan)
 	close(errChan)
 
-	// Collect and sort all results
 	var allEntries []core.WALEntry
 	for entries := range resultsChan {
 		allEntries = append(allEntries, entries...)
 	}
 
-	// Check for the first error that occurred.
-	// We do this after collecting results so that we can return partially recovered data.
 	firstErr := <-errChan
 
 	sort.Slice(allEntries, func(i, j int) bool {
 		return allEntries[i].SeqNum < allEntries[j].SeqNum
 	})
 
-	// If there was an error, return the recovered entries along with it.
-	// Otherwise, firstErr will be nil.
 	return allEntries, firstErr
 }
 
-// recoverFromSegment reads all valid entries from a single WAL segment file.
-// It is an unexported helper function.
-// It returns all entries read successfully before an error was encountered,
-// along with the error itself (which can be io.EOF for a clean read).
 func recoverFromSegment(filePath string, logger *slog.Logger) ([]core.WALEntry, error) {
 	reader, err := OpenSegmentForRead(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			logger.Info("WAL segment does not exist, nothing to recover.", "path", filePath)
-			return nil, nil // Not an error, just no entries to recover.
+			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to open WAL segment for reading %s: %w", filePath, err)
 	}
@@ -520,47 +499,35 @@ func recoverFromSegment(filePath string, logger *slog.Logger) ([]core.WALEntry, 
 	for {
 		recordData, err := reader.ReadRecord()
 		if err != nil {
-			// This is the important part: return successfully read entries along with the error.
-			// The caller can then decide if the error (e.g., io.EOF, io.ErrUnexpectedEOF) is fatal.
 			return entries, err
 		}
 
-		// The entire record is a batch. Decode it.
 		batchEntries, err := decodeBatchRecord(recordData)
 		if len(batchEntries) > 0 {
 			entries = append(entries, batchEntries...)
 		}
 		if err != nil {
-			return entries, fmt.Errorf("failed to decode batch record from segment: %w", err) // Return entries collected so far, along with the error
+			return entries, fmt.Errorf("failed to decode batch record from segment: %w", err)
 		}
 	}
 }
 
 func (w *WAL) openForAppend() error {
 	if len(w.segmentIndexes) == 0 {
-		// No segments exist, create the first one.
 		return w.rotateLocked()
 	}
 
-	// Open the last known segment for writing.
 	lastIndex := w.segmentIndexes[len(w.segmentIndexes)-1]
 	path := filepath.Join(w.dir, core.FormatSegmentFileName(lastIndex))
 
-	// To avoid appending to a potentially corrupt/partially written file after a crash,
-	// we start a new segment. A more advanced implementation could truncate the last
-	// record and continue, but starting a new segment is safer and simpler.
 	stat, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("failed to stat last segment %s: %w", path, err)
 	}
 
 	if stat.Size() > int64(binary.Size(core.FileHeader{})) {
-		// If the last segment has more than just a header, rotate to a new one.
 		return w.rotateLocked()
 	}
-
-	// If the last segment is empty or only has a header, reuse it.
-	// CreateSegment will truncate the file and write a new header, making it safe for reuse.
 
 	seg, err := CreateSegment(w.dir, lastIndex)
 	if err != nil {
@@ -570,7 +537,6 @@ func (w *WAL) openForAppend() error {
 	return nil
 }
 
-// writeUvarintPrefixed writes a uvarint length prefix followed by the data slice.
 func writeUvarintPrefixed(w io.Writer, data []byte) error {
 	buf := make([]byte, binary.MaxVarintLen64)
 	n := binary.PutUvarint(buf, uint64(len(data)))
@@ -585,7 +551,6 @@ func writeUvarintPrefixed(w io.Writer, data []byte) error {
 	return nil
 }
 
-// readUvarintPrefixed reads a uvarint length prefix and then the data slice.
 func readUvarintPrefixed(r io.ByteReader) ([]byte, error) {
 	length, err := binary.ReadUvarint(r)
 	if err != nil {
@@ -593,7 +558,6 @@ func readUvarintPrefixed(r io.ByteReader) ([]byte, error) {
 	}
 	if length > 0 {
 		data := make([]byte, length)
-		// The reader might not be an io.Reader, so we need to cast it.
 		if _, err := io.ReadFull(r.(io.Reader), data); err != nil {
 			return nil, err
 		}
@@ -602,7 +566,6 @@ func readUvarintPrefixed(r io.ByteReader) ([]byte, error) {
 	return nil, nil
 }
 
-// decodeBatchRecord decodes a byte slice that represents a batch of WAL entries.
 func decodeBatchRecord(recordData []byte) ([]core.WALEntry, error) {
 	reader := bytes.NewReader(recordData)
 	var entryTypeByte byte
@@ -630,14 +593,9 @@ func decodeBatchRecord(recordData []byte) ([]core.WALEntry, error) {
 	return entries, nil
 }
 
-// runCommitter is the heart of the group commit mechanism.
-// It runs in a dedicated goroutine, collecting write requests (commitRecords)
-// and committing them in batches.
 func (w *WAL) runCommitter() {
 	defer w.committerWg.Done()
 
-	// We use a ticker to set a maximum delay for commits, ensuring that even
-	// low-traffic periods have bounded latency.
 	ticker := time.NewTicker(w.opts.CommitMaxDelay)
 	defer ticker.Stop()
 
@@ -647,7 +605,6 @@ func (w *WAL) runCommitter() {
 		select {
 		case rec := <-w.commitChan:
 			pending = append(pending, rec)
-			// If we have a large enough batch, commit immediately without waiting for the ticker.
 			if len(pending) >= w.opts.CommitMaxBatchSize {
 				w.commit(pending)
 				pending = nil
@@ -661,12 +618,8 @@ func (w *WAL) runCommitter() {
 
 		case <-w.shutdownChan:
 			if len(pending) > 0 {
-				// On shutdown, commit any remaining pending writes.
 				w.commit(pending)
 			}
-			// After shutting down, reject any new requests that might have arrived.
-			// This handles a race condition where requests arrive after the shutdown signal
-			// but before the committer loop fully exits.
 			for len(w.commitChan) > 0 {
 				rec := <-w.commitChan
 				rec.done <- errors.New("wal is closed")
@@ -676,7 +629,6 @@ func (w *WAL) runCommitter() {
 	}
 }
 
-// commit performs the actual writing and syncing of a batch of commit records.
 func (w *WAL) commit(records []*commitRecord) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -764,15 +716,6 @@ func (w *WAL) commit(records []*commitRecord) {
 		rotateErr = w.rotateLocked()
 	}
 
-	if writeErr == nil && syncErr == nil && rotateErr == nil {
-		if w.metricsBytesWritten != nil {
-			w.metricsBytesWritten.Add(int64(len(payloadBytes) + 8))
-		}
-		if w.metricsEntriesWritten != nil {
-			w.metricsEntriesWritten.Add(int64(len(allEntries)))
-		}
-	}
-
 	finalErr := writeErr
 	if finalErr == nil {
 		finalErr = syncErr
@@ -781,7 +724,38 @@ func (w *WAL) commit(records []*commitRecord) {
 		finalErr = rotateErr
 	}
 
+	if finalErr == nil {
+		if w.metricsBytesWritten != nil {
+			w.metricsBytesWritten.Add(int64(len(payloadBytes) + 8))
+		}
+		if w.metricsEntriesWritten != nil {
+			w.metricsEntriesWritten.Add(int64(len(allEntries)))
+		}
+		w.notifyStreamers(allEntries)
+	}
+
 	for _, rec := range records {
 		rec.done <- finalErr
+	}
+}
+
+// notifyStreamers broadcasts a batch of entries to all registered streamers.
+func (w *WAL) notifyStreamers(entries []core.WALEntry) {
+	w.streamerMu.Lock()
+	defer w.streamerMu.Unlock()
+
+	if len(w.streamers) == 0 {
+		return
+	}
+
+	w.logger.Info("Notifying streamers", "count", len(w.streamers), "entries", len(entries))
+	for id, streamer := range w.streamers {
+		select {
+		case streamer.notifyC <- entries:
+			// Sent successfully
+		default:
+			// Channel is full, meaning the reader is lagging badly.
+			w.logger.Warn("WAL streamer notification channel full; reader may be lagging", "streamer_id", id)
+		}
 	}
 }

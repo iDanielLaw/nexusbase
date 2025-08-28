@@ -50,9 +50,11 @@ func TestStreamReader_Next_Success(t *testing.T) {
 
 	// 4. Read all entries and verify
 	for i, expected := range allEntries {
-		// To make the test robust, we must rotate the WAL to ensure the last segment is closed and readable.
-		wal.Rotate()
-		entry, err := reader.Next()
+		t.Logf("TestStreamReader_Next_Success: Reading entry %d (expected SeqNum %d)", i+1, expected.SeqNum)
+		entry, err := reader.Next(context.Background())
+		if err != nil {
+			t.Logf("TestStreamReader_Next_Success: reader.Next() returned error: %v", err)
+		}
 		require.NoError(t, err, "Next() should not fail for entry %d", i+1)
 		require.NotNil(t, entry)
 		assert.Equal(t, expected.SeqNum, entry.SeqNum)
@@ -61,7 +63,7 @@ func TestStreamReader_Next_Success(t *testing.T) {
 	}
 
 	// 5. Verify that the next call returns ErrNoNewEntries
-	_, err = reader.Next()
+	_, err = reader.Next(context.Background())
 	assert.ErrorIs(t, err, ErrNoNewEntries)
 }
 
@@ -91,10 +93,8 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 
 	// 4. Read the remaining entries and verify
 	for i := int(startSeqNum); i < len(allEntries); i++ {
-		// To make the test robust, we must rotate the WAL to ensure the last segment is closed and readable.
-		wal.Rotate()
 		expected := allEntries[i]
-		entry, err := reader.Next()
+		entry, err := reader.Next(context.Background())
 		require.NoError(t, err, "Next() should not fail for entry %d", i+1)
 		require.NotNil(t, entry)
 		assert.Equal(t, expected.SeqNum, entry.SeqNum)
@@ -102,7 +102,7 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 	}
 
 	// 5. Verify that the next call returns ErrNoNewEntries
-	_, err = reader.Next()
+	_, err = reader.Next(context.Background())
 	assert.ErrorIs(t, err, ErrNoNewEntries)
 }
 
@@ -123,29 +123,29 @@ func TestStreamReader_ReadsFromActiveSegment(t *testing.T) {
 	defer reader.Close()
 
 	// 3. Initially, there should be no entries
-	_, err = reader.Next()
+	_, err = reader.Next(context.Background())
 	require.ErrorIs(t, err, ErrNoNewEntries, "Should be no entries in a new WAL")
 
 	// 4. Append an entry to the active WAL
 	entry1 := core.WALEntry{Key: []byte("key1"), SeqNum: 1}
 	require.NoError(t, wal.Append(entry1))
 
-	// 5. The reader should still see no new entries because the segment is active
-	_, err = reader.Next()
-	require.ErrorIs(t, err, ErrNoNewEntries, "Should not read from active segment")
+	// 5. The reader should still see no new entries because the segment is active and we haven't switched to tailing mode yet.
+	_, err = reader.Next(context.Background())
+	require.ErrorIs(t, err, ErrNoNewEntries, "Should not read from active segment in catch-up mode")
 
 	// 6. Rotate the WAL to make the segment readable
 	require.NoError(t, wal.Rotate())
 
 	// 7. Now, the reader should be able to read the new entry
-	readEntry1, err := reader.Next()
+	readEntry1, err := reader.Next(context.Background())
 	require.NoError(t, err, "Should be able to read after rotation")
 	require.NotNil(t, readEntry1)
 	assert.Equal(t, entry1.SeqNum, readEntry1.SeqNum)
 	assert.Equal(t, entry1.Key, readEntry1.Key)
 
 	// 8. There should be no more entries
-	_, err = reader.Next()
+	_, err = reader.Next(context.Background())
 	require.ErrorIs(t, err, ErrNoNewEntries, "Should be no more entries after reading the first one")
 }
 
@@ -172,14 +172,14 @@ func TestStreamReader_Next_BlocksAndResumes(t *testing.T) {
 
 	// 3. Read all initial entries
 	for i := 0; i < len(initialEntries); i++ {
-		entry, err := reader.Next()
+		entry, err := reader.Next(context.Background())
 		require.NoError(t, err, "Failed to read initial entry %d", i)
 		require.NotNil(t, entry)
 		assert.Equal(t, initialEntries[i].SeqNum, entry.SeqNum)
 	}
 
-	// 4. The next call should indicate no new entries
-	_, err = reader.Next()
+	// 4. The next call should indicate no new entries, and the reader should switch to tailing mode internally.
+	_, err = reader.Next(context.Background())
 	require.ErrorIs(t, err, ErrNoNewEntries)
 
 	// 5. Append a new entry to the WAL while the reader is active
@@ -191,19 +191,19 @@ func TestStreamReader_Next_BlocksAndResumes(t *testing.T) {
 	}
 	require.NoError(t, wal.Append(newEntry))
 
-	// Force another rotation to make the newly appended entry readable by closing the active segment.
-	require.NoError(t, wal.Rotate())
-
-	// 6. The next call to Next() should now return the new entry
-	entry, err := reader.Next()
-	require.NoError(t, err, "Next() should have found the new entry after rotation")
+	// 6. The next call to Next() should now block, wait for the notification, and return the new entry.
+	entry, err := reader.Next(context.Background())
+	require.NoError(t, err, "Next() should have found the new entry from notification")
 	require.NotNil(t, entry)
 	assert.Equal(t, newEntry.SeqNum, entry.SeqNum)
 	assert.Equal(t, newEntry.Key, entry.Key)
 
-	// 7. And now it should be empty again
-	_, err = reader.Next()
-	require.ErrorIs(t, err, ErrNoNewEntries)
+	// 7. And now it should be waiting for the next notification.
+	// We can test this with a timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = reader.Next(ctx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded, "Next() should block waiting for new entries")
 }
 
 // TestStreamReader_ConcurrentRotation tests the reader's ability to handle
@@ -237,7 +237,7 @@ func TestStreamReader_ConcurrentRotation(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < totalEntriesToWrite; i++ {
-			entry, err := reader.Next()
+			entry, err := reader.Next(ctx)
 			// Check for cancellation signal from the main test goroutine.
 			select {
 			case <-ctx.Done():
@@ -245,7 +245,7 @@ func TestStreamReader_ConcurrentRotation(t *testing.T) {
 			default:
 			}
 			if err != nil {
-				if errors.Is(err, ErrNoNewEntries) {
+				if errors.Is(err, ErrNoNewEntries) || errors.Is(err, context.DeadlineExceeded) {
 					// This is expected, wait and retry
 					time.Sleep(10 * time.Millisecond)
 					i-- // Decrement counter to retry reading this entry index
@@ -286,7 +286,6 @@ WriterLoop:
 		}
 		writerErr = wal.Append(entry)
 		require.NoError(t, writerErr)
-		time.Sleep(2 * time.Millisecond) // Give the reader a chance to process
 	}
 	require.NoError(t, wal.Rotate()) // Final rotation to close the last segment
 
@@ -316,67 +315,58 @@ func TestStreamReader_EmptyWAL(t *testing.T) {
 	require.NoError(t, err)
 	defer reader.Close()
 
-	_, err = reader.Next()
+	_, err = reader.Next(context.Background())
 	assert.ErrorIs(t, err, ErrNoNewEntries)
 }
 
 // TestStreamReader_ContextCancellation tests that the reader stops when the context is cancelled.
-// This is a bit tricky to test directly as the current `Next()` implementation doesn't take a context.
-// The check happens in the gRPC server loop. This test will simulate that loop.
 func TestStreamReader_ContextCancellation(t *testing.T) {
 	tempDir := t.TempDir()
 	opts := testWALOptions(t, tempDir)
 
 	wal, _, err := Open(opts)
 	require.NoError(t, err)
-	defer wal.Close()
 
 	reader, err := wal.NewStreamReader(0)
 	require.NoError(t, err)
 	defer reader.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// To properly test cancellation of a *blocking* call, we must first
+	// get the reader into a state where it will block. This happens when it
+	// enters "tailing" mode. The current logic requires it to have read at least
+	// one segment before it will switch to tailing.
 
+	// 1. Write an entry and rotate to create a closed segment.
+	require.NoError(t, wal.Append(core.WALEntry{SeqNum: 1, Key: []byte("setup")}))
+	require.NoError(t, wal.Rotate())
+
+	// 2. Read the first entry to advance the reader past the closed segment.
+	_, err = reader.Next(context.Background())
+	require.NoError(t, err)
+
+	// 3. The next call should return ErrNoNewEntries and switch the reader to tailing mode.
+	_, err = reader.Next(context.Background())
+	require.ErrorIs(t, err, ErrNoNewEntries)
+
+	// 4. Now, the reader is in tailing mode. The next call to Next() will block.
+	// We can test cancellation on this blocking call.
+	ctx, cancelFunc := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
 
+	// This goroutine will call Next() and block, waiting for an entry.
 	go func() {
 		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				// Context was cancelled, exit the loop
-				return
-			default:
-				_, err := reader.Next()
-				if errors.Is(err, ErrNoNewEntries) {
-					// In a real scenario, we'd wait before retrying.
-					// For the test, a short sleep is fine.
-					time.Sleep(10 * time.Millisecond)
-					continue
-				}
-				// If we get a real error or a value, something is wrong with the test setup.
-				if err != nil {
-					t.Errorf("Unexpected error from reader.Next(): %v", err)
-				} else {
-					t.Error("Unexpectedly received an entry from the reader")
-				}
-				return
-			}
-		}
+		_, err = reader.Next(ctx)
+		assert.ErrorIs(t, err, context.Canceled, "Next() should return context.Canceled")
 	}()
 
-	// Let the goroutine run for a bit
+	// Let the goroutine start and block inside Next()
 	time.Sleep(50 * time.Millisecond)
 
-	// Cancel the context
-	cancel()
-
-	// Wait for the goroutine to finish
+	cancelFunc()
 	wg.Wait()
-
-	// If we reach here without the test timing out or erroring, it means
-	// the goroutine successfully exited upon context cancellation.
+	wal.Close()
 }
 
 func TestStreamReader_OpenSegmentError(t *testing.T) {
@@ -405,7 +395,7 @@ func TestStreamReader_OpenSegmentError(t *testing.T) {
 	require.NoError(t, os.Mkdir(segment1Path, 0755))
 
 	// Act: Call Next(), which should trigger openNextAvailableSegmentLocked and fail.
-	_, err = sr.Next()
+	_, err = sr.Next(context.Background())
 
 	// Assert: Check for a genuine error, not ErrNoNewEntries
 	require.Error(t, err, "Next() should return an error")

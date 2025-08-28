@@ -1,16 +1,17 @@
 package wal
 
 import (
+	"context"
+
 	"github.com/INLOpen/nexusbase/core"
 )
 
 // StreamReader defines the interface for reading WAL entries as a continuous stream.
 // This is designed for replication, where a follower needs to "tail" the leader's WAL.
 type StreamReader interface {
-	// Next returns the next available WAL entry. If no new entry is available,
-	// it should block or return a specific error (like ErrNoNewEntries) to indicate
-	// that the caller should retry.
-	Next() (*core.WALEntry, error)
+	// Next returns the next available WAL entry. It blocks until an entry is available,
+	// the reader is closed, or the provided context is canceled.
+	Next(ctx context.Context) (*core.WALEntry, error)
 	Close() error
 }
 
@@ -35,3 +36,4 @@ type WALInterface interface {
 	// from the entry immediately after the given sequence number.
 	NewStreamReader(fromSeqNum uint64) (StreamReader, error)
 }
+

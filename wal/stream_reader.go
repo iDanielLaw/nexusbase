@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,10 +12,9 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 )
 
-// ErrNoNewEntries is returned by StreamReader.Next() when it reaches the end
-// of the current active segment and no new entries have been written yet.
-// The caller should wait and retry.
-var ErrNoNewEntries = errors.New("no new WAL entries available")
+// ErrNoNewEntries is returned by StreamReader.Next() during catch-up mode when it reaches the end
+// of all closed segments. This is a signal to the caller to switch to tailing mode.
+var ErrNoNewEntries = errors.New("no new WAL entries available in closed segments")
 
 // streamReader implements the StreamReader interface.
 type streamReader struct {
@@ -24,101 +24,131 @@ type streamReader struct {
 	currentSegmentIndex  uint64
 	lastReadSeqNum       uint64
 
-	// entryBuffer holds entries from the last physical read to serve them one by one.
+	// entryBuffer holds entries from the last physical read or notification to serve them one by one.
 	entryBuffer []core.WALEntry
 	bufferIndex int
 
-	logger *slog.Logger
+	logger       *slog.Logger
+	registration *streamerRegistration
+	isTailing    bool // Flag to indicate if we are reading live entries via notification
 }
 
 // Next returns the next WAL entry from the stream.
-func (sr *streamReader) Next() (*core.WALEntry, error) {
-	// This method needs to be protected by the WAL's mutex because it accesses
-	// shared segment information and file handles.
-	sr.wal.mu.Lock()
-	defer sr.wal.mu.Unlock()
-
+func (sr *streamReader) Next(ctx context.Context) (*core.WALEntry, error) {
+	sr.logger.Debug("Next called", "isTailing", sr.isTailing, "bufferLen", len(sr.entryBuffer), "bufferIdx", sr.bufferIndex, "lastReadSeq", sr.lastReadSeqNum)
 	for {
+		// FIX: Check for cancellation at the start of every loop iteration.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			// Continue with the rest of the logic
+		}
+
 		// 1. Try to serve the next valid entry from the current buffer.
 		if sr.bufferIndex < len(sr.entryBuffer) {
 			entry := &sr.entryBuffer[sr.bufferIndex]
 			sr.bufferIndex++
+			sr.logger.Debug("Checking entry from buffer", "entrySeq", entry.SeqNum, "lastReadSeq", sr.lastReadSeqNum)
 			if entry.SeqNum > sr.lastReadSeqNum {
 				sr.lastReadSeqNum = entry.SeqNum
+				sr.logger.Debug("Serving entry from buffer", "seqNum", entry.SeqNum)
 				return entry, nil
 			}
-			// This entry was already seen (e.g., when starting from a specific SeqNum),
-			// so try the next one in the buffer.
-			continue
+			sr.logger.Debug("Skipping already seen entry in buffer", "seqNum", entry.SeqNum)
+			continue // Skip already seen entry
 		}
 
-		// 2. If the buffer is exhausted, reset it and prepare to read from disk.
+		// 2. If the buffer is exhausted, reset it.
 		sr.entryBuffer = nil
 		sr.bufferIndex = 0
 
-		// If there's no current segment reader, try to open one.
+		// 3. Decide whether to read from disk (catch-up) or wait for notification (tailing).
+		if sr.isTailing {
+			sr.logger.Debug("Stream reader is in tailing mode, waiting for notification...")
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case batch, ok := <-sr.registration.notifyC:
+				if !ok {
+					sr.logger.Info("Stream reader notification channel closed, ending stream.")
+					return nil, io.EOF
+				}
+				sr.logger.Info("Stream reader received notification", "entries", len(batch))
+				sr.entryBuffer = batch
+				continue // Restart loop to process the new buffer
+			}
+		}
+
+		// --- Catch-up Mode ---
+		sr.wal.mu.Lock()
+		sr.logger.Debug("In catch-up mode", "currentSegmentReader", sr.currentSegmentReader != nil)
 		if sr.currentSegmentReader == nil {
 			err := sr.openNextAvailableSegmentLocked()
 			if err != nil {
-				// If the helper function signals no new entries, propagate it.
+				sr.wal.mu.Unlock()
 				if errors.Is(err, ErrNoNewEntries) {
+					// If we have successfully read from at least one segment before (i.e., currentSegmentIndex > 0),
+					// it means we've finished the catch-up phase and should switch to tailing.
+					// If currentSegmentIndex is 0, it means we haven't even started, so we just
+					// report that there are no entries yet without changing state.
+					if sr.currentSegmentIndex > 0 {
+						sr.logger.Debug("Stream reader finished catch-up, switching to tailing mode.")
+						sr.isTailing = true
+					}
 					return nil, ErrNoNewEntries
 				}
-				// Otherwise, it's a real error.
 				return nil, fmt.Errorf("stream reader failed to open next segment: %w", err)
 			}
 		}
 
-		// Try to read the next record from the current segment.
 		recordData, err := sr.currentSegmentReader.ReadRecord()
+		sr.wal.mu.Unlock()
+
 		if err != nil {
-			// If we hit the end of the current segment file...
 			if err == io.EOF {
+				// We've successfully read a whole segment. This is a key part of the catch-up phase.
+				// The next iteration will attempt to open the next segment, and if that fails with
+				// ErrNoNewEntries, we'll know for sure that catch-up is complete.
+				sr.logger.Debug("EOF on segment, closing and moving to next", "segmentIndex", sr.currentSegmentIndex)
+				sr.wal.mu.Lock()
 				sr.currentSegmentReader.Close()
 				sr.currentSegmentReader = nil
-				// ...loop again to try opening the next segment.
+				sr.wal.mu.Unlock()
 				continue
 			}
-			// For any other read error, it's fatal for this stream.
 			return nil, fmt.Errorf("error reading WAL record from segment %d: %w", sr.currentSegmentIndex, err)
 		}
 
-		// We have a record, now decode the batch.
 		decodedEntries, err := decodeBatchRecord(recordData)
+		sr.logger.Debug("Decoded batch from segment", "segmentIndex", sr.currentSegmentIndex, "entryCount", len(decodedEntries), "error", err)
 		if err != nil {
 			return nil, fmt.Errorf("error decoding batch record from segment %d: %w", sr.currentSegmentIndex, err)
 		}
 		sr.entryBuffer = decodedEntries
-		// The loop will now restart and serve entries from the newly populated buffer.
 	}
 }
 
-// openNextAvailableSegmentLocked finds and opens the next *closed* segment file in sequence for reading.
+// openNextAvailableSegmentLocked finds and opens the next segment file for reading.
+// It will not open the currently active segment.
 // Must be called with the WAL lock held.
 func (sr *streamReader) openNextAvailableSegmentLocked() error {
 	var segmentToOpen uint64
 
 	if sr.currentSegmentIndex == 0 {
-		// First time opening. Find the first segment to read.
 		if len(sr.wal.segmentIndexes) > 0 {
 			segmentToOpen = sr.wal.segmentIndexes[0]
 		} else {
-			return ErrNoNewEntries // No segments exist at all.
+			return ErrNoNewEntries
 		}
 	} else {
-		// We have finished a previous segment, find the next one in the list.
 		nextKnownIndex := sr.findNextSegmentIndexLocked(sr.currentSegmentIndex)
 		if nextKnownIndex == 0 {
-			// We've read all known segments. There are no more closed segments to read.
 			return ErrNoNewEntries
 		}
 		segmentToOpen = nextKnownIndex
 	}
 
-	// CRITICAL CHECK: Do not attempt to open the segment that is currently active for writing.
-	// If the segment we are about to open is the active one, it means we have caught up
-	// to the writer. We must wait for it to be rotated and closed before we can read it safely.
-	// This prevents reading partially written records.
 	if segmentToOpen >= sr.wal.activeSegmentIndexLocked() {
 		return ErrNoNewEntries
 	}
@@ -126,15 +156,13 @@ func (sr *streamReader) openNextAvailableSegmentLocked() error {
 	path := filepath.Join(sr.wal.dir, core.FormatSegmentFileName(segmentToOpen))
 	reader, err := OpenSegmentForRead(path)
 	if err != nil {
-		// This could happen if a segment was purged between listing and opening.
-		// Treat it as if there are no new entries for now.
 		if os.IsNotExist(err) {
 			return ErrNoNewEntries
 		}
 		return err
 	}
 
-	sr.logger.Debug("Stream reader opening segment", "index", segmentToOpen)
+	sr.logger.Debug("Stream reader opening segment for catch-up", "index", segmentToOpen)
 	sr.currentSegmentReader = reader
 	sr.currentSegmentIndex = segmentToOpen
 	return nil
@@ -142,13 +170,6 @@ func (sr *streamReader) openNextAvailableSegmentLocked() error {
 
 // findNextSegmentIndexLocked finds the index of the next segment to read.
 func (sr *streamReader) findNextSegmentIndexLocked(currentIndex uint64) uint64 {
-	if currentIndex == 0 { // First call
-		if len(sr.wal.segmentIndexes) > 0 {
-			return sr.wal.segmentIndexes[0]
-		}
-		return 0
-	}
-	// Find the next index in the sorted list
 	for i, idx := range sr.wal.segmentIndexes {
 		if idx == currentIndex && i+1 < len(sr.wal.segmentIndexes) {
 			return sr.wal.segmentIndexes[i+1]
@@ -157,8 +178,13 @@ func (sr *streamReader) findNextSegmentIndexLocked(currentIndex uint64) uint64 {
 	return 0 // No next segment found
 }
 
-// Close releases resources held by the stream reader.
+// Close releases resources held by the stream reader and unregisters it from the WAL.
 func (sr *streamReader) Close() error {
+	sr.wal.unregisterStreamer(sr.registration)
+
+	sr.wal.mu.Lock()
+	defer sr.wal.mu.Unlock()
+
 	if sr.currentSegmentReader != nil {
 		return sr.currentSegmentReader.Close()
 	}
