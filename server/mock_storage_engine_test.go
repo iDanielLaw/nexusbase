@@ -7,6 +7,10 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/replication/proto"
+	"github.com/INLOpen/nexusbase/snapshot"
+	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/mock"
 )
@@ -21,6 +25,37 @@ type MockStorageEngine struct {
 
 // Ensure MockStorageEngine implements the interface.
 var _ engine.StorageEngineInterface = (*MockStorageEngine)(nil)
+
+// ReplaceWithSnapshot is a stub for testing purposes.
+func (m *MockStorageEngine) ReplaceWithSnapshot(snapshotDir string) error {
+	return nil
+}
+
+// GetWAL returns nil for testing purposes.
+func (m *MockStorageEngine) GetWAL() wal.WALInterface {
+	return nil
+}
+
+// GetStringStore returns nil for testing purposes.
+func (m *MockStorageEngine) GetStringStore() indexer.StringStoreInterface {
+	return nil
+}
+
+// GetSnapshotManager returns nil for testing purposes.
+func (m *MockStorageEngine) GetSnapshotManager() snapshot.ManagerInterface {
+	return nil
+}
+
+// GetLatestAppliedSeqNum returns a mock sequence number for replication tests.
+func (m *MockStorageEngine) GetLatestAppliedSeqNum() uint64 {
+	return 0
+}
+
+// ApplyReplicatedEntry is a mock implementation for replication tests.
+func (m *MockStorageEngine) ApplyReplicatedEntry(ctx context.Context, entry *proto.WALEntry) error {
+	args := m.Called(ctx, entry)
+	return args.Error(0)
+}
 
 func (m *MockStorageEngine) GetNextSSTableID() uint64 {
 	return m.nextId.Add(1)
