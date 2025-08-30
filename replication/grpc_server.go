@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/indexer"
@@ -183,41 +182,40 @@ func (s *Server) StreamWAL(req *pb.StreamWALRequest, stream pb.ReplicationServic
 	defer walReader.Close()
 
 	for {
-		select {
-		case <-ctx.Done():
-			// Client ยกเลิกการเชื่อมต่อ
-			s.logger.Info("Follower disconnected", "follower", followerAddr, "reason", ctx.Err())
-			return ctx.Err()
-		default:
-			// 2. อ่าน entry ถัดไปจาก WAL
-			entry, err := walReader.Next()
-			if err != nil {
-				if errors.Is(err, wal.ErrNoNewEntries) {
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-				if errors.Is(err, io.EOF) {
-					s.logger.Info("Reached end of WAL stream permanently.", "follower", followerAddr)
-					return nil // ปิด stream อย่างปกติ
-				}
-
-				s.logger.Error("Error reading from WAL for follower", "follower", followerAddr, "error", err)
-				return status.Errorf(codes.Internal, "error reading WAL: %v", err)
+		// 2. อ่าน entry ถัดไปจาก WAL
+		entry, err := walReader.Next(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				s.logger.Info("Follower disconnected", "follower", followerAddr, "reason", err)
+				return err // Return the actual context error
 			}
-
-			// 3. แปลง WAL entry ให้อยู่ในรูปแบบ Protobuf
-			protoEntry, err := s.convertWALEntryToProto(entry)
-			if err != nil {
-				s.logger.Error("Failed to convert WAL entry to protobuf message", "seq_num", entry.SeqNum, "error", err)
+			if errors.Is(err, wal.ErrNoNewEntries) {
+				// This error now simply signals the reader has finished catch-up and is switching to tailing mode.
+				// We can continue immediately to call Next() again, which will now block on the notification channel.
 				continue
 			}
-
-			// 4. ส่ง entry ผ่าน gRPC stream
-			if err := stream.Send(protoEntry); err != nil {
-				s.logger.Error("Failed to send WAL entry to follower", "follower", followerAddr, "error", err)
-				return err
+			if errors.Is(err, io.EOF) {
+				s.logger.Info("Reached end of WAL stream permanently.", "follower", followerAddr)
+				return nil // ปิด stream อย่างปกติ
 			}
+
+			s.logger.Error("Error reading from WAL for follower", "follower", followerAddr, "error", err)
+			return status.Errorf(codes.Internal, "error reading WAL: %v", err)
 		}
+
+		// 3. แปลง WAL entry ให้อยู่ในรูปแบบ Protobuf
+		protoEntry, err := s.convertWALEntryToProto(entry)
+		if err != nil {
+			s.logger.Error("Failed to convert WAL entry to protobuf message", "seq_num", entry.SeqNum, "error", err)
+			continue
+		}
+
+		// 4. ส่ง entry ผ่าน gRPC stream
+		if err := stream.Send(protoEntry); err != nil {
+			s.logger.Error("Failed to send WAL entry to follower", "follower", followerAddr, "error", err)
+			return err
+		}
+		s.logger.Info("Successfully sent WAL entry to follower", "seq_num", protoEntry.SequenceNumber, "follower", followerAddr)
 	}
 }
 

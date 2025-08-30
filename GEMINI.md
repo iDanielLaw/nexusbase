@@ -54,3 +54,8 @@
 ## Scope & Limitations:
 *   **Strengths:** The assistant excels at tasks related to the Go language and the specific domain of database engineering as outlined in the project's documentation. It can reason about the trade-offs and concepts discussed in documents like **`backup-vs-snapshot.md`**, **`failover-and-leader-election.md`**, and the **PALF paper (`replicated-wal-th.md`)**.
 *   **Limitations:** The assistant does not have access to your local development environment. It cannot run the code, execute tests, or access external services. All analysis is based on the code and context provided in the prompt. The final responsibility for verifying and testing the code lies with the developer.
+
+## File Access Overrides
+
+*   The `docs` directory contains important project documentation and should be accessed for context when needed, even though it is listed in `.gitignore`.
+*   To access its contents, file-system tools should be used with configurations that disable `.gitignore` filtering (e.g., `respect_git_ignore=False`).

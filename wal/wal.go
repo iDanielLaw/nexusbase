@@ -84,9 +84,14 @@ func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
 	w.streamers[id] = reg
 	w.logger.Info("New WAL stream reader registered", "streamer_id", id)
 
+	var lastReadSeqNum uint64
+	if fromSeqNum > 1 {
+		lastReadSeqNum = fromSeqNum - 1
+	}
+
 	sr := &streamReader{
 		wal:            w,
-		lastReadSeqNum: fromSeqNum, // A follower requesting from N needs to see N+1, so lastRead should be N.
+		lastReadSeqNum: lastReadSeqNum, // A follower requesting from N needs to see N, so lastRead should be N-1.
 		logger:         w.logger.With("component", "wal_stream_reader", "streamer_id", id),
 		registration:   reg,
 	}

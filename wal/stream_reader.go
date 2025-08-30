@@ -90,12 +90,10 @@ func (sr *streamReader) Next(ctx context.Context) (*core.WALEntry, error) {
 				if errors.Is(err, ErrNoNewEntries) {
 					// If we have successfully read from at least one segment before (i.e., currentSegmentIndex > 0),
 					// it means we've finished the catch-up phase and should switch to tailing.
-					// If currentSegmentIndex is 0, it means we haven't even started, so we just
-					// report that there are no entries yet without changing state.
-					if sr.currentSegmentIndex > 0 {
-						sr.logger.Debug("Stream reader finished catch-up, switching to tailing mode.")
-						sr.isTailing = true
-					}
+					// If we can't open a segment, it means we've read all the closed segments
+					// and should switch to tailing mode to wait for new entries from the active segment.
+					sr.logger.Debug("Stream reader finished catch-up, switching to tailing mode.")
+					sr.isTailing = true
 					return nil, ErrNoNewEntries
 				}
 				return nil, fmt.Errorf("stream reader failed to open next segment: %w", err)

@@ -129,6 +129,14 @@ type TracingConfig struct {
 	Protocol string `yaml:"protocol"` // "grpc" or "http"
 }
 
+// ReplicationConfig holds the configuration for the replication system.
+type ReplicationConfig struct {
+	Mode          string   `yaml:"mode"`           // "leader", "follower", or "disabled"
+	ListenAddress string   `yaml:"listen_address"` // Address for this node's gRPC service
+	Followers     []string `yaml:"followers"`      // List of follower addresses (for leader)
+	LeaderAddress string   `yaml:"leader_address"` // Address of the leader (for follower)
+}
+
 // Config is the top-level configuration struct.
 type Config struct {
 	Server         ServerConfig         `yaml:"server"`
@@ -139,6 +147,7 @@ type Config struct {
 	SelfMonitoring SelfMonitoringConfig `yaml:"self_monitoring"`
 	Tracing        TracingConfig        `yaml:"tracing"`
 	QueryServer    QueryServerConfig    `yaml:"query_server"`
+	Replication    ReplicationConfig    `yaml:"replication"`
 }
 
 // ParseDuration parses a duration string. Returns the default duration if the string is empty or invalid.
@@ -246,6 +255,12 @@ func Load(r io.Reader) (*Config, error) {
 			PProfEnabled:     true,
 			MetricsEnabled:   true,
 			MonitorUIEnabled: true,
+		},
+		Replication: ReplicationConfig{
+			Mode:          "disabled",
+			ListenAddress: ":50052",
+			Followers:     nil,
+			LeaderAddress: "",
 		},
 	}
 

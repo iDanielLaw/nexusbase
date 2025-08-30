@@ -25,17 +25,8 @@ func TestStreamReader_Next_Success(t *testing.T) {
 	wal, _, err := Open(opts)
 	require.NoError(t, err)
 
-	var allEntries []core.WALEntry
-	for i := 1; i <= 10; i++ {
-		entry := core.WALEntry{
-			EntryType: core.EntryTypePutEvent,
-			Key:       []byte(fmt.Sprintf("key-%d", i)),
-			Value:     []byte("some-value-to-ensure-rotation-happens-eventually"),
-			SeqNum:    uint64(i),
-		}
-		require.NoError(t, wal.Append(entry))
-		allEntries = append(allEntries, entry)
-	}
+	allEntries := createTestWALEntries(10, 1)
+	require.NoError(t, wal.AppendBatch(allEntries))
 	require.NoError(t, wal.Close())
 
 	// 2. Re-open the WAL to test reading from the created files
@@ -43,18 +34,14 @@ func TestStreamReader_Next_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer wal.Close()
 
-	// 3. Create a stream reader starting from the beginning
-	reader, err := wal.NewStreamReader(0)
+	// 3. Create a stream reader starting from the beginning (SeqNum 1)
+	reader, err := wal.NewStreamReader(1)
 	require.NoError(t, err)
 	defer reader.Close()
 
 	// 4. Read all entries and verify
 	for i, expected := range allEntries {
-		t.Logf("TestStreamReader_Next_Success: Reading entry %d (expected SeqNum %d)", i+1, expected.SeqNum)
 		entry, err := reader.Next(context.Background())
-		if err != nil {
-			t.Logf("TestStreamReader_Next_Success: reader.Next() returned error: %v", err)
-		}
 		require.NoError(t, err, "Next() should not fail for entry %d", i+1)
 		require.NotNil(t, entry)
 		assert.Equal(t, expected.SeqNum, entry.SeqNum)
@@ -72,7 +59,7 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 	tempDir := t.TempDir()
 	opts := testWALOptions(t, tempDir)
 
-	// 1. Create a WAL and write 10 entries
+	// 1. Create a WAL and write 10 entries, then close it to make them non-active
 	wal, _, err := Open(opts)
 	require.NoError(t, err)
 	allEntries := createTestWALEntries(10, 1)
@@ -84,18 +71,18 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 	require.NoError(t, err)
 	defer wal.Close()
 
-	// 3. Create a stream reader starting from sequence number 5
-	// It should start reading from SeqNum 6.
+	// 3. Create a stream reader starting from sequence number 5.
+	// It should return entries 5, 6, 7, 8, 9, 10.
 	startSeqNum := uint64(5)
 	reader, err := wal.NewStreamReader(startSeqNum)
 	require.NoError(t, err)
 	defer reader.Close()
 
 	// 4. Read the remaining entries and verify
-	for i := int(startSeqNum); i < len(allEntries); i++ {
+	for i := int(startSeqNum) - 1; i < len(allEntries); i++ {
 		expected := allEntries[i]
 		entry, err := reader.Next(context.Background())
-		require.NoError(t, err, "Next() should not fail for entry %d", i+1)
+		require.NoError(t, err, "Next() should not fail for expected entry %d", expected.SeqNum)
 		require.NotNil(t, entry)
 		assert.Equal(t, expected.SeqNum, entry.SeqNum)
 		assert.Equal(t, expected.Key, entry.Key)
@@ -104,49 +91,6 @@ func TestStreamReader_Next_StartFromMiddle(t *testing.T) {
 	// 5. Verify that the next call returns ErrNoNewEntries
 	_, err = reader.Next(context.Background())
 	assert.ErrorIs(t, err, ErrNoNewEntries)
-}
-
-// TestStreamReader_ReadsFromActiveSegment tests that the reader can stream entries
-// after a segment is rotated.
-func TestStreamReader_ReadsFromActiveSegment(t *testing.T) {
-	tempDir := t.TempDir()
-	opts := testWALOptions(t, tempDir)
-
-	// 1. Create a WAL
-	wal, _, err := Open(opts)
-	require.NoError(t, err)
-	defer wal.Close()
-
-	// 2. Create a stream reader
-	reader, err := wal.NewStreamReader(0)
-	require.NoError(t, err)
-	defer reader.Close()
-
-	// 3. Initially, there should be no entries
-	_, err = reader.Next(context.Background())
-	require.ErrorIs(t, err, ErrNoNewEntries, "Should be no entries in a new WAL")
-
-	// 4. Append an entry to the active WAL
-	entry1 := core.WALEntry{Key: []byte("key1"), SeqNum: 1}
-	require.NoError(t, wal.Append(entry1))
-
-	// 5. The reader should still see no new entries because the segment is active and we haven't switched to tailing mode yet.
-	_, err = reader.Next(context.Background())
-	require.ErrorIs(t, err, ErrNoNewEntries, "Should not read from active segment in catch-up mode")
-
-	// 6. Rotate the WAL to make the segment readable
-	require.NoError(t, wal.Rotate())
-
-	// 7. Now, the reader should be able to read the new entry
-	readEntry1, err := reader.Next(context.Background())
-	require.NoError(t, err, "Should be able to read after rotation")
-	require.NotNil(t, readEntry1)
-	assert.Equal(t, entry1.SeqNum, readEntry1.SeqNum)
-	assert.Equal(t, entry1.Key, readEntry1.Key)
-
-	// 8. There should be no more entries
-	_, err = reader.Next(context.Background())
-	require.ErrorIs(t, err, ErrNoNewEntries, "Should be no more entries after reading the first one")
 }
 
 // TestStreamReader_Next_BlocksAndResumes tests the "tailing" functionality of the stream reader.
@@ -165,8 +109,8 @@ func TestStreamReader_Next_BlocksAndResumes(t *testing.T) {
 	// Force a rotation so the initial entries are in a closed segment that the reader can access.
 	require.NoError(t, wal.Rotate())
 
-	// 2. Create a stream reader
-	reader, err := wal.NewStreamReader(0)
+	// 2. Create a stream reader starting from the beginning.
+	reader, err := wal.NewStreamReader(1)
 	require.NoError(t, err)
 	defer reader.Close()
 
@@ -189,14 +133,33 @@ func TestStreamReader_Next_BlocksAndResumes(t *testing.T) {
 		Value:     []byte("live-value"),
 		SeqNum:    uint64(len(initialEntries) + 1),
 	}
+
+	// Use a WaitGroup to ensure the reader is blocking before we write
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	var readEntry *core.WALEntry
+	var readErr error
+
+	go func() {
+		defer wg.Done()
+		// This call will block until the Append below happens.
+		readEntry, readErr = reader.Next(context.Background())
+	}()
+
+	// Give the reader goroutine a moment to start and block in Next()
+	time.Sleep(50 * time.Millisecond)
+
 	require.NoError(t, wal.Append(newEntry))
 
-	// 6. The next call to Next() should now block, wait for the notification, and return the new entry.
-	entry, err := reader.Next(context.Background())
-	require.NoError(t, err, "Next() should have found the new entry from notification")
-	require.NotNil(t, entry)
-	assert.Equal(t, newEntry.SeqNum, entry.SeqNum)
-	assert.Equal(t, newEntry.Key, entry.Key)
+	// Wait for the reader to finish processing the new entry
+	wg.Wait()
+
+	// 6. Check the results from the reader goroutine
+	require.NoError(t, readErr, "Next() should have found the new entry from notification")
+	require.NotNil(t, readEntry)
+	assert.Equal(t, newEntry.SeqNum, readEntry.SeqNum)
+	assert.Equal(t, newEntry.Key, readEntry.Key)
 
 	// 7. And now it should be waiting for the next notification.
 	// We can test this with a timeout.
@@ -219,7 +182,7 @@ func TestStreamReader_ConcurrentRotation(t *testing.T) {
 	defer wal.Close()
 
 	// Create a stream reader before any writes
-	reader, err := wal.NewStreamReader(0)
+	reader, err := wal.NewStreamReader(1)
 	require.NoError(t, err)
 	defer reader.Close()
 

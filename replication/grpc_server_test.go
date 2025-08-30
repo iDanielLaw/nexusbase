@@ -82,8 +82,8 @@ type MockStreamReader struct {
 	mock.Mock
 }
 
-func (m *MockStreamReader) Next() (*core.WALEntry, error) {
-	args := m.Called()
+func (m *MockStreamReader) Next(ctx context.Context) (*core.WALEntry, error) {
+	args := m.Called(ctx)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
@@ -400,8 +400,9 @@ func TestStreamWAL_Success(t *testing.T) {
 	}
 
 	mockWal.On("NewStreamReader", uint64(100)).Return(mockReader, nil)
-	mockReader.On("Next").Return(walEntry1, nil).Once().
-		On("Next").Return(nil, wal.ErrNoNewEntries) // This will now be AnyTimes() by default for subsequent calls
+	mockReader.On("Next", mock.Anything).Return(walEntry1, nil).Once()
+	mockReader.On("Next", mock.Anything).Return(nil, wal.ErrNoNewEntries).Once()
+	mockReader.On("Next", mock.Anything).Return(nil, context.DeadlineExceeded) // After the first two calls, it will always return timeout error.
 	mockReader.On("Close").Return(nil)
 	mockStream.On("Send", mock.Anything).Return(nil).Once()
 
@@ -441,7 +442,6 @@ func TestStreamWAL_Success(t *testing.T) {
 
 func TestStreamWAL_ErrorHandling(t *testing.T) {
 	server, mockWal, _ := setupServerTest(t)
-	mockReader := new(MockStreamReader)
 
 	t.Run("NewStreamReader fails", func(t *testing.T) {
 		expectedErr := errors.New("failed to create reader")
@@ -459,9 +459,10 @@ func TestStreamWAL_ErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Reader Next fails", func(t *testing.T) {
+		mockReader := new(MockStreamReader)
 		expectedErr := errors.New("failed to read from wal")
 		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
-		mockReader.On("Next").Return(nil, expectedErr).Once()
+		mockReader.On("Next", mock.Anything).Return(nil, expectedErr).Once()
 		mockReader.On("Close").Return(nil).Once()
 
 		mockStream := &MockStreamServer{ctx: context.Background()}
@@ -476,6 +477,7 @@ func TestStreamWAL_ErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Stream Send fails", func(t *testing.T) {
+		mockReader := new(MockStreamReader)
 		// Need a real entry for this test
 		_, _, stringStore := setupServerTest(t)
 		server.indexer = stringStore // Re-assign server with a fresh string store
@@ -484,7 +486,7 @@ func TestStreamWAL_ErrorHandling(t *testing.T) {
 
 		expectedErr := errors.New("network error")
 		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
-		mockReader.On("Next").Return(walEntry, nil).Once()
+		mockReader.On("Next", mock.Anything).Return(walEntry, nil).Once()
 		mockReader.On("Close").Return(nil).Once()
 
 		mockStream := &MockStreamServer{ctx: context.Background(), SentEntries: make(chan *pb.WALEntry, 1)}
@@ -497,7 +499,9 @@ func TestStreamWAL_ErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Context is canceled", func(t *testing.T) {
+		mockReader := new(MockStreamReader)
 		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
+		mockReader.On("Next", mock.Anything).Return(nil, context.Canceled).Once()
 		mockReader.On("Close").Return(nil).Once()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -510,6 +514,7 @@ func TestStreamWAL_ErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Conversion error skips entry", func(t *testing.T) {
+		mockReader := new(MockStreamReader)
 		_, _, stringStore := setupServerTest(t)
 		server.indexer = stringStore
 
@@ -520,9 +525,9 @@ func TestStreamWAL_ErrorHandling(t *testing.T) {
 		validEntry, _ := createTestWALEntry(t, stringStore, 2, "good.metric", map[string]string{"tag2": "value2"}, core.FieldValues{"value": pointValueValid})
 
 		mockWal.On("NewStreamReader", uint64(1)).Return(mockReader, nil).Once()
-		mockReader.On("Next").Return(malformedEntry, nil).Once()
-		mockReader.On("Next").Return(validEntry, nil).Once()
-		mockReader.On("Next").Return(nil, io.EOF).Once()
+		mockReader.On("Next", mock.Anything).Return(malformedEntry, nil).Once()
+		mockReader.On("Next", mock.Anything).Return(validEntry, nil).Once()
+		mockReader.On("Next", mock.Anything).Return(nil, io.EOF).Once()
 		mockReader.On("Close").Return(nil).Once()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
