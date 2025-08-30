@@ -287,8 +287,16 @@ func (a *WALApplier) processStream(ctx context.Context, stream pb.ReplicationSer
 		}
 
 		expectedSeqNum := a.engine.GetLatestAppliedSeqNum() + 1
-		if entry.GetSequenceNumber() != expectedSeqNum {
-			return fmt.Errorf("received out-of-order WAL entry: expected %d, got %d", expectedSeqNum, entry.GetSequenceNumber())
+		actualSeqNum := entry.GetSequenceNumber()
+
+		if actualSeqNum < expectedSeqNum {
+			a.logger.Warn("Received duplicate WAL entry, skipping", "expected", expectedSeqNum, "actual", actualSeqNum)
+			continue // idempotency: skip duplicate
+		}
+		if actualSeqNum > expectedSeqNum {
+			a.logger.Error("Gap detected in WAL stream", "expected", expectedSeqNum, "actual", actualSeqNum)
+			// Optionally: trigger recovery, alert, or pause
+			return fmt.Errorf("gap detected: expected %d, got %d", expectedSeqNum, actualSeqNum)
 		}
 
 		var applyErr error
@@ -299,7 +307,7 @@ func (a *WALApplier) processStream(ctx context.Context, stream pb.ReplicationSer
 			}
 			a.logger.Error("Failed to apply replicated entry, retrying...",
 				"error", applyErr,
-				"seq_num", entry.GetSequenceNumber(),
+				"seq_num", actualSeqNum,
 				"attempt", i+1,
 				"max_attempts", maxApplyRetries,
 			)
@@ -309,10 +317,10 @@ func (a *WALApplier) processStream(ctx context.Context, stream pb.ReplicationSer
 		if applyErr != nil {
 			a.logger.Error("Failed to apply replicated entry after multiple retries, stopping replication.",
 				"error", applyErr,
-				"seq_num", entry.GetSequenceNumber(),
+				"seq_num", actualSeqNum,
 			)
 			return fmt.Errorf("failed to apply replicated entry %d after %d retries: %w",
-				entry.GetSequenceNumber(), maxApplyRetries, applyErr)
+				actualSeqNum, maxApplyRetries, applyErr)
 		}
 	}
 }

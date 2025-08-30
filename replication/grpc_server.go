@@ -16,7 +16,10 @@ import (
 	pb "github.com/INLOpen/nexusbase/replication/proto"
 	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/wal"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -44,6 +47,15 @@ func NewServer(w wal.WALInterface, indexer *indexer.StringStore, snapshotMgr sna
 		snapshotDir: snapshotDir,
 		logger:      logger.With("component", "replication_grpc_server"),
 	}
+}
+
+// RegisterGRPCServer จะ register replication และ health service กับ gRPC server
+func RegisterGRPCServer(grpcServer *grpc.Server, srv *Server) {
+	pb.RegisterReplicationServiceServer(grpcServer, srv)
+	// Register health server
+	healthServer := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 }
 
 // GetLatestSnapshotInfo คืนค่า metadata ของ snapshot ล่าสุดที่มีอยู่
@@ -173,7 +185,6 @@ func (s *Server) StreamWAL(req *pb.StreamWALRequest, stream pb.ReplicationServic
 		"from_seq_num", req.GetFromSequenceNumber(),
 	)
 
-	// 1. สร้าง Reader สำหรับอ่าน WAL แบบ streaming
 	walReader, err := s.wal.NewStreamReader(req.GetFromSequenceNumber())
 	if err != nil {
 		s.logger.Error("Failed to create WAL stream reader", "error", err, "follower", followerAddr)
@@ -182,35 +193,33 @@ func (s *Server) StreamWAL(req *pb.StreamWALRequest, stream pb.ReplicationServic
 	defer walReader.Close()
 
 	for {
-		// 2. อ่าน entry ถัดไปจาก WAL
 		entry, err := walReader.Next(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				s.logger.Info("Follower disconnected", "follower", followerAddr, "reason", err)
-				return err // Return the actual context error
+				return err
 			}
 			if errors.Is(err, wal.ErrNoNewEntries) {
-				// This error now simply signals the reader has finished catch-up and is switching to tailing mode.
-				// We can continue immediately to call Next() again, which will now block on the notification channel.
-				continue
+				continue // tail mode, wait for new entries
 			}
 			if errors.Is(err, io.EOF) {
 				s.logger.Info("Reached end of WAL stream permanently.", "follower", followerAddr)
-				return nil // ปิด stream อย่างปกติ
+				return nil
 			}
-
 			s.logger.Error("Error reading from WAL for follower", "follower", followerAddr, "error", err)
 			return status.Errorf(codes.Internal, "error reading WAL: %v", err)
 		}
 
-		// 3. แปลง WAL entry ให้อยู่ในรูปแบบ Protobuf
 		protoEntry, err := s.convertWALEntryToProto(entry)
 		if err != nil {
 			s.logger.Error("Failed to convert WAL entry to protobuf message", "seq_num", entry.SeqNum, "error", err)
 			continue
 		}
 
-		// 4. ส่ง entry ผ่าน gRPC stream
+		// --- ปรับปรุง: ตรวจสอบ sequence number/idempotency/gap ---
+		// (สมมติว่ามี followerState ใน server เพื่อ track seqNum ต่อ follower)
+		// สามารถต่อยอด logic นี้ได้ตาม design ล่าสุด
+
 		if err := stream.Send(protoEntry); err != nil {
 			s.logger.Error("Failed to send WAL entry to follower", "follower", followerAddr, "error", err)
 			return err

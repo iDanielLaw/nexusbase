@@ -286,7 +286,7 @@ func TestWALApplier_HandlesOutOfOrderEntry(t *testing.T) {
 
 	mockServer.entries = []*pb.WALEntry{
 		newTestWALEntry(1, "metric1", 1000),
-		newTestWALEntry(3, "metric1", 3000), // Out-of-order
+		newTestWALEntry(3, "metric1", 3000), // Out-of-order (gap)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -301,7 +301,7 @@ func TestWALApplier_HandlesOutOfOrderEntry(t *testing.T) {
 		t.Fatal("timed out waiting for the first entry")
 	}
 
-	// The loop should be stopped by the critical out-of-order error.
+	// The loop should be stopped by the critical gap error.
 	select {
 	case applied := <-mockEngine.appliedCh:
 		t.Fatalf("received unexpected entry %d", applied.GetSequenceNumber())
