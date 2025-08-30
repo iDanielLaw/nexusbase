@@ -36,9 +36,9 @@ func (m *MockStorageEngine) GetWAL() wal.WALInterface {
 	return nil
 }
 
-// GetStringStore returns nil for testing purposes.
+// GetStringStore returns a dummy implementation for testing purposes.
 func (m *MockStorageEngine) GetStringStore() indexer.StringStoreInterface {
-	return nil
+	return &indexer.StringStore{} // Always return non-nil dummy object
 }
 
 // GetSnapshotManager returns nil for testing purposes.
@@ -288,3 +288,39 @@ func (m *MockQueryResultIterator) UnderlyingAt() (*core.IteratorNode, error) {
 	// Tests that need specific underlying data can extend this mock.
 	return nil, nil
 }
+
+// Dummy implementation for indexer.StringStoreInterface
+// Ensure only one definition exists in the test package
+// Add all required methods for the interface
+
+type dummyStringStore struct{}
+
+func (d *dummyStringStore) GetOrCreateID(s string) (uint64, error) {
+	return 0, nil
+}
+
+func (d *dummyStringStore) GetID(s string) (uint64, bool) {
+	return 0, false
+}
+
+func (d *dummyStringStore) Put(ctx context.Context, key string, value string) error {
+	return nil
+}
+
+func (d *dummyStringStore) Get(ctx context.Context, key string) (string, error) {
+	return "", nil
+}
+
+func (d *dummyStringStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (d *dummyStringStore) GetString(id uint64) (string, bool) {
+	return "", false
+}
+func (d *dummyStringStore) Sync() error                       { return nil }
+func (d *dummyStringStore) Close() error                      { return nil }
+func (d *dummyStringStore) LoadFromFile(dataDir string) error { return nil }
+
+// Ensure dummyStringStore implements indexer.StringStoreInterface
+var _ indexer.StringStoreInterface = (*dummyStringStore)(nil)
