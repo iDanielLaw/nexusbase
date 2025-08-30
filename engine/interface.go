@@ -76,4 +76,6 @@ type StorageEngineInterface interface {
 	GetWAL() wal.WALInterface
 	GetStringStore() indexer.StringStoreInterface
 	GetSnapshotManager() snapshot.ManagerInterface
+
+	GetSequenceNumber() uint64
 }

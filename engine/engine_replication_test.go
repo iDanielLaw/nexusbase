@@ -274,3 +274,136 @@ func (m *mockStorageEngine) wipeDataDirectory() error {
 }
 
 var _ = testLogger{} // silence unused warning
+
+func TestReplication_Integrated(t *testing.T) {
+	// สร้าง mock storage engine สำหรับ leader และ follower
+	leader := &mockStorageEngine{
+		storageEngine: &storageEngine{
+			metrics:         &EngineMetrics{},
+			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			stringStore:     &mockStringStore{},
+			seriesIDStore:   &mockSeriesIDStore{},
+			tagIndexManager: &mockTagIndexManager{},
+			activeSeries:    make(map[string]struct{}),
+			logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	leader.replicationMode = "leader"
+	leader.isStarted.Store(true)
+
+	follower := &mockStorageEngine{
+		storageEngine: &storageEngine{
+			metrics:         &EngineMetrics{},
+			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			stringStore:     &mockStringStore{},
+			seriesIDStore:   &mockSeriesIDStore{},
+			tagIndexManager: &mockTagIndexManager{},
+			activeSeries:    make(map[string]struct{}),
+			logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	follower.replicationMode = "follower"
+	follower.isStarted.Store(true)
+
+	// Leader สร้าง WAL entry
+	entry := &proto.WALEntry{
+		EntryType:      proto.WALEntry_PUT_EVENT,
+		SequenceNumber: 1,
+		Metric:         "cpu",
+		Tags:           map[string]string{"host": "A"},
+		Fields:         nil,
+		Timestamp:      1234567890,
+	}
+
+	// Leader apply entry (simulate write)
+	leader.putCalled = true // หรือใช้ method ที่เหมาะสมกับ leader
+
+	// Follower: apply replication
+	err := follower.ApplyReplicatedEntry(context.Background(), entry)
+	assert.NoError(t, err)
+	assert.True(t, follower.putCalled)
+
+	// ตรวจสอบ sequence number sync เฉพาะฝั่ง follower
+	assert.Equal(t, entry.SequenceNumber, follower.sequenceNumber.Load())
+
+	// สามารถเพิ่มกรณี integrated อื่น ๆ เช่น DELETE, RANGE, snapshot ได้
+}
+
+func TestReplication_E2E(t *testing.T) {
+	// 1. สร้าง leader/follower storage engine (ใช้ mock หรือจริง)
+	leader := &mockStorageEngine{
+		storageEngine: &storageEngine{
+			metrics:         &EngineMetrics{},
+			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			stringStore:     &mockStringStore{},
+			seriesIDStore:   &mockSeriesIDStore{},
+			tagIndexManager: &mockTagIndexManager{},
+			activeSeries:    make(map[string]struct{}),
+			logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	leader.replicationMode = "leader"
+	leader.isStarted.Store(true)
+
+	follower := &mockStorageEngine{
+		storageEngine: &storageEngine{
+			metrics:         &EngineMetrics{},
+			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			stringStore:     &mockStringStore{},
+			seriesIDStore:   &mockSeriesIDStore{},
+			tagIndexManager: &mockTagIndexManager{},
+			activeSeries:    make(map[string]struct{}),
+			logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	follower.replicationMode = "follower"
+	follower.isStarted.Store(true)
+
+	// 2. Leader สร้าง WAL entry (PUT)
+	entry := &proto.WALEntry{
+		EntryType:      proto.WALEntry_PUT_EVENT,
+		SequenceNumber: 1,
+		Metric:         "cpu",
+		Tags:           map[string]string{"host": "A"},
+		Fields:         nil,
+		Timestamp:      1234567890,
+	}
+
+	// 3. Leader เขียนข้อมูล (simulate)
+	leader.putCalled = true // หรือใช้ method ที่เหมาะสมกับ leader
+
+	// 4. ส่ง WAL entry ไป follower (simulate replication)
+	err := follower.ApplyReplicatedEntry(context.Background(), entry)
+	assert.NoError(t, err)
+	assert.True(t, follower.putCalled)
+
+	// 5. ตรวจสอบข้อมูล sync ระหว่าง leader/follower
+	assert.Equal(t, entry.SequenceNumber, follower.sequenceNumber.Load())
+
+	// 6. ทดสอบ DELETE replication
+	delEntry := &proto.WALEntry{
+		EntryType:      proto.WALEntry_DELETE_SERIES,
+		SequenceNumber: 2,
+		Metric:         "cpu",
+		Tags:           map[string]string{"host": "A"},
+	}
+	err = follower.ApplyReplicatedEntry(context.Background(), delEntry)
+	assert.NoError(t, err)
+	assert.True(t, follower.deleteSeriesCalled)
+
+	// 7. ทดสอบ RANGE replication
+	rangeEntry := &proto.WALEntry{
+		EntryType:      proto.WALEntry_DELETE_RANGE,
+		SequenceNumber: 3,
+		Metric:         "cpu",
+		Tags:           map[string]string{"host": "A"},
+		StartTime:      1234560000,
+		EndTime:        1234570000,
+	}
+	err = follower.ApplyReplicatedEntry(context.Background(), rangeEntry)
+	assert.NoError(t, err)
+	assert.True(t, follower.deleteRangeCalled)
+
+	// 8. ตรวจสอบ sequence number sync
+	assert.Equal(t, rangeEntry.SequenceNumber, follower.sequenceNumber.Load())
+}

@@ -35,7 +35,7 @@ import (
 )
 
 var (
-	ErrEngineClosed = errors.New("engine is closed or not started")
+	ErrEngineClosed         = errors.New("engine is closed or not started")
 	ErrEngineAlreadyStarted = errors.New("engine is already started")
 	ErrFlushInProgress      = errors.New("engine is inprogress flush")
 )
@@ -87,9 +87,9 @@ type StorageEngineOptions struct {
 	Logger                         *slog.Logger
 	Clock                          clock.Clock
 
-	SelfMonitoringEnabled    bool
-	SelfMonitoringPrefix     string
-	SelfMonitoringIntervalMs int
+	SelfMonitoringEnabled      bool
+	SelfMonitoringPrefix       string
+	SelfMonitoringIntervalMs   int
 	RelativeQueryRoundingRules []RoundingRule
 	CompactionFallbackStrategy levels.CompactionFallbackStrategy
 
@@ -102,15 +102,15 @@ type storageEngine struct {
 	opts StorageEngineOptions
 	mu   sync.RWMutex
 
-	nextSSTableID   atomic.Uint64
-	validator       *core.Validator
-	isStarted       atomic.Bool
-	isClosing       atomic.Bool
-	sequenceNumber  atomic.Uint64
-	replicationMode string
-	stateLoader     *StateLoader
-	serviceManager  *ServiceManager
-	mutableMemtable *memtable.Memtable
+	nextSSTableID                 atomic.Uint64
+	validator                     *core.Validator
+	isStarted                     atomic.Bool
+	isClosing                     atomic.Bool
+	sequenceNumber                atomic.Uint64
+	replicationMode               string
+	stateLoader                   *StateLoader
+	serviceManager                *ServiceManager
+	mutableMemtable               *memtable.Memtable
 	processImmutableMemtablesFunc func(writeCheckpoint bool)
 	triggerPeriodicFlushFunc      func()
 	syncMetadataFunc              func()

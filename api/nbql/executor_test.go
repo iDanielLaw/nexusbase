@@ -230,6 +230,11 @@ func (m *MockStorageEngine) GetSnapshotManager() snapshot.ManagerInterface {
 	return args.Get(0).(snapshot.ManagerInterface)
 }
 
+func (m *MockStorageEngine) GetSequenceNumber() uint64 {
+	args := m.Called()
+	return args.Get(0).(uint64)
+}
+
 func TestExecutor_SnapshotRestore(t *testing.T) {
 	ctx := context.Background()
 
