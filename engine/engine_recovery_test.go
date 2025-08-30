@@ -20,7 +20,7 @@ func init() {
 
 func TestWALRecovery_Successful(t *testing.T) {
 	tempDir := t.TempDir()
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.DataDir = tempDir
 
 	// Data points to be written

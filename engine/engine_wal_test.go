@@ -162,7 +162,7 @@ func TestStorageEngine_WALRecovery_AdvancedCorruption(t *testing.T) {
 	// setupWALWithData creates a WAL file with known content by running an engine and crashing it.
 	setupWALWithData := func(t *testing.T, dir string, entries []testDataPoint) (StorageEngineOptions, string) {
 		t.Helper()
-		opts := getBaseOptsForFlushTest(t) // Use the helper to get standard options
+		opts := GetBaseOptsForTest(t, "test")
 		opts.DataDir = dir
 		opts.WALSyncMode = core.WALSyncAlways // Ensure data is on disk
 

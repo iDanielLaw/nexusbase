@@ -136,7 +136,7 @@ func setupServiceManagerTest(t *testing.T, opts StorageEngineOptions) (*storageE
 }
 
 func TestServiceManager_StartAndStop(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	eng, sm := setupServiceManagerTest(t, opts)
 
 	// Create and assign mocks
@@ -182,7 +182,7 @@ func TestServiceManager_StartAndStop(t *testing.T) {
 }
 
 func TestServiceManager_FlushLoop(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.MemtableFlushIntervalMs = 50 // 50ms interval for testing
 
 	eng, sm := setupServiceManagerTest(t, opts)
@@ -224,7 +224,7 @@ func TestServiceManager_FlushLoop(t *testing.T) {
 }
 
 func TestServiceManager_MetadataSyncLoop(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.MetadataSyncIntervalSeconds = 1 // 1 second interval for testing
 
 	eng, sm := setupServiceManagerTest(t, opts)

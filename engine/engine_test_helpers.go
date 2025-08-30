@@ -15,9 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// getBaseOptsForFlushTest returns a standard set of options for various tests.
+// GetBaseOptsForTest returns a standard set of options for various tests.
 // It creates a new temp directory for each call to ensure test isolation.
-func getBaseOptsForFlushTest(t *testing.T) StorageEngineOptions {
+func GetBaseOptsForTest(t *testing.T, prefix string) StorageEngineOptions {
 	t.Helper()
 	return StorageEngineOptions{
 		DataDir:                      t.TempDir(),
@@ -33,10 +33,10 @@ func getBaseOptsForFlushTest(t *testing.T) StorageEngineOptions {
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
 		WALSyncMode:                  core.WALSyncDisabled, // Faster for tests
 		CompactionIntervalSeconds:    3600,                 // Disable auto-compaction for most tests
-		Metrics:                      NewEngineMetrics(false, "test_"),
+		Metrics:                      NewEngineMetrics(false, prefix),
 		Logger:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Clock:                        clock.SystemClockDefault,
-		SelfMonitoringEnabled:        true,
+		SelfMonitoringEnabled:        false,
 		SelfMonitoringPrefix:         "__",
 		SelfMonitoringIntervalMs:     1000,
 		CompactionTombstoneWeight:    1.5,

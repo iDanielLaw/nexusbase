@@ -12,7 +12,7 @@ import (
 )
 
 func TestMetadataHooks(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
 	require.NoError(t, engine.Start())

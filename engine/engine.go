@@ -35,27 +35,22 @@ import (
 )
 
 var (
-	// ErrEngineClosed is returned when an operation is attempted on a closed or not-yet-started engine.
 	ErrEngineClosed = errors.New("engine is closed or not started")
-	// ErrEngineAlreadyStarted is returned when Start() is called on an already running engine.
 	ErrEngineAlreadyStarted = errors.New("engine is already started")
 	ErrFlushInProgress      = errors.New("engine is inprogress flush")
 )
 
-// RoundingRule defines a rule for rounding relative query time ranges for caching.
 type RoundingRule struct {
-	// If the query duration is less than or equal to this threshold, the rule applies.
 	QueryDurationThreshold time.Duration
 	RoundingDuration       time.Duration
 }
 
-// StorageEngineOptions holds configuration for the StorageEngine.
 type StorageEngineOptions struct {
 	DataDir                        string
 	MemtableThreshold              int64
-	MemtableFlushIntervalMs        int // New: Interval for periodic memtable flushes (in milliseconds)
+	MemtableFlushIntervalMs        int
 	BlockCacheCapacity             int
-	L0CompactionTriggerSize        int64 // New: Size-based trigger for L0 compaction
+	L0CompactionTriggerSize        int64
 	WriteBufferSize                int
 	Metrics                        *EngineMetrics
 	MaxL0Files                     int
@@ -67,57 +62,55 @@ type StorageEngineOptions struct {
 	BloomFilterFalsePositiveRate   float64
 	SSTableDefaultBlockSize        int
 	InitialSequenceNumber          uint64
-	CheckpointIntervalSeconds      int // New: Interval for periodic durable checkpoints
+	CheckpointIntervalSeconds      int
 	TracerProvider                 trace.TracerProvider
-	TestingOnlyFailFlushCount      *atomic.Int32 // For testing: number of times flush should fail before succeeding.
+	TestingOnlyFailFlushCount      *atomic.Int32
 	ErrorOnSSTableLoadFailure      bool
 	SSTableCompressor              core.Compressor
-	TestingOnlyInjectWALCloseError error // For testing purposes, allows injection of errors during WAL close or recover
+	TestingOnlyInjectWALCloseError error
 	WALSyncMode                    core.WALSyncMode
 	WALBatchSize                   int
 	WALFlushIntervalMs             int
-	WALPurgeKeepSegments           int // New: Number of WAL segments to keep behind the last checkpointed one.
+	WALPurgeKeepSegments           int
 	WALMaxSegmentSize              int64
 	RetentionPeriod                string
-	MetadataSyncIntervalSeconds    int  // Interval for periodic metadata persistence
-	EnableTagBloomFilter           bool // Enable bloom filter for tag values
+	MetadataSyncIntervalSeconds    int
+	EnableTagBloomFilter           bool
 	IndexMemtableThreshold         int64
 	IndexFlushIntervalMs           int
 	IndexCompactionIntervalSeconds int
 	IndexMaxL0Files                int
 	IndexMaxLevels                 int
 	IndexBaseTargetSize            int64
-	CompactionTombstoneWeight      float64 // New: Weight for tombstone score
-	CompactionOverlapWeight        float64 // New: Weight for overlap penalty
+	CompactionTombstoneWeight      float64
+	CompactionOverlapWeight        float64
 	Logger                         *slog.Logger
-	Clock                          clock.Clock // Clock interface for testing, defaults to SystemClock
+	Clock                          clock.Clock
 
 	SelfMonitoringEnabled    bool
 	SelfMonitoringPrefix     string
 	SelfMonitoringIntervalMs int
-	// Rules for rounding relative query time ranges for caching. Must be sorted by QueryDurationThreshold.
 	RelativeQueryRoundingRules []RoundingRule
 	CompactionFallbackStrategy levels.CompactionFallbackStrategy
 
-	// New fields for Intra-L0 Compaction
-	IntraL0CompactionTriggerFiles     int   // Number of small files in L0 to trigger an intra-L0 compaction.
-	IntraL0CompactionMaxFileSizeBytes int64 // Max size of a file to be considered for intra-L0 compaction.
+	IntraL0CompactionTriggerFiles     int
+	IntraL0CompactionMaxFileSizeBytes int64
+	ReplicationMode                   string
 }
 
-// storageEngine is the main struct that manages the LSM-tree components.
 type storageEngine struct {
 	opts StorageEngineOptions
 	mu   sync.RWMutex
 
 	nextSSTableID   atomic.Uint64
 	validator       *core.Validator
-	isStarted       atomic.Bool // Tracks if the engine has been started
-	isClosing       atomic.Bool // Prevents concurrent Close calls
+	isStarted       atomic.Bool
+	isClosing       atomic.Bool
 	sequenceNumber  atomic.Uint64
-	stateLoader     *StateLoader    // New: Handles loading state from disk
-	serviceManager  *ServiceManager // New: Manages background services
+	replicationMode string
+	stateLoader     *StateLoader
+	serviceManager  *ServiceManager
 	mutableMemtable *memtable.Memtable
-	// For testing override, bool indicates if checkpoint should be written
 	processImmutableMemtablesFunc func(writeCheckpoint bool)
 	triggerPeriodicFlushFunc      func()
 	syncMetadataFunc              func()
@@ -125,11 +118,11 @@ type storageEngine struct {
 
 	wal           wal.WALInterface
 	levelsManager levels.Manager
-	blockCache    cache.Interface // Shared cache for data blocks
+	blockCache    cache.Interface
 	compactor     CompactionManagerInterface
 
 	flushChan      chan struct{}
-	forceFlushChan chan chan error // New channel for synchronous flush requests
+	forceFlushChan chan chan error
 	shutdownChan   chan struct{}
 	wg             sync.WaitGroup
 	logger         *slog.Logger
@@ -140,8 +133,8 @@ type storageEngine struct {
 	sstDir           string
 	dlqDir           string
 	snapshotsBaseDir string
-	seriesLogFile    sys.FileInterface // New: File handle for the series log
-	seriesLogMu      sync.Mutex        // New: Mutex to protect writes to the series log
+	seriesLogFile    sys.FileInterface
+	seriesLogMu      sync.Mutex
 	activeSeries     map[string]struct{}
 	stringStore      indexer.StringStoreInterface
 	activeSeriesMu   sync.RWMutex
@@ -157,32 +150,27 @@ type storageEngine struct {
 
 	seriesIDStore   indexer.SeriesIDStoreInterface
 	engineStartTime time.Time
-	bitmapCache     cache.Interface // Cache for Roaring Bitmaps
-	pubsub          PubSubInterface // For real-time subscriptions
+	bitmapCache     cache.Interface
+	pubsub          PubSubInterface
 	metrics         *EngineMetrics
-	hookManager     hooks.HookManager // NEW: Hook manager
+	hookManager     hooks.HookManager
 
 	internalFile internalFileManage
 
 	clock clock.Clock
 
-	// test internal only
 	setCompactorFactory func(StorageEngineOptions, *storageEngine) (CompactionManagerInterface, error)
 	putBatchInterceptor func(ctx context.Context, points []core.DataPoint) error
 }
 
 var _ StorageEngineInterface = (*storageEngine)(nil)
 
-// NewStorageEngine initializes and returns a new StorageEngine.
 func NewStorageEngine(opts StorageEngineOptions) (engine StorageEngineInterface, err error) {
 	concreteEngine, err := initializeStorageEngine(opts)
 	return concreteEngine, err
 }
 
 func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, err error) {
-	// Defer the cleanup function. It will check if `err` is non-nil upon returning from this function.
-	// This ensures that if any part of the initialization fails, all successfully initialized
-	// components are cleaned up properly.
 	defer func() {
 		if err != nil && engine != nil {
 			engine.CleanupEngine()
@@ -205,20 +193,21 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 
 	if opts.BloomFilterFalsePositiveRate < 0 || opts.BloomFilterFalsePositiveRate > 1 {
 		logger.Warn("BloomFilter False Positive Rate must be between 0 and 1. Defaulting to 0.01.")
-		opts.BloomFilterFalsePositiveRate = 0.01 // Set Default
+		opts.BloomFilterFalsePositiveRate = 0.01
 	}
 
 	concreteEngine := &storageEngine{
 		validator:          core.NewValidator(),
 		opts:               opts,
-		immutableMemtables: make([]*memtable.Memtable, 0), // Corrected initialization
-		flushChan:          make(chan struct{}, 1),        // For async flushes from Put
-		forceFlushChan:     make(chan chan error),         // For sync flushes, unbuffered
+		replicationMode:    opts.ReplicationMode,
+		immutableMemtables: make([]*memtable.Memtable, 0),
+		flushChan:          make(chan struct{}, 1),
+		forceFlushChan:     make(chan chan error),
 		shutdownChan:       make(chan struct{}),
 		engineStartTime:    clk.Now(),
 		activeSeries:       make(map[string]struct{}),
 		deletedSeries:      make(map[string]uint64),
-		pubsub:             NewPubSub(), // Initialize PubSub
+		pubsub:             NewPubSub(),
 		rangeTombstones:    make(map[string][]core.RangeTombstone),
 		logger:             logger,
 		metrics:            opts.Metrics,
@@ -237,7 +226,6 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		concreteEngine.tracer = noop.NewTracerProvider().Tracer("")
 	}
 
-	// Initialize bitmap cache and stores before other components
 	concreteEngine.hookManager = hooks.NewHookManager(logger.With("component", "HookManager"))
 	concreteEngine.stringStore = indexer.NewStringStore(logger.With("sub_component", "StringStore"), concreteEngine.hookManager)
 	concreteEngine.bitmapCache = cache.NewLRUCache(opts.BlockCacheCapacity, nil, nil, nil)
@@ -247,11 +235,9 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		concreteEngine.opts.SSTableCompressor = &compressors.NoCompressionCompressor{}
 	}
 
-	// Create the state loader and service manager AFTER all options have been defaulted.
 	concreteEngine.stateLoader = NewStateLoader(concreteEngine)
 	concreteEngine.serviceManager = NewServiceManager(concreteEngine)
 
-	// Set default implementations for function fields, allowing tests to override them.
 	concreteEngine.processImmutableMemtablesFunc = concreteEngine.processImmutableMemtables
 	concreteEngine.triggerPeriodicFlushFunc = concreteEngine.triggerPeriodicFlush
 	concreteEngine.syncMetadataFunc = concreteEngine.syncMetadata
@@ -259,36 +245,28 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 	concreteEngine.sstDir = filepath.Join(opts.DataDir, "sst")
 	concreteEngine.dlqDir = filepath.Join(opts.DataDir, "dlq")
 	concreteEngine.snapshotsBaseDir = filepath.Join(opts.DataDir, "snapshots")
-	// Initialize directories first, as other components depend on them.
 	if err = concreteEngine.initializeDirectories(); err != nil {
 		err = fmt.Errorf("failed to initialize directories: %w", err)
-		engine = concreteEngine // Assign to return var for cleanup
+		engine = concreteEngine
 		return
 	}
 
-	// Initialize the snapshot manager, passing the engine itself as the provider.
 	concreteEngine.snapshotManager = snapshot.NewManager(concreteEngine)
 
-	return concreteEngine, nil // Return the concrete type which satisfies the interface
+	return concreteEngine, nil
 }
 
-// Start starts the background processes of the storage engine
 func (e *storageEngine) Start() error {
-	// --- Pre-Start Hook ---
-	// Runs before the Engine starts loading files and various components.
 	if err := e.hookManager.Trigger(context.Background(), hooks.NewPreStartEngineEvent()); err != nil {
 		return fmt.Errorf("engine start cancelled by pre-hook: %w", err)
 	}
 
-	// Use CompareAndSwap to ensure Start is only executed once while the engine is not running.
 	if !e.isStarted.CompareAndSwap(false, true) {
 		return ErrEngineAlreadyStarted
 	}
-	// Reset the closing flag in case a previous Close() failed partway.
 	e.isClosing.Store(false)
 
-	// Initialize mutable memtable after series ID store is ready
-	testFilePath := filepath.Join(e.opts.DataDir, ".writable_test") // Check writability early
+	testFilePath := filepath.Join(e.opts.DataDir, ".writable_test")
 	if testFile, testErr := os.Create(testFilePath); testErr != nil {
 		e.logger.Error("Data directory is not writable.", "path", e.opts.DataDir, "error", testErr)
 		return fmt.Errorf("data directory %s is not writable: %w", e.opts.DataDir, testErr)
@@ -297,7 +275,6 @@ func (e *storageEngine) Start() error {
 		_ = os.Remove(testFilePath)
 	}
 
-	// --- Initialize components that were previously in initializeStorageEngine ---
 	e.initializeMetrics()
 	if err := e.initializeLSMTreeComponents(); err != nil {
 		e.logger.Error("NewStorageEngine failed during initializeLSMTreeComponents.", "error", err)
@@ -306,15 +283,12 @@ func (e *storageEngine) Start() error {
 	if err := e.initializeTagIndexManager(); err != nil {
 		return fmt.Errorf("failed to initialize tag index manager: %w", err)
 	}
-	// --- End of moved block ---
 
-	// --- Phase 2: Load all state from disk using the StateLoader ---
 	if err := e.stateLoader.Load(); err != nil {
 		e.logger.Error("Failed to load engine state.", "error", err)
-		return err // The loader will have logged more specific errors.
+		return err
 	}
 
-	// --- Phase 3: Open series log for appending ---
 	seriesLogPath := filepath.Join(e.opts.DataDir, "series.log")
 	seriesFile, err := e.internalFile.OpenFile(seriesLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -324,8 +298,6 @@ func (e *storageEngine) Start() error {
 	e.serviceManager.Start()
 	e.logger.Info("StorageEngine background services started.", "data_dir", e.opts.DataDir)
 
-	// --- Post-Start Hook ---
-	// ทำงานหลังจากที่ Engine พร้อมใช้งานแล้ว
 	e.hookManager.Trigger(context.Background(), hooks.NewPostStartEngineEvent())
 
 	return nil
@@ -333,114 +305,88 @@ func (e *storageEngine) Start() error {
 
 func (e *storageEngine) GetNextSSTableID() uint64 {
 	if err := e.CheckStarted(); err != nil {
-		// This indicates a severe logic error in the engine's lifecycle management.
-		// A component is trying to get a new file ID when the engine is not running.
-		// This should not happen in a correctly functioning system. Panicking makes
-		// this unrecoverable error loud and clear, preventing silent data corruption.
 		panic(fmt.Errorf("GetNextSSTableID called on a non-running engine: %w", err))
 	}
-	// เพิ่มค่าและคืนค่าใหม่แบบ Atomic เพื่อให้แน่ใจว่าได้ ID ที่ไม่ซ้ำกันเสมอ
-	// ในการเริ่มต้นเอนจิน ควรจะเริ่มต้น nextSSTableID ด้วยค่าที่มากกว่า ID สูงสุดของ SSTable ที่มีอยู่แล้ว
-	// แต่สำหรับตอนนี้ การเพิ่มจาก 0 หรือ 1 ก็จะช่วยแก้ปัญหาการชนกันในกรณีทดสอบได้
-	return e.nextSSTableID.Add(1) // This is now safe due to the checkStarted() call
+	return e.nextSSTableID.Add(1)
 }
 
-// initializeDirectories creates the necessary data and DLQ directories.
 func (e *storageEngine) initializeDirectories() error {
 	if e.opts.DataDir == "" {
 		return fmt.Errorf("data directory must be specified")
 	}
 
-	// Explicitly check if the path exists and is a file (not a directory)
 	info, err := os.Stat(e.opts.DataDir)
 	if err == nil {
 		if !info.IsDir() {
 			return fmt.Errorf("data directory %s exists but is not a directory", e.opts.DataDir)
 		}
 	} else if !os.IsNotExist(err) {
-		// Some other error occurred while stat-ing the path
 		return fmt.Errorf("failed to stat data directory %s: %w", e.opts.DataDir, err)
 	}
-	if err := os.MkdirAll(e.opts.DataDir, 0755); err != nil { // Create base data directory
+	if err := os.MkdirAll(e.opts.DataDir, 0755); err != nil {
 		e.logger.Error("failed to create data directory", "path", e.opts.DataDir, "error", err)
 		return fmt.Errorf("failed to create data directory %s: %w", e.opts.DataDir, err)
 	}
-	if err := os.MkdirAll(e.sstDir, 0755); err != nil { // Create sst subdirectory
+	if err := os.MkdirAll(e.sstDir, 0755); err != nil {
 		e.logger.Error("failed to create sst directory", "path", e.sstDir, "error", err)
 		return fmt.Errorf("failed to create sst directory %s: %w", e.sstDir, err)
 	}
-	if err := os.MkdirAll(e.dlqDir, 0755); err != nil { // Create DLQ subdirectory
+	if err := os.MkdirAll(e.dlqDir, 0755); err != nil {
 		e.logger.Error("failed to create DLQ directory", "path", e.dlqDir, "error", err)
 		return fmt.Errorf("failed to create DLQ directory %s: %w", e.dlqDir, err)
 	}
-	if err := os.MkdirAll(e.snapshotsBaseDir, 0755); err != nil { // Create snapshots subdirectory
+	if err := os.MkdirAll(e.snapshotsBaseDir, 0755); err != nil {
 		e.logger.Error("failed to create snapshots base directory", "path", e.snapshotsBaseDir, "error", err)
 		return fmt.Errorf("failed to create snapshots base directory %s: %w", e.snapshotsBaseDir, err)
 	}
 	return nil
 }
 
-// CleanupEngine safely closes and releases resources held by the StorageEngine.
-// It's intended to be called in error paths of NewStorageEngine to prevent resource leaks
-// if initialization fails partway through.
 func (e *storageEngine) CleanupEngine() {
 	e.logger.Info("Cleaning up engine resources after initialization failure...")
 
-	// Stop compactor if it was started (it handles its own wg)
 	if e.compactor != nil {
 		e.compactor.Stop()
 	}
-	// Stop the tag index manager
 	if e.tagIndexManager != nil {
 		e.tagIndexManager.Stop()
 	}
-	// Close the series ID store to release its file handle.
 	if e.seriesIDStore != nil {
 		e.seriesIDStore.Close()
 	}
 	if e.stringStore != nil {
 		e.stringStore.Close()
 	}
-	// Close other components that might have been opened
 	e.closeWAL()
 	e.closeSSTables()
 	e.shutdownTracer()
 }
 
-// Close gracefully shuts down the StorageEngine.
 func (e *storageEngine) Close() error {
-	// Check if started and not already closing.
 	if !e.isStarted.Load() {
 		e.logger.Info("Close called on a non-running or already closed engine.")
 		return nil
 	}
-	// --- Pre-Close Hook ---
-	// ทำงานก่อนที่ Engine จะเริ่มกระบวนการปิดตัว
 	if err := e.hookManager.Trigger(context.Background(), hooks.NewPreCloseEngineEvent()); err != nil {
 		return fmt.Errorf("engine close cancelled by pre-hook: %w", err)
 	}
 
-	// Atomically set the isClosing flag to prevent concurrent Close calls.
 	if !e.isClosing.CompareAndSwap(false, true) {
 		e.logger.Info("Close operation already in progress.")
-		return nil // Another goroutine is already closing.
+		return nil
 	}
 
-	// 1. Stop all background services and wait for them to finish.
 	if e.serviceManager != nil {
 		e.serviceManager.Stop()
 	}
 
-	// Stop the hook manager and wait for async listeners
 	if e.hookManager != nil {
 		e.hookManager.Stop()
 	}
 
-	// 2. Now that all background activity is stopped, flush any remaining memtables.
 	var closeErr error
 	closeErr = errors.Join(closeErr, e.flushRemainingMemtables())
 	closeErr = errors.Join(closeErr, e.seriesIDStore.Close())
-	// NEW: Write final checkpoint after all data is flushed and before WAL is closed.
 	if e.wal != nil {
 		lastFlushedSegment := e.wal.ActiveSegmentIndex()
 		if lastFlushedSegment > 0 {
@@ -449,12 +395,10 @@ func (e *storageEngine) Close() error {
 				e.logger.Error("Failed to write final checkpoint during close.", "error", writeErr)
 				closeErr = errors.Join(closeErr, writeErr)
 			} else {
-				// Purge after successful checkpoint, respecting safety margin
 				e.purgeWALSegments(lastFlushedSegment)
 			}
 		}
 	}
-	// Close the series log file
 	if e.seriesLogFile != nil {
 		e.seriesLogFile.Close()
 		e.seriesLogFile = nil
@@ -464,15 +408,10 @@ func (e *storageEngine) Close() error {
 	closeErr = errors.Join(closeErr, e.shutdownTracer())
 
 	if closeErr != nil {
-		// The error from errors.Join is already well-formatted.
-		// We wrap it for additional context.
 		return fmt.Errorf("errors during close: %w", closeErr)
 	}
 
-	// Finally, mark the engine as fully stopped.
 	e.isStarted.Store(false)
-	// --- Post-Close Hook ---
-	// ทำงานหลังจากที่ Engine ปิดตัวลงอย่างสมบูรณ์
 	e.hookManager.Trigger(context.Background(), hooks.NewPostCloseEngineEvent())
 
 	e.logger.Info("Shutdown complete.")
@@ -486,11 +425,7 @@ func (e *storageEngine) CheckStarted() error {
 	return nil
 }
 
-// wipeDataDirectory removes all engine-managed files and subdirectories from the data directory.
-// This is a helper function for the restore process.
 func (e *storageEngine) wipeDataDirectory() error {
-	// List of directories and files to remove.
-	// We don't remove the top-level data directory itself, just its contents.
 	itemsToRemove := []string{
 		e.sstDir,
 		e.dlqDir,
@@ -502,10 +437,9 @@ func (e *storageEngine) wipeDataDirectory() error {
 		filepath.Join(e.opts.DataDir, "series.log"),
 		filepath.Join(e.opts.DataDir, "deleted_series.json"),
 		filepath.Join(e.opts.DataDir, "range_tombstones.json"),
-		filepath.Join(e.opts.DataDir, "tag_index"), // The directory for the tag index
+		filepath.Join(e.opts.DataDir, "tag_index"),
 	}
 
-	// Also remove any MANIFEST files.
 	files, err := filepath.Glob(filepath.Join(e.opts.DataDir, "MANIFEST*"))
 	if err != nil {
 		return fmt.Errorf("failed to glob for manifest files to wipe: %w", err)
@@ -515,7 +449,6 @@ func (e *storageEngine) wipeDataDirectory() error {
 	var firstErr error
 	for _, itemPath := range itemsToRemove {
 		if err := os.RemoveAll(itemPath); err != nil {
-			// Log the error but continue trying to remove other items.
 			e.logger.Warn("Failed to remove item during data wipe.", "path", itemPath, "error", err)
 			if firstErr == nil {
 				firstErr = err
@@ -523,7 +456,6 @@ func (e *storageEngine) wipeDataDirectory() error {
 		}
 	}
 
-	// Re-create the essential directories after wiping.
 	if err := e.initializeDirectories(); err != nil {
 		return fmt.Errorf("failed to re-initialize directories after wipe: %w", err)
 	}
@@ -531,7 +463,6 @@ func (e *storageEngine) wipeDataDirectory() error {
 	return firstErr
 }
 
-// CopyFile copies a file from src to dst.
 func CopyFile(src, dst string) error {
 	sourceFileStat, err := os.Stat(src)
 	if err != nil {
@@ -560,141 +491,123 @@ func CopyFile(src, dst string) error {
 	return nil
 }
 
-// initializeMetrics sets up the engine's metrics instance.
 func (e *storageEngine) initializeMetrics() {
 	if e.metrics == nil {
 		e.metrics = NewEngineMetrics(true, "engine_")
-
-		histMapsToInit := []*expvar.Map{
-			e.metrics.PutLatencyHist, e.metrics.GetLatencyHist, e.metrics.DeleteLatencyHist,
-			e.metrics.RangeScanLatencyHist, e.metrics.AggregationQueryLatencyHist,
-		}
-		for _, m := range histMapsToInit {
-			m.Set("count", new(expvar.Int))
-			m.Set("sum", new(expvar.Float))
-			for _, b := range latencyBuckets {
-				m.Set(fmt.Sprintf("le_%.3f", b), new(expvar.Int))
-			}
-			m.Set("le_inf", new(expvar.Int))
-		}
 	}
 
-	// The `expvar.Func` metrics need to be published regardless of whether
-	// the main metrics struct was injected or created here.
-	publishExpvarFunc("engine_cache_hit_rate", func() interface{} {
-		if e.blockCache == nil {
-			return 0.0
-		}
-		return e.blockCache.GetHitRate()
-	})
-	publishExpvarFunc("engine_mutable_memtable_size_bytes", func() interface{} {
-		e.mu.RLock()
-		defer e.mu.RUnlock()
-		if e.mutableMemtable == nil {
-			return 0
-		}
-		return e.mutableMemtable.Size()
-	})
-	publishExpvarFunc("engine_active_time_series_count", func() interface{} {
-		e.activeSeriesMu.RLock()
-		defer e.activeSeriesMu.RUnlock()
-		return len(e.activeSeries)
-	})
-	publishExpvarFunc("engine_immutable_memtables_count", func() interface{} {
-		e.mu.RLock()
-		defer e.mu.RUnlock()
-		return len(e.immutableMemtables)
-	})
-	publishExpvarFunc("engine_immutable_memtables_total_size_bytes", func() interface{} {
-		e.mu.RLock()
-		defer e.mu.RUnlock()
-		var totalSize int64
-		for _, mt := range e.immutableMemtables {
-			if mt != nil {
-				totalSize += mt.Size()
+	if e.metrics.PublishedGlobally {
+		publishExpvarFunc("engine_cache_hit_rate", func() interface{} {
+			if e.blockCache == nil {
+				return 0.0
 			}
-		}
-		return totalSize
-	})
-	for i := 0; i < e.opts.MaxLevels; i++ {
-		levelNum := i
-		publishExpvarFunc(fmt.Sprintf("engine_level_%d_table_count", levelNum), func() interface{} {
-			if e.levelsManager == nil {
-				return 0
-			}
-			return len(e.levelsManager.GetTablesForLevel(levelNum))
+			return e.blockCache.GetHitRate()
 		})
-		publishExpvarFunc(fmt.Sprintf("engine_level_%d_size_bytes", levelNum), func() interface{} {
-			if e.levelsManager == nil {
+		publishExpvarFunc("engine_mutable_memtable_size_bytes", func() interface{} {
+			e.mu.RLock()
+			defer e.mu.RUnlock()
+			if e.mutableMemtable == nil {
 				return 0
 			}
-			return e.levelsManager.GetTotalSizeForLevel(levelNum)
+			return e.mutableMemtable.Size()
+		})
+		publishExpvarFunc("engine_active_time_series_count", func() interface{} {
+			e.activeSeriesMu.RLock()
+			defer e.activeSeriesMu.RUnlock()
+			return len(e.activeSeries)
+		})
+		publishExpvarFunc("engine_immutable_memtables_count", func() interface{} {
+			e.mu.RLock()
+			defer e.mu.RUnlock()
+			return len(e.immutableMemtables)
+		})
+		publishExpvarFunc("engine_immutable_memtables_total_size_bytes", func() interface{} {
+			e.mu.RLock()
+			defer e.mu.RUnlock()
+			var totalSize int64
+			for _, mt := range e.immutableMemtables {
+				if mt != nil {
+					totalSize += mt.Size()
+				}
+			}
+			return totalSize
+		})
+		for i := 0; i < e.opts.MaxLevels; i++ {
+			levelNum := i
+			publishExpvarFunc(fmt.Sprintf("engine_level_%d_table_count", levelNum), func() interface{} {
+				if e.levelsManager == nil {
+					return 0
+				}
+				return len(e.levelsManager.GetTablesForLevel(levelNum))
+			})
+			publishExpvarFunc(fmt.Sprintf("engine_level_%d_size_bytes", levelNum), func() interface{} {
+				if e.levelsManager == nil {
+					return 0
+				}
+				return e.levelsManager.GetTotalSizeForLevel(levelNum)
+			})
+		}
+		publishExpvarFunc("engine_ingestion_rate_points_per_second", func() interface{} {
+			if e.metrics.PutTotal == nil || e.engineStartTime.IsZero() {
+				return 0.0
+			}
+			durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
+			if durationSeconds == 0 {
+				return 0.0
+			}
+			return float64(e.metrics.PutTotal.Value()) / durationSeconds
+		})
+		publishExpvarFunc("engine_queries_per_second", func() interface{} {
+			if e.metrics.QueryTotal == nil || e.engineStartTime.IsZero() {
+				return 0.0
+			}
+			durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
+			if durationSeconds == 0 {
+				return 0.0
+			}
+			return float64(e.metrics.QueryTotal.Value()) / durationSeconds
+		})
+		publishExpvarFunc("engine_buffer_pool_hits_total", func() any {
+			h, _, _, _ := core.BufferPool.GetMetrics()
+			return h
+		})
+		publishExpvarFunc("engine_buffer_pool_misses_total", func() any {
+			_, m, _, _ := core.BufferPool.GetMetrics()
+			return m
+		})
+		publishExpvarFunc("engine_buffer_pool_created_total", func() any {
+			_, _, c, _ := core.BufferPool.GetMetrics()
+			return c
+		})
+		publishExpvarFunc("engine_buffer_pool_size_bytes", func() any {
+			_, _, _, s := core.BufferPool.GetMetrics()
+			return s
+		})
+		publishExpvarFunc("engine_memtable_key_pool_hits_total", func() any {
+			h, _, _ := memtable.KeyPool.GetMetrics()
+			return h
+		})
+		publishExpvarFunc("engine_memtable_key_pool_misses_total", func() any {
+			_, m, _ := memtable.KeyPool.GetMetrics()
+			return m
+		})
+		publishExpvarFunc("engine_memtable_key_pool_size", func() any {
+			_, _, s := memtable.KeyPool.GetMetrics()
+			return s
+		})
+		publishExpvarFunc("engine_memtable_entry_pool_hits_total", func() any {
+			h, _, _ := memtable.EntryPool.GetMetrics()
+			return h
+		})
+		publishExpvarFunc("engine_memtable_entry_pool_misses_total", func() any {
+			_, m, _ := memtable.EntryPool.GetMetrics()
+			return m
+		})
+		publishExpvarFunc("engine_memtable_entry_pool_size", func() any {
+			_, _, s := memtable.EntryPool.GetMetrics()
+			return s
 		})
 	}
-	publishExpvarFunc("engine_ingestion_rate_points_per_second", func() interface{} {
-		if e.metrics.PutTotal == nil || e.engineStartTime.IsZero() {
-			return 0.0
-		}
-		durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
-		if durationSeconds == 0 {
-			return 0.0
-		}
-		return float64(e.metrics.PutTotal.Value()) / durationSeconds
-	})
-	publishExpvarFunc("engine_queries_per_second", func() interface{} {
-		if e.metrics.QueryTotal == nil || e.engineStartTime.IsZero() {
-			return 0.0
-		}
-		durationSeconds := e.clock.Now().Sub(e.engineStartTime).Seconds()
-		if durationSeconds == 0 {
-			return 0.0
-		}
-		return float64(e.metrics.QueryTotal.Value()) / durationSeconds
-	})
-
-	// --- Pool Metrics (as individual funcs for live data) ---
-	publishExpvarFunc("engine_buffer_pool_hits_total", func() any {
-		h, _, _, _ := core.BufferPool.GetMetrics()
-		return h
-	})
-	publishExpvarFunc("engine_buffer_pool_misses_total", func() any {
-		_, m, _, _ := core.BufferPool.GetMetrics()
-		return m
-	})
-	publishExpvarFunc("engine_buffer_pool_created_total", func() any {
-		_, _, c, _ := core.BufferPool.GetMetrics()
-		return c
-	})
-	publishExpvarFunc("engine_buffer_pool_size_bytes", func() any {
-		_, _, _, s := core.BufferPool.GetMetrics()
-		return s
-	})
-
-	// --- Memtable Pool Metrics (as individual funcs) ---
-	publishExpvarFunc("engine_memtable_key_pool_hits_total", func() any {
-		h, _, _ := memtable.KeyPool.GetMetrics()
-		return h
-	})
-	publishExpvarFunc("engine_memtable_key_pool_misses_total", func() any {
-		_, m, _ := memtable.KeyPool.GetMetrics()
-		return m
-	})
-	publishExpvarFunc("engine_memtable_key_pool_size", func() any {
-		_, _, s := memtable.KeyPool.GetMetrics()
-		return s
-	})
-	publishExpvarFunc("engine_memtable_entry_pool_hits_total", func() any {
-		h, _, _ := memtable.EntryPool.GetMetrics()
-		return h
-	})
-	publishExpvarFunc("engine_memtable_entry_pool_misses_total", func() any {
-		_, m, _ := memtable.EntryPool.GetMetrics()
-		return m
-	})
-	publishExpvarFunc("engine_memtable_entry_pool_size", func() any {
-		_, _, s := memtable.EntryPool.GetMetrics()
-		return s
-	})
 
 	e.metrics.activeSeriesCountFunc = func() interface{} {
 		e.activeSeriesMu.RLock()
@@ -727,17 +640,12 @@ func (e *storageEngine) initializeMetrics() {
 	}
 }
 
-// initializeLSMTreeComponents sets up memtables, block cache, levels manager, and compaction manager.
 func (e *storageEngine) initializeLSMTreeComponents() error {
 	e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
-	// The cache will store *bytes.Buffer objects from a pool.
-	// We provide callbacks to return buffers to the pool and to trigger hooks.
 	onEvictedWithHook := func(key string, value interface{}) {
-		// Return buffer to pool
 		if buf, ok := value.(*bytes.Buffer); ok {
 			core.BufferPool.Put(buf)
 		}
-		// Trigger eviction hook
 		e.hookManager.Trigger(context.Background(), hooks.NewOnCacheEvictionEvent(hooks.CachePayload{Key: key}))
 	}
 	onHitWithHook := func(key string) {
@@ -753,7 +661,6 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 		onHitWithHook,
 		onMissWithHook,
 	)
-	// Wire up the engine's metrics to the cache instance.
 	if e.metrics != nil && e.metrics.CacheHits != nil && e.metrics.CacheMisses != nil {
 		if cacheWithMetrics, ok := e.blockCache.(interface {
 			SetMetrics(*expvar.Int, *expvar.Int)
@@ -777,19 +684,18 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 
 	if e.setCompactorFactory == nil {
 		cmParams := CompactionManagerParams{
-			Engine:  e, // Pass the engine instance itself
+			Engine:  e,
 			DataDir: e.sstDir,
 			Opts: CompactionOptions{
 				MaxL0Files:                 e.opts.MaxL0Files,
-				L0CompactionTriggerSize:    e.opts.L0CompactionTriggerSize, // Pass the new option
+				L0CompactionTriggerSize:    e.opts.L0CompactionTriggerSize,
 				TargetSSTableSize:          e.opts.TargetSSTableSize,
 				LevelsTargetSizeMultiplier: e.opts.LevelsTargetSizeMultiplier,
 				CompactionIntervalSeconds:  e.opts.CompactionIntervalSeconds,
-				MaxConcurrentLNCompactions: e.opts.MaxConcurrentLNCompactions, // Default value, can be made configurable
+				MaxConcurrentLNCompactions: e.opts.MaxConcurrentLNCompactions,
 				SSTableCompressor:          e.opts.SSTableCompressor,
 				RetentionPeriod:            e.opts.RetentionPeriod,
 
-				// Pass Intra-L0 compaction options to the compactor
 				IntraL0CompactionTriggerFiles:     e.opts.IntraL0CompactionTriggerFiles,
 				IntraL0CompactionMaxFileSizeBytes: e.opts.IntraL0CompactionMaxFileSizeBytes,
 			},
@@ -799,14 +705,13 @@ func (e *storageEngine) initializeLSMTreeComponents() error {
 			IsSeriesDeleted:      e.isSeriesDeleted,
 			IsRangeDeleted:       e.isCoveredByRangeTombstone,
 			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
-			Metrics:              e.metrics,    // Pass the engine's metrics instance
-			BlockCache:           e.blockCache, // Pass the block cache
-			FileRemover:          nil,          // Use default real file remover
-			SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) { // This is the default factory that creates real SSTableWriters.
-				// Tests can override this in their CompactionManagerParams.
+			Metrics:              e.metrics,
+			BlockCache:           e.blockCache,
+			FileRemover:          nil,
+			SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) {
 				return sstable.NewSSTableWriter(opts)
 			},
-			ShutdownChan: e.shutdownChan, // Pass the engine's shutdown channel
+			ShutdownChan: e.shutdownChan,
 		}
 
 		cm, cmErr := NewCompactionManager(cmParams)
@@ -859,8 +764,6 @@ func (e *storageEngine) initializeTagIndexManager() error {
 	return err
 }
 
-// GetWALPath returns the file path of the WAL.
-// This is primarily for testing purposes.
 func (e *storageEngine) GetWALPath() string {
 	if err := e.CheckStarted(); err != nil {
 		return ""
@@ -871,17 +774,14 @@ func (e *storageEngine) GetWALPath() string {
 	return e.wal.Path()
 }
 
-// GetWAL return the wal object.
 func (e *storageEngine) GetWAL() wal.WALInterface {
 	return e.wal
 }
 
-// GetSnapshotsBaseDir returns the base directory path for storing snapshots.
 func (e *storageEngine) GetSnapshotsBaseDir() string {
 	return e.snapshotsBaseDir
 }
 
-// GetDLQDir returns the directory path for the Dead Letter Queue.
 func (e *storageEngine) GetDLQDir() string {
 	return e.dlqDir
 }
@@ -894,12 +794,10 @@ func getTableIDs(tables []*sstable.SSTable) []uint64 {
 	return ids
 }
 
-// realFileRemover is a concrete implementation of FileRemover using os.Remove.
 type realFileRemover struct{}
 
 func (r *realFileRemover) Remove(name string) error { return os.Remove(name) }
 
-// closeWAL closes the Write-Ahead Log file. This is a helper for Close() and CleanupEngine().
 func (e *storageEngine) closeWAL() error {
 	if e.wal == nil {
 		return nil
@@ -916,7 +814,6 @@ func (e *storageEngine) closeWAL() error {
 	return closeErr
 }
 
-// closeSSTables closes all SSTable files managed by the LevelsManager. This is a helper for Close() and CleanupEngine().
 func (e *storageEngine) closeSSTables() error {
 	if e.levelsManager == nil {
 		return nil
@@ -930,7 +827,6 @@ func (e *storageEngine) closeSSTables() error {
 	return err
 }
 
-// shutdownTracer shuts down the OpenTelemetry tracer provider if it supports it. This is a helper for Close() and CleanupEngine().
 func (e *storageEngine) shutdownTracer() error {
 	if e.tracerProvider != nil {
 		if tp, ok := e.tracerProvider.(interface{ Shutdown(context.Context) error }); ok {
@@ -961,7 +857,6 @@ func (e *storageEngine) VerifyDataConsistency() []error {
 	return allErrors
 }
 
-// GetDataDir returns the data directory path used by the StorageEngine.
 func (e *storageEngine) GetDataDir() string {
 	if e == nil || e.opts.DataDir == "" {
 		return ""
@@ -973,7 +868,6 @@ func (e *storageEngine) GetHookManager() hooks.HookManager {
 	return e.hookManager
 }
 
-// GetPubSub returns the PubSub instance for the engine.
 func (e *storageEngine) GetPubSub() (PubSubInterface, error) {
 	if err := e.CheckStarted(); err != nil {
 		return nil, err
@@ -981,15 +875,12 @@ func (e *storageEngine) GetPubSub() (PubSubInterface, error) {
 	return e.pubsub, nil
 }
 
-// TriggerCompaction manually signals the compaction manager to check for and
-// potentially start a compaction cycle.
 func (e *storageEngine) TriggerCompaction() {
 	if e.compactor != nil {
 		e.compactor.Trigger()
 	}
 }
 
-// Metrics returns the Metrics instance for the engine.
 func (e *storageEngine) Metrics() (*EngineMetrics, error) {
 	if err := e.CheckStarted(); err != nil {
 		return nil, err
@@ -999,4 +890,8 @@ func (e *storageEngine) Metrics() (*EngineMetrics, error) {
 
 func (e *storageEngine) GetFileManage() internalFileManage {
 	return e.internalFile
+}
+
+func (e *storageEngine) GetSnapshotManager() snapshot.ManagerInterface {
+	return e.snapshotManager
 }

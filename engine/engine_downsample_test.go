@@ -15,7 +15,7 @@ func init() {
 }
 
 func TestStorageEngine_Query_MultiFieldDownsample(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = engine.Start()

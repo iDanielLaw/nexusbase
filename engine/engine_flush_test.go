@@ -161,7 +161,7 @@ func TestStorageEngine_PeriodicFlush_SizeTriggerFirst(t *testing.T) {
 // TestStorageEngine_TriggerPeriodicFlush unit tests the triggerPeriodicFlush function directly.
 func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 	// Common setup for a "bare" engine, without starting background loops.
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 
 	t.Run("Success_MutableHasData_ImmutableIsEmpty", func(t *testing.T) {
 		// Create a minimal engine for this test, without calling NewStorageEngine
@@ -274,7 +274,7 @@ func TestStorageEngine_TriggerPeriodicFlush(t *testing.T) {
 func TestStorageEngine_MoveToDLQ(t *testing.T) {
 	t.Run("Success_WithData", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		eng := setupEngineForFlushTest(t, opts)
 
 		mem := memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault)
@@ -311,7 +311,7 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 
 	t.Run("Success_EmptyMemtable", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		eng := setupEngineForFlushTest(t, opts)
 		mem := memtable.NewMemtable(opts.MemtableThreshold, clock.SystemClockDefault)
 
@@ -333,7 +333,7 @@ func TestStorageEngine_MoveToDLQ(t *testing.T) {
 
 	t.Run("Failure_DLQDirNotConfigured", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		eng := setupEngineForFlushTest(t, opts)
 		eng.dlqDir = "" // Manually un-configure the DLQ directory
 
@@ -395,7 +395,7 @@ func setupEngineForFlushTest(t *testing.T, opts StorageEngineOptions) *storageEn
 func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 	t.Run("Success_FirstTry", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		eng := setupEngineForFlushTest(t, opts)
 		// Create a valid TSDB key using the engine's own string store.
 		// This makes the test more realistic and ensures internal key parsing works.
@@ -417,7 +417,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 
 	t.Run("Success_AfterOneRetry", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		opts.TestingOnlyFailFlushCount = new(atomic.Int32)
 		opts.TestingOnlyFailFlushCount.Store(1) // Fail once
 		eng := setupEngineForFlushTest(t, opts)
@@ -441,7 +441,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 
 	t.Run("Failure_MovesToDLQ", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		opts.TestingOnlyFailFlushCount = new(atomic.Int32)
 		opts.TestingOnlyFailFlushCount.Store(maxFlushRetries) // Fail all 3 times
 		eng := setupEngineForFlushTest(t, opts)
@@ -469,7 +469,7 @@ func TestStorageEngine_ProcessImmutableMemtables(t *testing.T) {
 
 	t.Run("Failure_RequeuedOnShutdown", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		opts.TestingOnlyFailFlushCount = new(atomic.Int32)
 		opts.TestingOnlyFailFlushCount.Store(5) // Fail more than max retries to ensure it stays in retry loop
 		eng := setupEngineForFlushTest(t, opts)
@@ -505,7 +505,7 @@ func Test_flushMemtableToL0SSTable_Helper(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("Success", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		eng := setupEngineForFlushTest(t, opts) // This helper gives us a quiescent engine
 
 		// Create and populate a memtable
@@ -548,7 +548,7 @@ func Test_flushMemtableToL0SSTable_Helper(t *testing.T) {
 	})
 
 	t.Run("EmptyMemtable", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		eng := setupEngineForFlushTest(t, opts)
 
 		mem := memtable.NewMemtable(opts.MemtableThreshold, eng.clock)
@@ -568,7 +568,7 @@ func Test_flushMemtableToL0SSTable_Helper(t *testing.T) {
 }
 
 func TestStorageEngine_SyncMetadata(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	eng := setupEngineForFlushTest(t, opts)
 
 	// Add some data to make the manifest non-trivial
@@ -609,7 +609,7 @@ func TestStorageEngine_SyncMetadata(t *testing.T) {
 }
 
 func TestStorageEngine_FlushRemainingMemtables(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	eng := setupEngineForFlushTest(t, opts)
 
 	// Setup: One immutable memtable and one non-empty mutable memtable
@@ -690,7 +690,7 @@ func TestStorageEngine_PurgeWALSegments(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := getBaseOptsForFlushTest(t)
+			opts := GetBaseOptsForTest(t, "test")
 			eng, _ := setupServiceManagerTest(t, opts) // Use a lighter setup
 			mockW := &mockWAL{}
 			eng.wal = mockW // Inject the mock

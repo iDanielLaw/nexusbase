@@ -170,7 +170,7 @@ func TestStorageEngine_PutBatch(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("SuccessfulBatchPut", func(t *testing.T) { // Re-use helper from flush test
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -212,7 +212,7 @@ func TestStorageEngine_PutBatch(t *testing.T) {
 	})
 
 	t.Run("EmptyBatch", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -229,7 +229,7 @@ func TestStorageEngine_PutBatch(t *testing.T) {
 	})
 
 	t.Run("BatchWithInvalidPoint", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -272,7 +272,7 @@ func TestStorageEngine_PutBatch(t *testing.T) {
 	})
 
 	t.Run("BatchWithHooks", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -320,7 +320,7 @@ func TestStorageEngine_PutBatch(t *testing.T) {
 	})
 
 	t.Run("BatchWithWALError", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -371,7 +371,7 @@ func TestStorageEngine_PutBatch(t *testing.T) {
 
 func TestStorageEngine_DeleteSeries(t *testing.T) {
 	// This test now uses a real engine, so we don't need the mock helper.
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	eng, err := NewStorageEngine(opts)
 	if err != nil {
 		t.Fatalf("NewStorageEngine failed: %v", err)
@@ -418,7 +418,7 @@ func TestStorageEngine_DeleteSeries(t *testing.T) {
 }
 
 func TestStorageEngine_DeletesByTimeRange(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	if err != nil {
 		t.Fatalf("NewStorageEngine failed: %v", err)
@@ -525,7 +525,7 @@ func TestStorageEngine_DeletesByTimeRange(t *testing.T) {
 }
 
 func TestStorageEngine_GetSeriesByTags(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.SelfMonitoringEnabled = false // Disable for this test to avoid interference
 	engine, err := NewStorageEngine(opts)
 	if err != nil {
@@ -767,7 +767,7 @@ func TestStorageEngine_GetSeriesByTags(t *testing.T) {
 }
 
 func TestStorageEngine_Query(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	if err != nil {
 		t.Fatalf("NewStorageEngine failed: %v", err)
@@ -858,7 +858,7 @@ func TestStorageEngine_Query(t *testing.T) {
 }
 
 func TestStorageEngine_Query_WithAggregation(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	if err != nil {
 		t.Fatalf("NewStorageEngine failed: %v", err)
@@ -982,7 +982,7 @@ func TestStorageEngine_Query_WithAggregation(t *testing.T) {
 }
 
 func TestStorageEngine_AggregationQueryLatencyMetric(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.Metrics = NewEngineMetrics(false, "agglatency_tsdb_")
 
 	engine, err := NewStorageEngine(opts)
@@ -1067,7 +1067,7 @@ func TestStorageEngine_AggregationQueryLatencyMetric(t *testing.T) {
 
 // TestStorageEngine_Query_MultiSeries tests querying data that spans multiple series matching the query tags.
 func TestStorageEngine_Query_MultiSeries(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	if err != nil {
 		t.Fatalf("NewStorageEngine failed: %v", err)
@@ -1166,7 +1166,7 @@ func TestStorageEngine_Query_MultiSeries(t *testing.T) {
 }
 
 func TestStorageEngine_Query_MultiSeries_WithAggregation(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	if err != nil {
 		t.Fatalf("NewStorageEngine failed: %v", err)
@@ -1254,7 +1254,7 @@ func TestStorageEngine_Put_WithHooks(t *testing.T) {
 
 	t.Run("PreHook_CancelOperation", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -1288,7 +1288,7 @@ func TestStorageEngine_Put_WithHooks(t *testing.T) {
 
 	t.Run("PreHook_ModifyPayload", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -1331,7 +1331,7 @@ func TestStorageEngine_Put_WithHooks(t *testing.T) {
 
 	t.Run("PostHook_AsyncNotification", func(t *testing.T) {
 		// Setup
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		if err != nil {
 			t.Fatalf("NewStorageEngine failed: %v", err)
@@ -1385,7 +1385,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	point := HelperDataPoint(t, "metric", map[string]string{"tag": "val"}, 1, map[string]interface{}{"value": 1.0})
 
 	t.Run("Put_On_Not_Started_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		// Do NOT call engine.Start()
@@ -1395,7 +1395,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("Get_On_Not_Started_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		// Do NOT call engine.Start()
@@ -1405,7 +1405,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("Put_On_Closed_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		err = engine.Start()
@@ -1418,7 +1418,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("Get_On_Closed_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		err = engine.Start()
@@ -1436,7 +1436,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("Query_On_Not_Started_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		// Do NOT call engine.Start()
@@ -1446,7 +1446,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("Query_On_Closed_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		err = engine.Start()
@@ -1459,7 +1459,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("DeleteSeries_On_Not_Started_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		// Do NOT call engine.Start()
@@ -1469,7 +1469,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("DeleteSeries_On_Closed_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		err = engine.Start()
@@ -1485,7 +1485,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("Other_APIs_On_Not_Started_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		// Do NOT call engine.Start()
@@ -1504,7 +1504,7 @@ func TestStorageEngine_StartedStateChecks(t *testing.T) {
 	})
 
 	t.Run("Other_APIs_On_Closed_Engine", func(t *testing.T) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		err = engine.Start()
@@ -1540,7 +1540,7 @@ func TestStorageEngine_Get_WithHooks(t *testing.T) {
 
 	// Helper to set up a clean engine for each subtest, preventing data races on shared state like the hook manager.
 	setupTest := func(t *testing.T) (*storageEngine, func()) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		require.NoError(t, engine.Start())
@@ -1644,7 +1644,7 @@ func TestStorageEngine_Delete_WithHooks(t *testing.T) {
 
 	// Helper to set up a clean engine for each subtest
 	setupTest := func(t *testing.T) (*storageEngine, func()) {
-		opts := getBaseOptsForFlushTest(t)
+		opts := GetBaseOptsForTest(t, "test")
 		engine, err := NewStorageEngine(opts)
 		require.NoError(t, err)
 		require.NoError(t, engine.Start())
@@ -1731,7 +1731,7 @@ func TestStorageEngine_Query_RelativeTime(t *testing.T) {
 	mockNow := time.Date(2024, 7, 16, 12, 0, 0, 0, time.UTC)
 	mockClock := clock.NewMockClock(mockNow)
 
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.Clock = mockClock // Inject the mock clock
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
@@ -1797,7 +1797,7 @@ func TestStorageEngine_Query_RelativeTime_WithAggregation(t *testing.T) {
 	mockNow := time.Date(2024, 7, 16, 12, 0, 0, 0, time.UTC)
 	mockClock := clock.NewMockClock(mockNow)
 
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.Clock = mockClock // Inject the mock clock
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
@@ -1872,7 +1872,7 @@ func TestStorageEngine_Query_RelativeTime_WithDownsampling(t *testing.T) {
 	mockNow := time.Date(2024, 7, 16, 12, 0, 0, 0, time.UTC)
 	mockClock := clock.NewMockClock(mockNow)
 
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.Clock = mockClock // Inject the mock clock
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
@@ -1948,7 +1948,7 @@ func TestStorageEngine_Query_RelativeTime_WithDownsampling(t *testing.T) {
 
 func TestStorageEngine_Query_FromMemtableAndSSTable(t *testing.T) {
 	// 1. Setup
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = engine.Start()
