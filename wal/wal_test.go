@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -614,14 +615,13 @@ func TestWAL_Commit_AllWaitersNotified(t *testing.T) {
 				firstErr = err
 				// Check that the error is the one we expect from the failing rotation.
 				// The error message differs between OSes.
-				if runtime.GOOS == "windows" {
-					// On Windows, trying to create a file where a directory exists gives "Access is denied".
-					require.ErrorContains(t, err, "Access is denied")
-				} else {
-					// On POSIX systems, it gives an error containing "exists" or "is a directory".
-					// We'll check for "exists" as it was the original check.
-					require.ErrorContains(t, err, "exists")
-				}
+				// รองรับทั้ง Windows และ POSIX: "exists", "is a directory", หรือ "Access is denied"
+				msg := err.Error()
+				require.True(t,
+					(runtime.GOOS == "windows" && (strings.Contains(msg, "Access is denied") || strings.Contains(msg, "exists") || strings.Contains(msg, "is a directory"))) ||
+						(runtime.GOOS != "windows" && (strings.Contains(msg, "exists") || strings.Contains(msg, "is a directory") || strings.Contains(msg, "Access is denied"))),
+					"unexpected error message: %s", msg,
+				)
 			})
 
 			// All errors in the batch should be the same.

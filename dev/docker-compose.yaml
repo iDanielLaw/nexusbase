@@ -1,0 +1,38 @@
+services:
+  nexus-leader:
+    build:
+      context: ..
+      dockerfile: ./dev/Dockerfile
+    container_name: nexus-leader
+    volumes:
+      - leader-data:/data
+      - ./config-leader.yaml:/app/config.yaml
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - replication-net
+
+  nexus-follower:
+    build:
+      context: ..
+      dockerfile: ./dev/Dockerfile
+    container_name: nexus-follower
+    volumes:
+      - follower-data:/data
+      - ./config-follower.yaml:/app/config.yaml
+    ports:
+      - "9002:9002"
+      - "9003:9003"
+    depends_on:
+      - nexus-leader
+    networks:
+      - replication-net
+
+volumes:
+  leader-data:
+  follower-data:
+
+networks:
+  replication-net:
+    driver: bridge

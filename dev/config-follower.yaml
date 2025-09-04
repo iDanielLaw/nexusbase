@@ -1,0 +1,70 @@
+# ตัวอย่าง config-follower.yaml สำหรับ nexus-follower
+server:
+  grpc_port: 9002
+  tcp_port: 9003
+  health_check_interval: "5s"
+  tls:
+    enabled: false
+    cert_file: "certs/server.crt"
+    key_file: "certs/server.key"
+engine:
+  data_dir: /data
+  retention_period: ""
+  metadata_sync_interval: "60s"
+  memtable:
+    size_threshold_bytes: 4194304
+    flush_interval: "0"
+  sstable:
+    block_size_bytes: 8192
+    compression: "snappy"
+    bloom_filter_fp_rate: 0.01
+  cache:
+    block_cache_capacity: 1024
+  compaction:
+    l0_trigger_file_count: 4
+    l0_trigger_size_bytes: 16777216
+    target_sstable_size_bytes: 16777216
+    levels_size_multiplier: 5
+    max_levels: 7
+    check_interval: "120s"
+    fallback_strategy: "PickOldest"
+  wal:
+    sync_mode: "interval"
+    batch_size: 1
+    flush_interval: "1000ms"
+    max_segment_size_bytes: 33554432
+    purge_keep_segments: 4
+  index:
+    memtable_threshold: 10000
+    flush_interval: "60s"
+    compaction_check_interval: "20s"
+    l0_trigger_file_count: 4
+    base_target_size_bytes: 2097152
+replication:
+  enabled: true
+  mode: follower
+  leader_addr: nexus-leader:51000
+logging:
+  level: "debug"
+  output: "stdout"
+  file: "nexusbase.log"
+security:
+  enabled: false
+  user_file_path: "data/users.db"
+self_monitoring:
+  enabled: true
+  interval: "5s"
+  metric_prefix: "__"
+query_server:
+  enabled: true
+  listen_address: "0.0.0.0:8088"
+tracing:
+  enabled: false
+  endpoint: "localhost:4317"
+  protocol: "grpc"
+debug:
+  enabled: true
+  listen_address: "0.0.0.0:6060"
+  pprof_enabled: true
+  metrics_enabled: true
+  monitor_ui_enabled: true

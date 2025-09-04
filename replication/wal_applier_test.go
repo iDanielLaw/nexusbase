@@ -517,7 +517,9 @@ func TestBootstrap_GetSnapshotInfoError(t *testing.T) {
 
 	// The applier should stop because it can't bootstrap.
 	assert.Eventually(t, func() bool {
-		return applier.conn.GetState() == connectivity.Shutdown
+		applier.connMu.RLock()
+		defer applier.connMu.RUnlock()
+		return applier.conn != nil && applier.conn.GetState() == connectivity.Shutdown
 	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after failing to get snapshot info")
 
 	// No entries should have been processed.
@@ -553,7 +555,9 @@ func TestBootstrap_DownloadFailsOnStreamError(t *testing.T) {
 
 	// The applier should stop because it can't bootstrap.
 	assert.Eventually(t, func() bool {
-		return applier.conn.GetState() == connectivity.Shutdown
+		applier.connMu.RLock()
+		defer applier.connMu.RUnlock()
+		return applier.conn != nil && applier.conn.GetState() == connectivity.Shutdown
 	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after snapshot stream error")
 
 	// Ensure we didn't try to restore a partial snapshot
@@ -592,7 +596,9 @@ func TestBootstrap_DownloadFailsOnChecksumMismatch(t *testing.T) {
 
 	// The applier should stop because it can't bootstrap.
 	assert.Eventually(t, func() bool {
-		return applier.conn.GetState() == connectivity.Shutdown
+		applier.connMu.RLock()
+		defer applier.connMu.RUnlock()
+		return applier.conn != nil && applier.conn.GetState() == connectivity.Shutdown
 	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after checksum mismatch")
 
 	// Ensure we didn't try to restore a partial/corrupt snapshot
@@ -620,7 +626,9 @@ func TestDownloadAndRestoreSnapshot_ChunkDataBeforeFileInfo(t *testing.T) {
 	defer cancel()
 
 	assert.Eventually(t, func() bool {
-		return applier.conn.GetState() == connectivity.Shutdown
+		applier.connMu.RLock()
+		defer applier.connMu.RUnlock()
+		return applier.conn != nil && applier.conn.GetState() == connectivity.Shutdown
 	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after receiving chunk data first")
 	mockEngine.AssertNotCalled(t, "Close")
 	mockEngine.AssertNotCalled(t, "ReplaceWithSnapshot", mock.Anything)
@@ -649,7 +657,9 @@ func TestDownloadAndRestoreSnapshot_ReplaceFails(t *testing.T) {
 	defer cancel()
 
 	assert.Eventually(t, func() bool {
-		return applier.conn.GetState() == connectivity.Shutdown
+		applier.connMu.RLock()
+		defer applier.connMu.RUnlock()
+		return applier.conn != nil && applier.conn.GetState() == connectivity.Shutdown
 	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after replace fails")
 
 	mockEngine.AssertExpectations(t)
@@ -679,6 +689,8 @@ func TestReplicationLoop_ContextCancellation(t *testing.T) {
 
 	// The applier should eventually shut down its connection.
 	assert.Eventually(t, func() bool {
-		return applier.conn.GetState() == connectivity.Shutdown
+		applier.connMu.RLock()
+		defer applier.connMu.RUnlock()
+		return applier.conn != nil && applier.conn.GetState() == connectivity.Shutdown
 	}, 2*time.Second, 50*time.Millisecond, "applier should shut down after context cancellation")
 }

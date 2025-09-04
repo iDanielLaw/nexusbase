@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	pb "github.com/INLOpen/nexusbase/replication/proto"
@@ -42,6 +43,7 @@ type WALApplier struct {
 	snapshotDir string // Directory to store downloaded snapshots
 	logger      *slog.Logger
 	conn        *grpc.ClientConn
+	connMu      sync.RWMutex // protects conn
 	client      pb.ReplicationServiceClient
 	cancel      context.CancelFunc
 	dialOpts    []grpc.DialOption
@@ -90,7 +92,9 @@ func (a *WALApplier) Start(ctx context.Context) {
 	}
 
 	a.cancel = cancel
+	a.connMu.Lock()
 	a.conn = conn
+	a.connMu.Unlock()
 	a.client = pb.NewReplicationServiceClient(conn)
 
 	a.logger.Info("Successfully connected to leader")
@@ -331,7 +335,9 @@ func (a *WALApplier) Stop() {
 	if a.cancel != nil {
 		a.cancel()
 	}
+	a.connMu.Lock()
 	if a.conn != nil {
 		a.conn.Close()
 	}
+	a.connMu.Unlock()
 }
