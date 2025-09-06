@@ -2,10 +2,15 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"strconv"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/structpb"
+
+	"github.com/INLOpen/nexusbase/api/tsdb"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/memtable"
 )
@@ -109,13 +114,66 @@ func (eng *storageEngine) collectAndStoreMetrics(ctx context.Context) {
 		eng.logger.Warn("Could not retrieve LSM level stats from engine", "error", err)
 	}
 	if len(points) > 0 {
-		writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-
-		if err := eng.PutBatch(writeCtx, points); err != nil {
-			eng.logger.Error("Failed to store self-monitoring metrics", "error", err)
+		// If follower, send metrics to leader instead of writing locally
+		if eng.replicationMode == "follower" {
+			if err := eng.sendMetricsToLeader(points); err != nil {
+				eng.logger.Error("Failed to send self-monitoring metrics to leader", "error", err)
+			} else {
+				eng.logger.Debug("Successfully sent self-monitoring metrics to leader", "count", len(points))
+			}
 		} else {
-			eng.logger.Debug("Successfully stored self-monitoring metrics", "count", len(points))
+			writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if err := eng.PutBatch(writeCtx, points); err != nil {
+				eng.logger.Error("Failed to store self-monitoring metrics", "error", err)
+			} else {
+				eng.logger.Debug("Successfully stored self-monitoring metrics", "count", len(points))
+			}
 		}
 	}
+}
+
+// sendMetricsToLeader is a mock function. Replace with actual implementation (e.g. HTTP/gRPC to leader node)
+func (eng *storageEngine) sendMetricsToLeader(points []core.DataPoint) error {
+	// ตัวอย่าง: ใช้ gRPC client ส่ง metrics ไป leader
+	// ต้อง import tsdb proto client และ google.golang.org/grpc
+	// สมมติ leader address อยู่ใน eng.opts.LeaderAddress (เช่น "localhost:51000")
+	leaderAddr := eng.opts.LeaderAddress
+	if leaderAddr == "" {
+		return fmt.Errorf("Leader address not configured")
+	}
+
+	// สร้าง gRPC connection
+	conn, err := grpc.Dial(leaderAddr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(3*time.Second))
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader: %w", err)
+	}
+	defer conn.Close()
+
+	client := tsdb.NewTSDBServiceClient(conn)
+
+	// แปลง core.DataPoint เป็น tsdb.PutRequest
+	batch := &tsdb.PutBatchRequest{}
+	for _, p := range points {
+		fieldsStruct, err := structpb.NewStruct(p.Fields.ToMap())
+		if err != nil {
+			return fmt.Errorf("failed to convert fields to structpb: %w", err)
+		}
+		req := &tsdb.PutRequest{
+			Metric:    p.Metric,
+			Tags:      p.Tags,
+			Timestamp: p.Timestamp,
+			Fields:    fieldsStruct,
+		}
+		batch.Points = append(batch.Points, req)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = client.PutBatch(ctx, batch)
+	if err != nil {
+		return fmt.Errorf("failed to send metrics to leader via gRPC: %w", err)
+	}
+	eng.logger.Info("Sent self-monitoring metrics to leader via gRPC", "count", len(points))
+	return nil
 }

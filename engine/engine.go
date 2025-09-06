@@ -96,6 +96,7 @@ type StorageEngineOptions struct {
 	IntraL0CompactionTriggerFiles     int
 	IntraL0CompactionMaxFileSizeBytes int64
 	ReplicationMode                   string
+	LeaderAddress                     string // สำหรับ self-monitoring metrics โดยเฉพาะ
 }
 
 type storageEngine struct {
