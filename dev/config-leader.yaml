@@ -8,7 +8,7 @@ server:
     cert_file: "certs/server.crt"
     key_file: "certs/server.key"
 engine:
-  data_dir: /data
+  data_dir: /app/data
   retention_period: ""
   metadata_sync_interval: "60s"
   memtable:

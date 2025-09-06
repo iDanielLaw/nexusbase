@@ -2,11 +2,10 @@ services:
   nexus-leader:
     build:
       context: ..
-      dockerfile: ./dev/Dockerfile
+      dockerfile: ./dev/Dockerfile.leader
     container_name: nexus-leader
     volumes:
-      - leader-data:/data
-      - ./config-leader.yaml:/app/config.yaml
+      - leader-data:/app/data
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -16,11 +15,10 @@ services:
   nexus-follower:
     build:
       context: ..
-      dockerfile: ./dev/Dockerfile
+      dockerfile: ./dev/Dockerfile.follower
     container_name: nexus-follower
     volumes:
-      - follower-data:/data
-      - ./config-follower.yaml:/app/config.yaml
+      - follower-data:/app/data
     ports:
       - "9002:9002"
       - "9003:9003"
