@@ -43,7 +43,7 @@ engine:
 replication:
   enabled: true
   mode: leader
-  port: 51000
+  listen_address: ":51000"
 logging:
   level: "debug"
   output: "stdout"
@@ -55,6 +55,7 @@ self_monitoring:
   enabled: true
   interval: "5s"
   metric_prefix: "__"
+  leader_address: "" # Leader สามารถเว้นว่างหรือใส่ address ตัวเอง
 query_server:
   enabled: true
   listen_address: "0.0.0.0:8088"

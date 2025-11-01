@@ -43,7 +43,7 @@ engine:
 replication:
   enabled: true
   mode: follower
-  leader_addr: nexus-leader:51000
+  leader_address: nexus-leader:51000
 logging:
   level: "debug"
   output: "stdout"
@@ -55,6 +55,7 @@ self_monitoring:
   enabled: true
   interval: "5s"
   metric_prefix: "__"
+  leader_address: "nexus-leader:9000" # follower ส่ง metrics ไป leader
 query_server:
   enabled: true
   listen_address: "0.0.0.0:8088"

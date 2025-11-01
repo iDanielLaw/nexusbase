@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+	"os"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -61,8 +62,17 @@ func (eng *storageEngine) collectAndStoreMetrics(ctx context.Context) {
 	// 8 runtime + 4 buffer pool + 6 memtable pool + ~7 LSM levels = ~25. 30 is a safe capacity.
 	points := make([]core.DataPoint, 0, 30)
 
-	// Helper to create a data point
+	// Get hostname for tagging
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+	}
+	// Helper to create a data point with hostname tag
 	newPoint := func(metricName string, value float64, tags map[string]string) core.DataPoint {
+		if tags == nil {
+			tags = make(map[string]string)
+		}
+		tags["hostname"] = hostname
 		fv, _ := core.NewFieldValuesFromMap(map[string]interface{}{"value": value})
 		return core.DataPoint{
 			Metric:    prefix + metricName,

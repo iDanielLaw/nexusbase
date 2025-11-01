@@ -49,6 +49,7 @@ func NewManager(cfg config.ReplicationConfig, replicationServer pb.ReplicationSe
 	}
 
 	logger.Info("Replication gRPC server listening", "address", lis.Addr().String())
+	logger.Info("Replication manager starting", "mode", cfg.Mode)
 
 	followers := make(map[string]*FollowerState)
 	for _, addr := range cfg.Followers {
@@ -87,6 +88,7 @@ func (m *Manager) monitorFollowers(ctx context.Context) {
 	for {
 		select {
 		case <-m.stopCh:
+			m.logger.Info("Replication manager stopping")
 			return
 		case <-ticker.C:
 			for _, f := range m.followers {
@@ -106,7 +108,7 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 	if err != nil {
 		f.Healthy = false
 		f.RetryCount++
-		m.logger.Warn("Follower unreachable, retrying", "addr", f.Addr, "retries", f.RetryCount, "error", err)
+		m.logger.Warn("Follower unreachable", "addr", f.Addr, "retries", f.RetryCount, "error", err)
 		return
 	}
 	defer conn.Close()
@@ -120,11 +122,11 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 		if f.LagCallback != nil {
 			f.LagCallback(lag)
 		}
-		m.logger.Info("Follower healthy", "addr", f.Addr, "lag", lag)
+		m.logger.Info("Follower health check", "addr", f.Addr, "healthy", f.Healthy, "lag", lag)
 	} else {
 		f.Healthy = false
 		f.RetryCount++
-		m.logger.Warn("Follower not ready, retrying", "addr", f.Addr, "retries", f.RetryCount, "state", conn.GetState().String())
+		m.logger.Warn("Follower not ready", "addr", f.Addr, "retries", f.RetryCount, "state", conn.GetState().String())
 	}
 }
 

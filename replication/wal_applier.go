@@ -65,6 +65,7 @@ func NewWALApplier(leaderAddr string, engine ReplicatedEngine, snapshotMgr snaps
 // Start begins the process of connecting to and replicating from the leader.
 func (a *WALApplier) Start(ctx context.Context) {
 	a.logger.Info("Starting WAL Applier")
+	a.logger.Info("Follower replication loop started", "leader", a.leaderAddr)
 
 	applierCtx, cancel := context.WithCancel(ctx)
 
@@ -133,6 +134,15 @@ func (a *WALApplier) bootstrap(ctx context.Context) error {
 	a.logger.Info("Got latest snapshot info from leader", "snapshot_id", leaderSnapshotInfo.Id, "snapshot_seq_num", leaderSnapshotInfo.LastWalSequenceNumber)
 
 	localSeqNum := a.engine.GetLatestAppliedSeqNum()
+	if localSeqNum == 0 && leaderSnapshotInfo.LastWalSequenceNumber > 0 {
+		a.logger.Info("No local data, will start WAL stream from leader snapshot seq num.", "local_seq_num", localSeqNum, "snapshot_seq_num", leaderSnapshotInfo.LastWalSequenceNumber)
+		// Optionally: download snapshot if available
+		// If you want to force snapshot restore, uncomment below
+		// if err := a.downloadAndRestoreSnapshot(ctx, leaderSnapshotInfo.Id); err != nil {
+		//     return fmt.Errorf("snapshot download and restore failed: %w", err)
+		// }
+		return nil
+	}
 	if localSeqNum >= leaderSnapshotInfo.LastWalSequenceNumber {
 		a.logger.Info("Local state is up-to-date or ahead of the latest snapshot, no bootstrap needed.", "local_seq_num", localSeqNum)
 		return nil
@@ -242,6 +252,12 @@ func (a *WALApplier) downloadAndRestoreSnapshot(ctx context.Context, snapshotId 
 
 // replicationLoop is the main loop for streaming and applying WAL entries.
 func (a *WALApplier) replicationLoop(ctx context.Context) error {
+	var initialSeqNum uint64 = 0
+	// Try to get leader snapshot info for initial WAL stream position
+	leaderSnapshotInfo, err := a.client.GetLatestSnapshotInfo(ctx, &pb.GetLatestSnapshotInfoRequest{})
+	if err == nil && leaderSnapshotInfo.LastWalSequenceNumber > 0 {
+		initialSeqNum = leaderSnapshotInfo.LastWalSequenceNumber
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -249,7 +265,11 @@ func (a *WALApplier) replicationLoop(ctx context.Context) error {
 			return ctx.Err()
 		default:
 			fromSeqNum := a.engine.GetLatestAppliedSeqNum() + 1
-			a.logger.Info("Starting WAL stream", "from_seq_num", fromSeqNum)
+			// ถ้าไม่มี local data ให้เริ่มจาก leader snapshot seq num
+			if fromSeqNum == 1 && initialSeqNum > 0 {
+				fromSeqNum = initialSeqNum + 1
+			}
+			a.logger.Info("Follower subscribing WAL stream", "from_seq_num", fromSeqNum)
 
 			req := &pb.StreamWALRequest{
 				FromSequenceNumber: fromSeqNum,
@@ -273,7 +293,7 @@ func (a *WALApplier) replicationLoop(ctx context.Context) error {
 					a.logger.Info("Replication loop stopping due to context cancellation or deadline.", "error", err)
 					return err
 				}
-				a.logger.Error("WAL stream broke with a critical error, stopping replication loop.", "error", err)
+				a.logger.Error("Follower WAL stream error", "error", err)
 				a.Stop() // Self-terminate on critical error
 				return err
 			}
@@ -315,7 +335,6 @@ func (a *WALApplier) processStream(ctx context.Context, stream pb.ReplicationSer
 				"attempt", i+1,
 				"max_attempts", maxApplyRetries,
 			)
-			time.Sleep(1 * time.Second)
 		}
 
 		if applyErr != nil {
@@ -326,6 +345,8 @@ func (a *WALApplier) processStream(ctx context.Context, stream pb.ReplicationSer
 			return fmt.Errorf("failed to apply replicated entry %d after %d retries: %w",
 				actualSeqNum, maxApplyRetries, applyErr)
 		}
+
+		a.logger.Info("Follower applied WAL entry", "seq_num", actualSeqNum, "entry_type", entry.EntryType)
 	}
 }
 

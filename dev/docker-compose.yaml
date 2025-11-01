@@ -9,6 +9,9 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+      - "6060:6060"
+      - "8088:8088"
+      - "51000:51000"
     networks:
       - replication-net
 
@@ -22,6 +25,8 @@ services:
     ports:
       - "9002:9002"
       - "9003:9003"
+      - "6061:6060"
+      - "8089:8088"
     depends_on:
       - nexus-leader
     networks:

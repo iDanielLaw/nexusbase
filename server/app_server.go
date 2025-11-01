@@ -130,6 +130,7 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 
 		if cfg.Replication.Mode == "follower" {
 			// Create the WAL applier (Follower side)
+			logger.Debug("Leader Address", "addr", cfg.Replication.LeaderAddress)
 			walApplier := replication.NewWALApplier(
 				cfg.Replication.LeaderAddress,
 				eng, // eng now satisfies the ReplicatedEngine interface
