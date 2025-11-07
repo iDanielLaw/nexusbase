@@ -2,7 +2,7 @@ module github.com/INLOpen/nexusbase
 
 go 1.23.0
 
-toolchain go1.23.10
+toolchain go1.23.4
 
 require (
 	github.com/INLOpen/nexuscore v0.0.0

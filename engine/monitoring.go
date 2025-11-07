@@ -3,12 +3,13 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"strconv"
 	"time"
-	"os"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/INLOpen/nexusbase/api/tsdb"
@@ -153,8 +154,20 @@ func (eng *storageEngine) sendMetricsToLeader(points []core.DataPoint) error {
 		return fmt.Errorf("Leader address not configured")
 	}
 
+	// Prepare dial options based on replication mode and TLS settings
+	var dialOpts []grpc.DialOption
+
+	// Check if we're in follower mode and should use TLS
+	// Note: In a real implementation, you would get TLS config from engine options
+	// For now, we use insecure for backward compatibility
+	// TODO: Add TLS support via engine configuration
+	dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
 	// สร้าง gRPC connection
-	conn, err := grpc.Dial(leaderAddr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(3*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, leaderAddr, dialOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to leader: %w", err)
 	}
@@ -178,9 +191,10 @@ func (eng *storageEngine) sendMetricsToLeader(points []core.DataPoint) error {
 		batch.Points = append(batch.Points, req)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err = client.PutBatch(ctx, batch)
+	// Reuse the context from connection setup
+	putCtx, putCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer putCancel()
+	_, err = client.PutBatch(putCtx, batch)
 	if err != nil {
 		return fmt.Errorf("failed to send metrics to leader via gRPC: %w", err)
 	}

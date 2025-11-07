@@ -18,6 +18,9 @@ service ReplicationService {
 
   // StreamSnapshot ให้ follower ดาวน์โหลด snapshot ทั้งหมดจาก leader
   rpc StreamSnapshot(StreamSnapshotRequest) returns (stream SnapshotChunk) {}
+
+  // HealthCheck ให้ leader ตรวจสอบสุขภาพของ follower
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse) {}
 }
 
 // StreamWALRequest คือ message ที่ follower ส่งไปหา leader ตอนเริ่มต้น stream
@@ -78,4 +81,22 @@ message FileInfo {
   string path = 1;
   // SHA256 checksum ของเนื้อหาไฟล์ทั้งหมดในรูปแบบ hex string
   string checksum = 2;
+}
+
+// --- Health Check RPC Messages ---
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  // สถานะสุขภาพของ node
+  enum Status {
+    UNKNOWN = 0;
+    HEALTHY = 1;
+    UNHEALTHY = 2;
+  }
+  Status status = 1;
+  // Sequence number ล่าสุดที่ node ได้ประมวลผล
+  uint64 last_applied_sequence = 2;
+  // ข้อมูลเพิ่มเติมเกี่ยวกับสถานะ
+  string message = 3;
 }

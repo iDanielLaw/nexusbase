@@ -3,6 +3,8 @@ package replication
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,11 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/INLOpen/nexusbase/config"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
 	"github.com/INLOpen/nexusbase/snapshot"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -60,6 +64,44 @@ func NewWALApplier(leaderAddr string, engine ReplicatedEngine, snapshotMgr snaps
 		logger:      logger.With("component", "wal_applier", "leader", leaderAddr),
 		retrySleep:  6 * time.Second, // Default retry sleep
 	}
+}
+
+// NewWALApplierWithTLS creates a new WAL applier with TLS configuration.
+func NewWALApplierWithTLS(leaderAddr string, engine ReplicatedEngine, snapshotMgr snapshot.ManagerInterface, snapshotDir string, tlsCfg config.TLSConfig, logger *slog.Logger) (*WALApplier, error) {
+	applier := NewWALApplier(leaderAddr, engine, snapshotMgr, snapshotDir, logger)
+
+	if tlsCfg.Enabled {
+		// Load client TLS configuration
+		tlsConfig, err := loadWALApplierTLSConfig(tlsCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS config for WAL applier: %w", err)
+		}
+		creds := credentials.NewTLS(tlsConfig)
+		applier.dialOpts = []grpc.DialOption{
+			grpc.WithTransportCredentials(creds),
+		}
+		logger.Info("WAL Applier configured with TLS")
+	}
+
+	return applier, nil
+}
+
+// loadWALApplierTLSConfig loads TLS configuration for the WAL applier client
+func loadWALApplierTLSConfig(tlsCfg config.TLSConfig) (*tls.Config, error) {
+	// For client, we need to verify the server's certificate
+	certPool := x509.NewCertPool()
+
+	// Use system cert pool
+	systemCertPool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load system cert pool: %w", err)
+	}
+	certPool = systemCertPool
+
+	return &tls.Config{
+		RootCAs:    certPool,
+		MinVersion: tls.VersionTLS12,
+	}, nil
 }
 
 // Start begins the process of connecting to and replicating from the leader.

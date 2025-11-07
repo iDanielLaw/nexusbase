@@ -352,3 +352,22 @@ func (s *Server) convertWALEntryToProto(entry *core.WALEntry) (*pb.WALEntry, err
 
 	return protoEntry, nil
 }
+
+// HealthCheck implements the HealthCheck RPC method for followers to report their status
+func (s *Server) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+	// Get peer information for logging
+	p, ok := peer.FromContext(ctx)
+	peerAddr := "unknown"
+	if ok {
+		peerAddr = p.Addr.String()
+	}
+
+	s.logger.Debug("Received health check from follower", "peer", peerAddr)
+
+	// For now, we always return HEALTHY from the server side
+	// In a more sophisticated implementation, you could check server health here
+	return &pb.HealthCheckResponse{
+		Status:  pb.HealthCheckResponse_HEALTHY,
+		Message: "server is healthy",
+	}, nil
+}

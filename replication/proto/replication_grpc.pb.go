@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v6.31.1
-// source: replication/proto/replication.proto
+// source: replication.proto
 
 package proto
 
@@ -22,6 +22,7 @@ const (
 	ReplicationService_StreamWAL_FullMethodName             = "/replication.ReplicationService/StreamWAL"
 	ReplicationService_GetLatestSnapshotInfo_FullMethodName = "/replication.ReplicationService/GetLatestSnapshotInfo"
 	ReplicationService_StreamSnapshot_FullMethodName        = "/replication.ReplicationService/StreamSnapshot"
+	ReplicationService_HealthCheck_FullMethodName           = "/replication.ReplicationService/HealthCheck"
 )
 
 // ReplicationServiceClient is the client API for ReplicationService service.
@@ -37,6 +38,8 @@ type ReplicationServiceClient interface {
 	GetLatestSnapshotInfo(ctx context.Context, in *GetLatestSnapshotInfoRequest, opts ...grpc.CallOption) (*SnapshotInfo, error)
 	// StreamSnapshot ให้ follower ดาวน์โหลด snapshot ทั้งหมดจาก leader
 	StreamSnapshot(ctx context.Context, in *StreamSnapshotRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotChunk], error)
+	// HealthCheck ให้ leader ตรวจสอบสุขภาพของ follower
+	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
 }
 
 type replicationServiceClient struct {
@@ -95,6 +98,16 @@ func (c *replicationServiceClient) StreamSnapshot(ctx context.Context, in *Strea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_StreamSnapshotClient = grpc.ServerStreamingClient[SnapshotChunk]
 
+func (c *replicationServiceClient) HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HealthCheckResponse)
+	err := c.cc.Invoke(ctx, ReplicationService_HealthCheck_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ReplicationServiceServer is the server API for ReplicationService service.
 // All implementations must embed UnimplementedReplicationServiceServer
 // for forward compatibility.
@@ -108,6 +121,8 @@ type ReplicationServiceServer interface {
 	GetLatestSnapshotInfo(context.Context, *GetLatestSnapshotInfoRequest) (*SnapshotInfo, error)
 	// StreamSnapshot ให้ follower ดาวน์โหลด snapshot ทั้งหมดจาก leader
 	StreamSnapshot(*StreamSnapshotRequest, grpc.ServerStreamingServer[SnapshotChunk]) error
+	// HealthCheck ให้ leader ตรวจสอบสุขภาพของ follower
+	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
 	mustEmbedUnimplementedReplicationServiceServer()
 }
 
@@ -126,6 +141,9 @@ func (UnimplementedReplicationServiceServer) GetLatestSnapshotInfo(context.Conte
 }
 func (UnimplementedReplicationServiceServer) StreamSnapshot(*StreamSnapshotRequest, grpc.ServerStreamingServer[SnapshotChunk]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamSnapshot not implemented")
+}
+func (UnimplementedReplicationServiceServer) HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HealthCheck not implemented")
 }
 func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
 func (UnimplementedReplicationServiceServer) testEmbeddedByValue()                            {}
@@ -188,6 +206,24 @@ func _ReplicationService_StreamSnapshot_Handler(srv interface{}, stream grpc.Ser
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ReplicationService_StreamSnapshotServer = grpc.ServerStreamingServer[SnapshotChunk]
 
+func _ReplicationService_HealthCheck_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HealthCheckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServiceServer).HealthCheck(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicationService_HealthCheck_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServiceServer).HealthCheck(ctx, req.(*HealthCheckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -198,6 +234,10 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetLatestSnapshotInfo",
 			Handler:    _ReplicationService_GetLatestSnapshotInfo_Handler,
+		},
+		{
+			MethodName: "HealthCheck",
+			Handler:    _ReplicationService_HealthCheck_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
@@ -212,5 +252,5 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "replication/proto/replication.proto",
+	Metadata: "replication.proto",
 }

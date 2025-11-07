@@ -133,10 +133,12 @@ type TracingConfig struct {
 
 // ReplicationConfig holds the configuration for the replication system.
 type ReplicationConfig struct {
-	Mode          string   `yaml:"mode"`           // "leader", "follower", or "disabled"
-	ListenAddress string   `yaml:"listen_address"` // Address for this node's gRPC service
-	Followers     []string `yaml:"followers"`      // List of follower addresses (for leader)
-	LeaderAddress string   `yaml:"leader_address"` // Address of the leader (for follower)
+	Mode                       string    `yaml:"mode"`                          // "leader", "follower", or "disabled"
+	ListenAddress              string    `yaml:"listen_address"`                // Address for this node's gRPC service
+	Followers                  []string  `yaml:"followers"`                     // List of follower addresses (for leader)
+	LeaderAddress              string    `yaml:"leader_address"`                // Address of the leader (for follower)
+	TLS                        TLSConfig `yaml:"tls"`                           // TLS configuration for replication gRPC connections
+	GracefulStopTimeoutSeconds int       `yaml:"graceful_stop_timeout_seconds"` // Timeout for graceful shutdown in seconds
 }
 
 // Config is the top-level configuration struct.
@@ -263,6 +265,12 @@ func Load(r io.Reader) (*Config, error) {
 			ListenAddress: ":50052",
 			Followers:     nil,
 			LeaderAddress: "",
+			TLS: TLSConfig{
+				Enabled:  false,
+				CertFile: "certs/replication.crt",
+				KeyFile:  "certs/replication.key",
+			},
+			GracefulStopTimeoutSeconds: 30,
 		},
 	}
 
