@@ -21,7 +21,7 @@ function Clean-Data {
 }
 function Start-Leader {
     param([bool]$UseTLS = $false)
-    $configFile = if ($UseTLS) { "dev/config-leader-tls.yaml" } else { "config-test-leader.yaml" }
+    $configFile = if ($UseTLS) { "dev/config-leader-tls.yaml" } else { "configs/config-test-leader.yaml" }
     Write-Info "Starting Leader node..."
     Write-Info "Config: $configFile"
     Write-Info "Ports: gRPC=50051, TCP=50052, Replication=50053, Debug=6060, Query=8088"
@@ -30,7 +30,7 @@ function Start-Leader {
 }
 function Start-Follower {
     param([bool]$UseTLS = $false)
-    $configFile = if ($UseTLS) { "dev/config-follower-tls.yaml" } else { "config-test-follower.yaml" }
+    $configFile = if ($UseTLS) { "dev/config-follower-tls.yaml" } else { "configs/config-test-follower.yaml" }
     Write-Info "Starting Follower node..."
     Write-Info "Config: $configFile"
     Write-Info "Ports: gRPC=50055, TCP=50056, Debug=6061, Query=8089"
@@ -59,7 +59,7 @@ switch ($Mode) {
             Write-Host "Generating TLS certs..." -ForegroundColor Yellow
             Push-Location dev; .\generate-certs.ps1; Pop-Location
         }
-        Write-Info "Starting Leader... Open another terminal and run: .\quick-start-replication.ps1 -Mode follower"
+        Write-Info "Starting Leader... Open another terminal and run: .\testing\quick-start-replication.ps1 -Mode follower"
         Start-Sleep -Seconds 2
         Start-Leader -UseTLS $WithTLS
     }

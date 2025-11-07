@@ -3,7 +3,7 @@ version: '3.8'
 services:
   nexusbase-leader:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: nexusbase-leader
     hostname: nexusbase-leader
@@ -14,7 +14,7 @@ services:
       - "8088:8088"    # Query UI
       - "6060:6060"    # Debug/Metrics
     volumes:
-      - ./config-docker-leader.yaml:/app/config.yaml:ro
+      - ../configs/config-docker-leader.yaml:/app/config.yaml:ro
       - leader-data:/app/data
     environment:
       - NEXUSBASE_CONFIG=/app/config.yaml
@@ -30,7 +30,7 @@ services:
 
   nexusbase-follower:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: nexusbase-follower
     hostname: nexusbase-follower
@@ -40,7 +40,7 @@ services:
       - "8089:8089"    # Query UI
       - "6061:6061"    # Debug/Metrics
     volumes:
-      - ./config-docker-follower.yaml:/app/config.yaml:ro
+      - ../configs/config-docker-follower.yaml:/app/config.yaml:ro
       - follower-data:/app/data
     environment:
       - NEXUSBASE_CONFIG=/app/config.yaml
