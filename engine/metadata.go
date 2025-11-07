@@ -64,6 +64,13 @@ func (e *storageEngine) persistManifest() (err error) {
 	manifestFilePath := filepath.Join(e.opts.DataDir, uniqueManifestFileName)
 	e.logger.Debug("Persisting manifest with current state.", "manifest_file", uniqueManifestFileName)
 
+	// Ensure DataDir exists before creating manifest file
+	if mkdirErr := os.MkdirAll(e.opts.DataDir, 0755); mkdirErr != nil {
+		e.logger.Error("Failed to create data directory.", "path", e.opts.DataDir, "error", mkdirErr)
+		span.SetStatus(codes.Error, "create_data_dir_failed")
+		return fmt.Errorf("failed to create data directory: %w", mkdirErr)
+	}
+
 	manifestFile, createErr := os.Create(manifestFilePath)
 	if createErr != nil {
 		e.logger.Error("Failed to create manifest file for writing.", "path", manifestFilePath, "error", createErr)
