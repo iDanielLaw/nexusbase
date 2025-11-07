@@ -37,8 +37,8 @@ type MemtableEntry struct {
 // This is used for tracking memtable size and determining when to flush.
 // Uses binary.MaxVarintLen64 (10 bytes) for PointID to match the original calculation.
 func (e *MemtableEntry) Size() int64 {
-	// Key + Value + PointID (MaxVarintLen64 = 10 bytes) + EntryType (1 byte)
-	return int64(len(e.Key) + len(e.Value) + binary.MaxVarintLen64 + 1)
+	// Key + Value + PointID (8 bytes) + EntryType (1 byte)
+	return int64(len(e.Key) + len(e.Value) + 8 + 1)
 }
 
 // comparator defines the sort order for MemtableKey objects in the skip list.
