@@ -40,6 +40,7 @@ type bufferPool struct {
 	mu      sync.Mutex
 	items   []*bytes.Buffer
 	newFunc func() *bytes.Buffer
+	maxSize int // Maximum pool size (0 = unlimited for backward compatibility)
 
 	// Metrics
 	hits        atomic.Uint64 // Number of times a buffer was successfully retrieved from the pool.
@@ -63,8 +64,11 @@ func NewBufferPool(initialCapacity ...int) *bufferPool {
 	}
 	// Pre-allocate the pool's internal slice to a reasonable size to reduce re-allocations.
 	const initialPoolSize = 16384 // Increased pool size to better handle high concurrency during compaction/startup.
+	const maxPoolSize = 32768     // Default max size: 2x initial capacity
+
 	bp := &bufferPool{
-		items: make([]*bytes.Buffer, 0, initialPoolSize), // Start with len 0, cap initialPoolSize
+		items:   make([]*bytes.Buffer, 0, initialPoolSize), // Start with len 0, cap initialPoolSize
+		maxSize: maxPoolSize,
 	}
 	bp.newFunc = func() *bytes.Buffer {
 		bp.created.Add(1)
@@ -103,12 +107,17 @@ func (bp *bufferPool) GetMetrics() (hits, misses, created uint64, currentSize in
 	return bp.hits.Load(), bp.misses.Load(), bp.created.Load(), bp.currentSize.Load()
 }
 
-// Put returns a buffer to the pool. It is never discarded.
+// Put returns a buffer to the pool.
+// If maxSize is set and the pool is at capacity, the buffer is discarded to prevent unbounded growth.
 func (bp *bufferPool) Put(buf *bytes.Buffer) {
 	buf.Reset()
 	bp.mu.Lock()
-	bp.items = append(bp.items, buf)
-	bp.currentSize.Add(1)
+	// Only add to pool if below max capacity
+	if bp.maxSize == 0 || len(bp.items) < bp.maxSize {
+		bp.items = append(bp.items, buf)
+		bp.currentSize.Add(1)
+	}
+	// Otherwise discard the buffer (it will be GC'd)
 	bp.mu.Unlock()
 }
 
@@ -116,6 +125,7 @@ func (bp *bufferPool) Put(buf *bytes.Buffer) {
 type GenericBufferPoolOptions[T any] struct {
 	newFunc    func() T
 	removeFunc func(T)
+	maxSize    int // Maximum pool size to prevent unbounded growth (0 = unlimited)
 }
 
 type bufferGenericPool[T any] struct {
@@ -123,6 +133,7 @@ type bufferGenericPool[T any] struct {
 	mu      sync.Mutex
 	items   []T
 	newFunc func() T
+	maxSize int // Maximum pool size (0 = unlimited)
 
 	// Metrics
 	hits        atomic.Uint64 // Number of times a buffer was successfully retrieved from the pool.
@@ -134,9 +145,17 @@ type bufferGenericPool[T any] struct {
 func NewBufferGenericPool[T any](opts GenericBufferPoolOptions[T]) *bufferGenericPool[T] {
 	// Pre-allocate the pool's internal slice to a reasonable size to reduce re-allocations.
 	const initialPoolSize = 16384 // Increased pool size to better handle high concurrency during compaction/startup.
+
+	// Set default maxSize if not specified
+	maxSize := opts.maxSize
+	if maxSize == 0 {
+		maxSize = 32768 // Default: 2x initial capacity
+	}
+
 	bp := &bufferGenericPool[T]{
-		opts:  opts,
-		items: make([]T, 0, initialPoolSize), // Start with len 0, cap initialPoolSize
+		opts:    opts,
+		items:   make([]T, 0, initialPoolSize), // Start with len 0, cap initialPoolSize
+		maxSize: maxSize,
 	}
 	bp.newFunc = func() T {
 		bp.created.Add(1)
@@ -175,11 +194,16 @@ func (bp *bufferGenericPool[T]) GetMetrics() (hits, misses, created uint64, curr
 	return bp.hits.Load(), bp.misses.Load(), bp.created.Load(), bp.currentSize.Load()
 }
 
-// Put returns a buffer to the pool. It is never discarded.
+// Put returns a buffer to the pool.
+// If maxSize is set and the pool is at capacity, the item is discarded to prevent unbounded growth.
 func (bp *bufferGenericPool[T]) Put(buf T) {
 	bp.opts.removeFunc(buf)
 	bp.mu.Lock()
-	bp.items = append(bp.items, buf)
-	bp.currentSize.Add(1)
+	// Only add to pool if below max capacity
+	if len(bp.items) < bp.maxSize {
+		bp.items = append(bp.items, buf)
+		bp.currentSize.Add(1)
+	}
+	// Otherwise discard the item (it will be GC'd)
 	bp.mu.Unlock()
 }

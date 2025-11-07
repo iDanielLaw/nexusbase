@@ -9,180 +9,241 @@ import (
 	"github.com/INLOpen/skiplist"
 )
 
-// MemtableIterator iterates over the latest version of each distinct key in the memtable.
-// It is not safe for concurrent use by multiple goroutines.
+// MemtableIterator provides ordered iteration over the latest version of each key.
+//
+// Key Features:
+// - Yields only the latest version (highest PointID) of each unique key
+// - Supports both ascending and descending iteration
+// - Respects key range boundaries (startKey, endKey)
+// - Holds a read lock on the parent memtable (released by Close)
+//
+// Lifecycle:
+// 1. Created by Memtable.NewIterator()
+// 2. Use Next() to advance, At() to read current entry
+// 3. MUST call Close() to release memtable lock
+//
+// Thread Safety: Not safe for concurrent use by multiple goroutines.
+// Each goroutine should create its own iterator.
 type MemtableIterator struct {
-	mu       *sync.RWMutex // The lock from the parent memtable. MUST be released by Close().
-	iter     *skiplist.Iterator[*MemtableKey, *MemtableEntry]
-	startKey []byte // For descending iteration check
-	endKey   []byte
-	order    types.SortOrder
-	valid    bool // Indicates if the iterator is currently at a valid position.
-	err      error
+	mu       *sync.RWMutex                                    // Parent memtable's lock
+	iter     *skiplist.Iterator[*MemtableKey, *MemtableEntry] // Underlying skip list iterator
+	startKey []byte                                           // Lower bound (inclusive)
+	endKey   []byte                                           // Upper bound (exclusive)
+	order    types.SortOrder                                  // Iteration direction
+	valid    bool                                             // True if iterator points to valid entry
+	err      error                                            // Last error encountered
 }
 
+// Compile-time interface verification
 var _ core.IteratorInterface[*core.IteratorNode] = (*MemtableIterator)(nil)
 
-// skipToLatestVersionOfCurrentKeyDescending advances the iterator to the latest version
-// (highest PointID) of the key it is currently on. This is only used for descending iteration.
+// skipToLatestVersionOfCurrentKeyDescending advances the iterator past all older
+// versions of the current key. Used only in descending iteration.
+//
+// In descending order, the skip list iterator traverses from newest to oldest
+// PointIDs for each key. We want to yield only the newest (first encountered),
+// so we skip past any older versions.
 func (it *MemtableIterator) skipToLatestVersionOfCurrentKeyDescending() {
 	currentKey := it.iter.Key().Key
+
+	// Peek ahead to see if next entry is an older version of the same key
 	for {
 		peekIter := it.iter.Clone()
-		if !peekIter.Next() || !bytes.Equal(peekIter.Key().Key, currentKey) {
-			break
+		if !peekIter.Next() {
+			break // No more entries
 		}
+		if !bytes.Equal(peekIter.Key().Key, currentKey) {
+			break // Different key, stop skipping
+		}
+		// Same key with older PointID, skip it
 		it.iter.Next()
 	}
 }
 
-// Next moves the iterator to the next distinct key.
+// Next advances the iterator to the next unique key.
+//
+// Returns:
+//   - true if a valid entry is available (use At() to read it)
+//   - false if no more entries or error occurred (check Error())
+//
+// Behavior:
+//   - First call: Positions iterator at first/last entry based on order
+//   - Subsequent calls: Advances to next distinct key (skips older versions)
+//   - Respects key range boundaries (startKey, endKey)
+//
+// Example:
+//
+//	for iter.Next() {
+//	    node, err := iter.At()
+//	    // process node
+//	}
 func (it *MemtableIterator) Next() bool {
 	if !it.valid {
-		// --- First Call: Initial Positioning ---
-		it.valid = true // Tentatively set to true.
-		var found bool
-		if it.order == types.Ascending {
-			if it.startKey != nil {
-				seekKey := KeyPool.Get()
-				seekKey.Key = it.startKey
-				seekKey.PointID = ^uint64(0)
-				found = it.iter.Seek(seekKey)
-				KeyPool.Put(seekKey)
-			} else {
-				found = it.iter.First()
-			}
-		} else { // Descending
-			if it.endKey != nil {
-				// For a descending scan, we want to start at the greatest key that is < endKey.
-				// A reversed iterator's Seek should find the first element <= key.
-				seekKey := KeyPool.Get()
-				seekKey.Key = it.endKey
-				seekKey.PointID = 0
-				found = it.iter.Seek(seekKey)
-				KeyPool.Put(seekKey)
-				// If Seek fails, it means all keys are less than endKey, so we should start from the very last element.
-				if !found {
-					found = it.iter.Last()
-				}
-			} else {
-				found = it.iter.Last()
-			}
-		}
-
-		if !found {
-			it.valid = false // The initial positioning failed.
-			return false
-		}
-		// If found, fall through to the validation loop for the first element.
-		if it.order == types.Descending {
-			it.skipToLatestVersionOfCurrentKeyDescending()
-		}
-	} else { // Subsequent calls
-		lastKey := it.iter.Key().Key
-		if it.order == types.Ascending {
-			for {
-				if !it.iter.Next() {
-					it.valid = false
-					return false
-				}
-				if !bytes.Equal(it.iter.Key().Key, lastKey) {
-					break
-				}
-			}
-		} else { // Descending
-			for {
-				if !it.iter.Next() {
-					it.valid = false
-					return false
-				}
-				if !bytes.Equal(it.iter.Key().Key, lastKey) {
-					break
-				}
-			}
-			it.skipToLatestVersionOfCurrentKeyDescending()
-		}
+		// First call - position iterator at start
+		return it.positionInitial()
 	}
 
-	// Loop to handle bounds checking, especially for descending scans that might start out of bounds.
-	for {
-		// We are at a new candidate key. Check its bounds.
-		currentKey := it.iter.Key().Key
-		if it.order == types.Ascending {
-			if it.endKey != nil && bytes.Compare(currentKey, it.endKey) >= 0 {
-				it.valid = false // Past the end key, so we are done.
-				return false
-			}
-		} else { // Descending
-			if it.startKey != nil && bytes.Compare(currentKey, it.startKey) < 0 {
-				it.valid = false // Past the start key (lower bound), so we are done.
-				return false
-			}
-			if it.endKey != nil && bytes.Compare(currentKey, it.endKey) >= 0 {
-				// This key is out of bounds, but there might be other valid keys.
-				// We need to advance to the next *distinct* key.
-				lastKey := currentKey
-				for {
-					if !it.iter.Next() {
-						it.valid = false
-						return false
-					}
-					if !bytes.Equal(it.iter.Key().Key, lastKey) {
-						break
-					}
-				}
-				it.skipToLatestVersionOfCurrentKeyDescending()
+	// Subsequent calls - advance to next distinct key
+	return it.advanceToNextKey()
+}
 
-				continue // Re-run the bounds check for the new key.
+// positionInitial positions the iterator at the start based on iteration order.
+func (it *MemtableIterator) positionInitial() bool {
+	it.valid = true // Tentatively set to true
+
+	var found bool
+	if it.order == types.Ascending {
+		found = it.seekForwardStart()
+	} else {
+		found = it.seekReverseStart()
+	}
+
+	if !found {
+		it.valid = false
+		return false
+	}
+
+	// For descending, skip to latest version of initial key
+	if it.order == types.Descending {
+		it.skipToLatestVersionOfCurrentKeyDescending()
+	}
+
+	// Validate bounds
+	return it.checkBoundsAndAdvance()
+}
+
+// seekForwardStart positions iterator for ascending iteration.
+func (it *MemtableIterator) seekForwardStart() bool {
+	if it.startKey != nil {
+		// Seek to first key >= startKey
+		seekKey := KeyPool.Get()
+		seekKey.Key = it.startKey
+		seekKey.PointID = ^uint64(0) // Max PointID to find first entry
+		defer KeyPool.Put(seekKey)
+		return it.iter.Seek(seekKey)
+	}
+	return it.iter.First()
+}
+
+// seekReverseStart positions iterator for descending iteration.
+func (it *MemtableIterator) seekReverseStart() bool {
+	if it.endKey != nil {
+		// Seek to first key < endKey (exclusive)
+		seekKey := KeyPool.Get()
+		seekKey.Key = it.endKey
+		seekKey.PointID = 0
+		defer KeyPool.Put(seekKey)
+
+		found := it.iter.Seek(seekKey)
+
+		// If we found a key equal to endKey, skip it (endKey is exclusive)
+		if found && bytes.Equal(it.iter.Key().Key, it.endKey) {
+			// Move to previous key (reverse direction)
+			if !it.iter.Prev() {
+				it.valid = false
+				return false
 			}
+		} else if !found {
+			// All keys are less than endKey, start from last
+			return it.iter.Last()
 		}
 
-		// This key is valid and in bounds.
 		return true
 	}
+	return it.iter.Last()
 }
 
-// Value returns the value of the current entry.
-func (it *MemtableIterator) value() []byte {
-	if !it.valid {
-		return nil
+// advanceToNextKey moves to the next distinct key, skipping older versions.
+func (it *MemtableIterator) advanceToNextKey() bool {
+	lastKey := it.iter.Key().Key
+
+	// Skip all entries with the same key
+	for {
+		if !it.iter.Next() {
+			it.valid = false
+			return false
+		}
+
+		if !bytes.Equal(it.iter.Key().Key, lastKey) {
+			break // Found a new key
+		}
 	}
-	return it.iter.Value().Value
-}
 
-// Key returns the key of the current entry.
-func (it *MemtableIterator) key() []byte {
-	if !it.valid {
-		return nil
+	// For descending, skip to latest version of the new key
+	if it.order == types.Descending {
+		it.skipToLatestVersionOfCurrentKeyDescending()
 	}
-	return it.iter.Key().Key
+
+	// Validate bounds
+	return it.checkBoundsAndAdvance()
 }
 
-// EntryType returns the type of the current entry.
-func (it *MemtableIterator) entryType() core.EntryType {
-	if !it.valid {
-		return 0 // Return a zero value if not valid
+// checkBoundsAndAdvance validates key bounds and advances if necessary.
+func (it *MemtableIterator) checkBoundsAndAdvance() bool {
+	for {
+		currentKey := it.iter.Key().Key
+
+		if it.order == types.Ascending {
+			// Check upper bound
+			if it.endKey != nil && bytes.Compare(currentKey, it.endKey) >= 0 {
+				it.valid = false
+				return false
+			}
+			return true // Valid entry within bounds
+		}
+
+		// Descending order
+		// Check lower bound
+		if it.startKey != nil && bytes.Compare(currentKey, it.startKey) < 0 {
+			it.valid = false
+			return false
+		}
+
+		// Check upper bound (shouldn't be >= endKey)
+		if it.endKey != nil && bytes.Compare(currentKey, it.endKey) >= 0 {
+			// Out of bounds, advance to next key
+			if !it.skipToNextKeyInBounds() {
+				return false
+			}
+			continue // Re-check bounds
+		}
+
+		return true // Valid entry within bounds
 	}
-	return it.iter.Value().EntryType
 }
 
-// SequenceNumber returns the point id of the current entry.
-// This is needed to implement iterator.Interface.
-func (it *MemtableIterator) pointID() uint64 {
-	if !it.valid {
-		return 0 // Return a zero value if not valid
+// skipToNextKeyInBounds advances to the next key for descending iteration.
+func (it *MemtableIterator) skipToNextKeyInBounds() bool {
+	lastKey := it.iter.Key().Key
+
+	for {
+		if !it.iter.Next() {
+			it.valid = false
+			return false
+		}
+
+		if !bytes.Equal(it.iter.Key().Key, lastKey) {
+			break
+		}
 	}
-	return it.iter.Key().PointID
+
+	it.skipToLatestVersionOfCurrentKeyDescending()
+	return true
 }
 
+// At returns the current entry's data.
+//
+// Returns:
+//   - node: Iterator node containing key, value, entry type, and sequence number
+//   - error: Always nil (for interface compatibility)
+//
+// The returned node is only valid until the next Next() call.
+// Returns empty node if iterator is not valid.
 func (it *MemtableIterator) At() (*core.IteratorNode, error) {
-	/*if !it.valid {
-		return nil, nil, 0, 0
-	}
-	return it.key(), it.value(), it.entryType(), it.pointID()*/
 	if !it.valid {
 		return &core.IteratorNode{}, nil
 	}
+
 	return &core.IteratorNode{
 		Key:       it.key(),
 		Value:     it.value(),
@@ -191,19 +252,52 @@ func (it *MemtableIterator) At() (*core.IteratorNode, error) {
 	}, nil
 }
 
-// Error returns the error.
+// Error returns any error encountered during iteration.
+// Currently always returns nil as errors are handled during iteration.
 func (it *MemtableIterator) Error() error {
 	return it.err
 }
 
-// Close releases the iterator's resources, including the read lock on the memtable.
-// It is safe to call Close multiple times.
+// Close releases the iterator's resources and the read lock on the memtable.
+// Safe to call multiple times (idempotent).
+// MUST be called when done with the iterator to prevent deadlocks.
 func (it *MemtableIterator) Close() error {
-	if it.mu == nil { // Prevent multiple unlocks
-		return nil
+	if it.mu == nil {
+		return nil // Already closed
 	}
+
 	it.valid = false
-	it.mu.RUnlock() // Release the read lock on the memtable
+	it.mu.RUnlock() // Release read lock on memtable
 	it.mu = nil     // Mark as closed
 	return nil
+}
+
+// Helper methods for accessing current entry data
+
+func (it *MemtableIterator) key() []byte {
+	if !it.valid {
+		return nil
+	}
+	return it.iter.Key().Key
+}
+
+func (it *MemtableIterator) value() []byte {
+	if !it.valid {
+		return nil
+	}
+	return it.iter.Value().Value
+}
+
+func (it *MemtableIterator) entryType() core.EntryType {
+	if !it.valid {
+		return 0
+	}
+	return it.iter.Value().EntryType
+}
+
+func (it *MemtableIterator) pointID() uint64 {
+	if !it.valid {
+		return 0
+	}
+	return it.iter.Key().PointID
 }

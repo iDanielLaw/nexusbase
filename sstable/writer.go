@@ -76,6 +76,11 @@ func NewSSTableWriter(opts core.SSTableWriterOptions) (core.SSTableWriterInterfa
 		opts.Logger = slog.Default() // Use default logger if none provided
 	}
 
+	// Ensure DataDir exists before creating temp file
+	if err := os.MkdirAll(opts.DataDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory %s: %w", opts.DataDir, err)
+	}
+
 	tempFilePath := filepath.Join(opts.DataDir, fmt.Sprintf("%d.tmp", opts.ID))
 	file, err := sys.Create(tempFilePath)
 	if err != nil {
