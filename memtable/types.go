@@ -17,6 +17,10 @@ type MemtableKey struct {
 
 // Bytes serializes the MemtableKey into a byte slice.
 // Format: [Key bytes][PointID as BigEndian uint64]
+//
+// Note: This method is currently unused in the codebase. It's provided for
+// potential future serialization needs. The actual memtable flush operation
+// passes Key and PointID separately to the SSTable writer.
 func (mk *MemtableKey) Bytes() []byte {
 	buf := make([]byte, len(mk.Key)+8) // 8 bytes for uint64
 	copy(buf, mk.Key)
@@ -35,9 +39,10 @@ type MemtableEntry struct {
 
 // Size returns the estimated memory size of the entry in bytes.
 // This is used for tracking memtable size and determining when to flush.
-// Uses binary.MaxVarintLen64 (10 bytes) for PointID to match the original calculation.
+// The calculation uses 8 bytes for PointID (uint64) to match the actual in-memory size
+// and align with the Bytes() serialization method.
 func (e *MemtableEntry) Size() int64 {
-	// Key + Value + PointID (8 bytes) + EntryType (1 byte)
+	// Key + Value + PointID (8 bytes for uint64) + EntryType (1 byte)
 	return int64(len(e.Key) + len(e.Value) + 8 + 1)
 }
 

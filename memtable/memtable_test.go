@@ -2,7 +2,6 @@ package memtable
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
@@ -167,9 +166,10 @@ func TestMemtable_Size(t *testing.T) {
 		t.Errorf("Initial size should be 0, got %d", mt.Size())
 	}
 
-	// Helper to calculate expected entry size based on memtable.go logic
+	// Helper to calculate expected entry size based on actual in-memory size
+	// PointID is uint64 (8 bytes), EntryType is 1 byte
 	calculateExpectedEntrySize := func(key, value []byte) int {
-		return len(key) + len(value) + binary.MaxVarintLen64 /*PointID*/ + 1 /*EntryType*/
+		return len(key) + len(value) + 8 /*PointID uint64*/ + 1 /*EntryType*/
 	}
 
 	// Put some entries

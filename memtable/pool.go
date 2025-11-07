@@ -8,6 +8,12 @@ import (
 // Pool provides object pooling for memory-intensive structures to reduce GC pressure.
 // This implementation is safe for concurrent use.
 
+const (
+	// maxPoolSize limits the maximum number of items in each pool to prevent unbounded growth.
+	// Set to 2x the initial capacity to handle burst traffic while preventing memory leaks.
+	maxPoolSize = 32768 // 2x initial capacity of 16384
+)
+
 // keyPool manages a pool of MemtableKey objects to reduce allocations.
 type keyPool struct {
 	mu    sync.Mutex
@@ -35,16 +41,18 @@ func (p *keyPool) Get() *MemtableKey {
 		return &MemtableKey{}
 	}
 
-	p.hits.Add(1)
 	item := p.items[len(p.items)-1]
 	p.items = p.items[:len(p.items)-1]
 	p.mu.Unlock()
 
+	// Update metrics after releasing lock (atomic operation is thread-safe)
+	p.hits.Add(1)
 	return item
 }
 
 // Put returns a MemtableKey to the pool for reuse.
 // The key is reset to prevent memory leaks and accidental data reuse.
+// If the pool has reached maxPoolSize, the object is discarded to prevent unbounded growth.
 func (p *keyPool) Put(k *MemtableKey) {
 	if k == nil {
 		return
@@ -55,7 +63,10 @@ func (p *keyPool) Put(k *MemtableKey) {
 	k.PointID = 0
 
 	p.mu.Lock()
-	p.items = append(p.items, k)
+	// Only add to pool if below max capacity to prevent unbounded growth
+	if len(p.items) < maxPoolSize {
+		p.items = append(p.items, k)
+	}
 	p.mu.Unlock()
 }
 
@@ -92,15 +103,17 @@ func (p *entryPool) Get() *MemtableEntry {
 		return &MemtableEntry{}
 	}
 
-	p.hits.Add(1)
 	item := p.items[len(p.items)-1]
 	p.items = p.items[:len(p.items)-1]
 	p.mu.Unlock()
 
+	// Update metrics after releasing lock (atomic operation is thread-safe)
+	p.hits.Add(1)
 	return item
 }
 
 // Put returns a MemtableEntry to the pool for reuse.
+// If the pool has reached maxPoolSize, the object is discarded to prevent unbounded growth.
 func (p *entryPool) Put(e *MemtableEntry) {
 	if e == nil {
 		return
@@ -113,7 +126,10 @@ func (p *entryPool) Put(e *MemtableEntry) {
 	e.PointID = 0
 
 	p.mu.Lock()
-	p.items = append(p.items, e)
+	// Only add to pool if below max capacity to prevent unbounded growth
+	if len(p.items) < maxPoolSize {
+		p.items = append(p.items, e)
+	}
 	p.mu.Unlock()
 }
 

@@ -135,10 +135,19 @@ func (it *MemtableIterator) seekReverseStart() bool {
 		defer KeyPool.Put(seekKey)
 
 		found := it.iter.Seek(seekKey)
-		if !found {
+
+		// If we found a key equal to endKey, skip it (endKey is exclusive)
+		if found && bytes.Equal(it.iter.Key().Key, it.endKey) {
+			// Move to previous key (reverse direction)
+			if !it.iter.Prev() {
+				it.valid = false
+				return false
+			}
+		} else if !found {
 			// All keys are less than endKey, start from last
 			return it.iter.Last()
 		}
+
 		return true
 	}
 	return it.iter.Last()
