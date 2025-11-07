@@ -77,7 +77,7 @@ func (ls *LevelState) AddBatch(tablesToAdd []*sstable.SSTable) error {
 		return nil
 	}
 
-	// Validate and add to map first
+	// Validate all tables first
 	for _, table := range tablesToAdd {
 		if table == nil {
 			return fmt.Errorf("cannot add nil table to LevelState")

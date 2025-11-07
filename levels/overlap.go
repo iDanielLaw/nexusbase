@@ -7,8 +7,8 @@ import (
 	"github.com/INLOpen/nexusbase/sstable"
 )
 
-// getOverlappingTablesLocked is the unlocked version of GetOverlappingTables.
-// It must be called with the LevelsManager's read lock held.
+// getOverlappingTablesLocked is the internal version of GetOverlappingTables.
+// It must be called with the LevelsManager's read lock already held.
 func (lm *LevelsManager) getOverlappingTablesLocked(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
 	if levelNum < 0 || levelNum >= len(lm.levels) {
 		return nil
@@ -74,8 +74,8 @@ func tableOverlapsRange(table *sstable.SSTable, minRangeKey, maxRangeKey []byte)
 }
 
 // GetOverlappingTables returns SSTables from a given level that overlap with the provided key range [minKey, maxKey].
-// For L0, all tables are considered overlapping if the range itself is valid (as L0 tables can overlap arbitrarily).
-// For L1+, tables are sorted by minKey and non-overlapping, so we can find relevant tables more efficiently.
+// For L0, each table is checked individually for overlap (as L0 tables can overlap arbitrarily).
+// For L1+, tables are sorted by minKey and non-overlapping, so we can find relevant tables more efficiently using binary search.
 func (lm *LevelsManager) GetOverlappingTables(levelNum int, minRangeKey, maxRangeKey []byte) []*sstable.SSTable {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
