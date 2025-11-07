@@ -45,18 +45,19 @@ type CacheConfig struct {
 
 // CompactionConfig holds compaction-specific configurations.
 type CompactionConfig struct {
-	L0TriggerFileCount     int    `yaml:"l0_trigger_file_count"`
-	L0TriggerSizeBytes     int64  `yaml:"l0_trigger_size_bytes"`
-	TargetSSTableSizeBytes int64  `yaml:"target_sstable_size_bytes"`
-	LevelsSizeMultiplier   int    `yaml:"levels_size_multiplier"`
-	MaxLevels              int    `yaml:"max_levels"`
-	CheckInterval          string `yaml:"check_interval"`
-	FallbackStrategy     string  `yaml:"fallback_strategy"`
-	TombstoneWeight      float64 `yaml:"tombstone_weight"`
-	OverlapPenaltyWeight float64 `yaml:"overlap_penalty_weight"`
-	IntraL0TriggerFileCount int   `yaml:"intra_l0_trigger_file_count"`
-	IntraL0MaxFileSizeBytes int64 `yaml:"intra_l0_max_file_size_bytes"`
+	L0TriggerFileCount      int     `yaml:"l0_trigger_file_count"`
+	L0TriggerSizeBytes      int64   `yaml:"l0_trigger_size_bytes"`
+	TargetSSTableSizeBytes  int64   `yaml:"target_sstable_size_bytes"`
+	LevelsSizeMultiplier    int     `yaml:"levels_size_multiplier"`
+	MaxLevels               int     `yaml:"max_levels"`
+	CheckInterval           string  `yaml:"check_interval"`
+	FallbackStrategy        string  `yaml:"fallback_strategy"`
+	TombstoneWeight         float64 `yaml:"tombstone_weight"`
+	OverlapPenaltyWeight    float64 `yaml:"overlap_penalty_weight"`
+	IntraL0TriggerFileCount int     `yaml:"intra_l0_trigger_file_count"`
+	IntraL0MaxFileSizeBytes int64   `yaml:"intra_l0_max_file_size_bytes"`
 }
+
 // WALConfig holds Write-Ahead Log specific configurations.
 type WALConfig struct {
 	SyncMode            string `yaml:"sync_mode"`
@@ -117,9 +118,10 @@ type QueryServerConfig struct {
 }
 
 type SelfMonitoringConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Interval     string `yaml:"interval"`
-	MetricPrefix string `yaml:"metric_prefix"`
+	Enabled       bool   `yaml:"enabled"`
+	Interval      string `yaml:"interval"`
+	MetricPrefix  string `yaml:"metric_prefix"`
+	LeaderAddress string `yaml:"leader_address"` // สำหรับ self-monitoring metrics โดยเฉพาะ
 }
 
 // TracingConfig holds configuration for distributed tracing.
@@ -127,6 +129,16 @@ type TracingConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Endpoint string `yaml:"endpoint"` // e.g., "localhost:4317" for gRPC OTLP collector
 	Protocol string `yaml:"protocol"` // "grpc" or "http"
+}
+
+// ReplicationConfig holds the configuration for the replication system.
+type ReplicationConfig struct {
+	Mode                       string    `yaml:"mode"`                          // "leader", "follower", or "disabled"
+	ListenAddress              string    `yaml:"listen_address"`                // Address for this node's gRPC service
+	Followers                  []string  `yaml:"followers"`                     // List of follower addresses (for leader)
+	LeaderAddress              string    `yaml:"leader_address"`                // Address of the leader (for follower)
+	TLS                        TLSConfig `yaml:"tls"`                           // TLS configuration for replication gRPC connections
+	GracefulStopTimeoutSeconds int       `yaml:"graceful_stop_timeout_seconds"` // Timeout for graceful shutdown in seconds
 }
 
 // Config is the top-level configuration struct.
@@ -139,6 +151,7 @@ type Config struct {
 	SelfMonitoring SelfMonitoringConfig `yaml:"self_monitoring"`
 	Tracing        TracingConfig        `yaml:"tracing"`
 	QueryServer    QueryServerConfig    `yaml:"query_server"`
+	Replication    ReplicationConfig    `yaml:"replication"`
 }
 
 // ParseDuration parses a duration string. Returns the default duration if the string is empty or invalid.
@@ -190,16 +203,16 @@ func Load(r io.Reader) (*Config, error) {
 				BlockCacheCapacity: 1024,
 			},
 			Compaction: CompactionConfig{
-				L0TriggerFileCount:     4,
-				L0TriggerSizeBytes:     16 * 1024 * 1024, // 16 MiB
-				TargetSSTableSizeBytes: 16 * 1024 * 1024, // 16 MiB
-				LevelsSizeMultiplier:   5,
-				MaxLevels:              7,
-				CheckInterval:          "120s",
-				FallbackStrategy:         "PickOldest",
-				TombstoneWeight:          1.5, // Default weight for tombstone priority
-				OverlapPenaltyWeight:     1.0, // Default weight for overlap penalty
-				IntraL0TriggerFileCount: 8, // Default to triggering with 8 small files
+				L0TriggerFileCount:      4,
+				L0TriggerSizeBytes:      16 * 1024 * 1024, // 16 MiB
+				TargetSSTableSizeBytes:  16 * 1024 * 1024, // 16 MiB
+				LevelsSizeMultiplier:    5,
+				MaxLevels:               7,
+				CheckInterval:           "120s",
+				FallbackStrategy:        "PickOldest",
+				TombstoneWeight:         1.5,             // Default weight for tombstone priority
+				OverlapPenaltyWeight:    1.0,             // Default weight for overlap penalty
+				IntraL0TriggerFileCount: 8,               // Default to triggering with 8 small files
 				IntraL0MaxFileSizeBytes: 2 * 1024 * 1024, // Default to 2MB for "small" files
 			},
 			WAL: WALConfig{
@@ -246,6 +259,18 @@ func Load(r io.Reader) (*Config, error) {
 			PProfEnabled:     true,
 			MetricsEnabled:   true,
 			MonitorUIEnabled: true,
+		},
+		Replication: ReplicationConfig{
+			Mode:          "disabled",
+			ListenAddress: ":50052",
+			Followers:     nil,
+			LeaderAddress: "",
+			TLS: TLSConfig{
+				Enabled:  false,
+				CertFile: "certs/replication.crt",
+				KeyFile:  "certs/replication.key",
+			},
+			GracefulStopTimeoutSeconds: 30,
 		},
 	}
 

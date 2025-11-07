@@ -16,7 +16,7 @@ func TestEngine_SnapshotAndRestore(t *testing.T) {
 
 	// --- Phase 1: Setup a source engine and create a snapshot ---
 	sourceDir := t.TempDir()
-	sourceOpts := getBaseOptsForFlushTest(t)
+	sourceOpts := GetBaseOptsForTest(t, "test")
 	sourceOpts.DataDir = sourceDir
 
 	sourceEngine, err := NewStorageEngine(sourceOpts)
@@ -46,7 +46,7 @@ func TestEngine_SnapshotAndRestore(t *testing.T) {
 
 	// --- Phase 2: Setup a destination engine with different data ---
 	destDir := t.TempDir()
-	destOpts := getBaseOptsForFlushTest(t)
+	destOpts := GetBaseOptsForTest(t, "test")
 	destOpts.DataDir = destDir
 
 	destEngine, err := NewStorageEngine(destOpts)
@@ -90,7 +90,7 @@ func TestEngine_RestoreFromSnapshot_NoOverwrite(t *testing.T) {
 
 	// --- Phase 1: Create a snapshot ---
 	sourceDir := t.TempDir()
-	sourceOpts := getBaseOptsForFlushTest(t)
+	sourceOpts := GetBaseOptsForTest(t, "test")
 	sourceOpts.DataDir = sourceDir
 	sourceEngine, err := NewStorageEngine(sourceOpts)
 	require.NoError(t, err)
@@ -103,7 +103,7 @@ func TestEngine_RestoreFromSnapshot_NoOverwrite(t *testing.T) {
 
 	// --- Phase 2: Attempt to restore to a non-empty DB without overwrite ---
 	destDir := t.TempDir()
-	destOpts := getBaseOptsForFlushTest(t)
+	destOpts := GetBaseOptsForTest(t, "test")
 	destOpts.DataDir = destDir
 	destEngine, err := NewStorageEngine(destOpts)
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestEngine_RestoreFromSnapshot_ErrorHandling(t *testing.T) {
 	createValidSnapshot := func(t *testing.T) (snapshotPath string, cleanup func()) {
 		t.Helper()
 		sourceDir := t.TempDir()
-		sourceOpts := getBaseOptsForFlushTest(t)
+		sourceOpts := GetBaseOptsForTest(t, "test")
 		sourceOpts.DataDir = sourceDir
 		sourceEngine, err := NewStorageEngine(sourceOpts)
 		require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestEngine_RestoreFromSnapshot_ErrorHandling(t *testing.T) {
 	setupDestEngine := func(t *testing.T) (*storageEngine, func()) {
 		t.Helper()
 		destDir := t.TempDir()
-		destOpts := getBaseOptsForFlushTest(t)
+		destOpts := GetBaseOptsForTest(t, "test")
 		destOpts.DataDir = destDir
 		destEngine, err := NewStorageEngine(destOpts)
 		require.NoError(t, err)

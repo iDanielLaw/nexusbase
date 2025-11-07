@@ -25,6 +25,7 @@ import (
 	"github.com/INLOpen/nexusbase/api/tsdb"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -32,7 +33,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/health/grpc_health_v1"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -650,4 +651,97 @@ func TestAppServer_GRPC_ForceFlush(t *testing.T) {
 	// Call RPC
 	_, err := client.ForceFlush(ctx, &tsdb.ForceFlushRequest{})
 	require.NoError(t, err)
+}
+
+func TestAppServer_ErrorCases(t *testing.T) {
+	// 1. สร้าง server ด้วย port ที่ซ้ำกัน
+	grpcPort := findFreePort(t)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	mockEngine := new(MockStorageEngine)
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			GRPCPort: grpcPort,
+			TCPPort:  0,
+		},
+	}
+
+	mockEngine.On("GetSnapshotsBaseDir").Return("/tmp").Maybe()
+	mockEngine.On("GetWAL").Return(nil).Maybe()
+	mockEngine.On("GetStringStore").Return(&indexer.StringStore{}).Maybe()
+	mockEngine.On("GetSnapshotManager").Return(nil).Maybe()
+	mockEngine.On("Close").Return(nil).Maybe()
+
+	appServer1, err := NewAppServer(mockEngine, cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, appServer1)
+
+	// สร้าง server ตัวที่สองด้วย port เดียวกัน ควร error
+	_, err2 := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+	if err2 == nil {
+		// ถ้า port ยังว่าง ให้ appServer2 จอง port
+		appServer2, err := NewAppServer(mockEngine, cfg, logger)
+		assert.Error(t, err, "ควร error เมื่อสร้าง server ด้วย port ซ้ำ")
+		if appServer2 != nil && appServer2.grpcLis != nil {
+			appServer2.grpcLis.Close()
+		}
+		appServer1.grpcLis.Close()
+	} else {
+		// ถ้า port ถูกจองแล้ว จะ error ตามคาด
+		assert.Error(t, err2)
+	}
+
+	// 2. ทดสอบ stop หลายครั้ง
+	appServer1.Stop()
+	appServer1.Stop() // ไม่ควร panic หรือ error
+
+	// 3. ทดสอบ config ที่ไม่มี gRPC/TCP/Query/Replication
+	cfgNone := &config.Config{
+		Server: config.ServerConfig{
+			GRPCPort: 0,
+			TCPPort:  0,
+		},
+	}
+	appServerNone, err := NewAppServer(mockEngine, cfgNone, logger)
+	require.NoError(t, err)
+	require.NotNil(t, appServerNone)
+	errStart := appServerNone.Start()
+	assert.NoError(t, errStart)
+
+	// 4. ทดสอบ worker pool start/stop
+	appServerNone.putWorker.Start()
+	appServerNone.putWorker.Stop()
+	appServerNone.batchWorker.Start()
+	appServerNone.batchWorker.Stop()
+
+	// 5. ทดสอบ replication manager/wal applier
+	cfgRepl := &config.Config{
+		Server: config.ServerConfig{
+			GRPCPort: 0,
+			TCPPort:  0,
+		},
+		Replication: config.ReplicationConfig{
+			Mode: "leader",
+		},
+	}
+	appServerRepl, err := NewAppServer(mockEngine, cfgRepl, logger)
+	require.NoError(t, err)
+	// ไม่ต้องเรียก Stop() ตรงนี้ เพราะจะถูก Stop() อีกครั้งด้านล่าง
+	cfgReplF := &config.Config{
+		Server: config.ServerConfig{
+			GRPCPort: 0,
+			TCPPort:  0,
+		},
+		Replication: config.ReplicationConfig{
+			Mode: "follower",
+		},
+	}
+	appServerReplF, err := NewAppServer(mockEngine, cfgReplF, logger)
+	require.NoError(t, err)
+	// ไม่ต้องเรียก Stop() ตรงนี้ เพราะจะถูก Stop() อีกครั้งด้านล่าง
+
+	// 6. ทดสอบ cleanup resource
+	appServerNone.Stop()
+	appServerRepl.Stop()
+	appServerReplF.Stop()
 }

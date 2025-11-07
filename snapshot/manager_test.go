@@ -32,7 +32,6 @@ import (
 )
 
 // --- Mocks ---
-
 // mockEngineProvider เป็น mock implementation ของ EngineProvider interface
 type mockEngineProvider struct {
 	mock.Mock
@@ -228,6 +227,14 @@ func (m *mockWAL) ActiveSegmentIndex() uint64 {
 	return args.Get(0).(uint64)
 }
 func (m *mockWAL) Rotate() error { return m.Called().Error(0) }
+
+func (m *mockWAL) NewStreamReader(fromSeqNum uint64) (wal.StreamReader, error) {
+	args := m.Called(fromSeqNum)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(wal.StreamReader), args.Error(1)
+}
 
 // mockPrivateManagerStore เป็น mock สำหรับ internal.PrivateManagerStore
 type mockPrivateManagerStore struct {

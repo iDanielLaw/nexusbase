@@ -32,6 +32,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
+
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // basicAuthCreds implements credentials.PerRPCCredentials for Basic Auth in tests.
@@ -1171,4 +1173,60 @@ func readAllQueryResults(t *testing.T, stream tsdb.TSDBService_QueryClient) []*t
 		results = append(results, res)
 	}
 	return results
+}
+
+func TestReplication_HealthCheckIntegration(t *testing.T) {
+	// เตรียม AppServer ที่มี gRPC health service
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			GRPCPort: 50051,
+			TCPPort:  0,
+			TLS:      config.TLSConfig{Enabled: false},
+		},
+		Engine: config.EngineConfig{
+			DataDir: t.TempDir(),
+		},
+		Logging: config.LoggingConfig{Level: "error", Output: "stdout"},
+	}
+	logger, _, err := createLogger(cfg.Logging)
+	assert.NoError(t, err)
+
+	eng, err := engine.NewStorageEngine(engine.StorageEngineOptions{DataDir: cfg.Engine.DataDir})
+	assert.NoError(t, err)
+
+	appServer, err := NewAppServer(eng, cfg, logger)
+	assert.NoError(t, err)
+
+	go func() {
+		_ = appServer.Start()
+	}()
+	defer appServer.Stop()
+
+	// รอ server ready
+	<-time.After(500 * time.Millisecond)
+
+	// Dial follower จริง
+	addr := ""
+	if cfg.Server.GRPCPort != 0 {
+		addr = ":50051"
+	}
+	conn, err := grpc.Dial(addr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(2*time.Second))
+	assert.NoError(t, err)
+	defer conn.Close()
+
+	// Health check
+	healthClient := grpc_health_v1.NewHealthClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := healthClient.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	assert.NoError(t, err)
+	assert.Equal(t, grpc_health_v1.HealthCheckResponse_SERVING, resp.GetStatus())
+}
+
+func listenTCP(addr string) net.Listener {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+	return ln
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -25,6 +26,10 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+)
+
+var (
+	ErrWritesForbiddenInFollowerMode = errors.New("writes are forbidden in follower mode")
 )
 
 // --- Query Helpers ---
@@ -599,6 +604,9 @@ func (e *storageEngine) Put(ctx context.Context, point core.DataPoint) error {
 	if err := e.CheckStarted(); err != nil {
 		return err
 	}
+	if e.replicationMode == "follower" {
+		return ErrWritesForbiddenInFollowerMode
+	}
 	return e.PutBatch(ctx, []core.DataPoint{point})
 }
 
@@ -618,6 +626,9 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 
 	if errCheck := e.CheckStarted(); errCheck != nil {
 		return errCheck
+	}
+	if e.replicationMode == "follower" {
+		return ErrWritesForbiddenInFollowerMode
 	}
 	startTime := e.clock.Now()
 	defer func() {
@@ -862,6 +873,10 @@ func (e *storageEngine) Get(ctx context.Context, metric string, tags map[string]
 func (e *storageEngine) Delete(ctx context.Context, metric string, tags map[string]string, timestamp int64) (err error) {
 	if errCheck := e.CheckStarted(); errCheck != nil {
 		err = errCheck
+		return
+	}
+	if e.replicationMode == "follower" {
+		err = ErrWritesForbiddenInFollowerMode
 		return
 	}
 

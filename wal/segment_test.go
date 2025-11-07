@@ -35,7 +35,7 @@ func TestSegmentFileNameFormat(t *testing.T) {
 		})
 	}
 
-	t.Run("ParseError", func(t *testing.T) {
+			t.Run("ParseError", func(t *testing.T) {
 		_, err := core.ParseSegmentFileName("not_a_segment.log")
 		assert.Error(t, err)
 		_, err = core.ParseSegmentFileName("00000001.wal_backup")
@@ -219,4 +219,59 @@ func TestSegmentWriter_Close(t *testing.T) {
 	err = sw.WriteRecord([]byte("test"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, os.ErrClosed)
+}
+
+func TestReadRecord_WALMaxSegmentSize(t *testing.T) {
+	tempDir := t.TempDir()
+	segmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(1))
+
+	// Helper to write a record with a specific length
+	writeRecordWithLength := func(t *testing.T, recordLen uint32) {
+		t.Helper()
+		var buf bytes.Buffer
+		data := make([]byte, recordLen)
+		// Fill with some data to make it realistic, though content doesn't matter for this test
+		for i := range data {
+			data[i] = byte(i % 256)
+		}
+
+		require.NoError(t, binary.Write(&buf, binary.LittleEndian, recordLen))
+		buf.Write(data)
+		checksum := crc32.ChecksumIEEE(data)
+		require.NoError(t, binary.Write(&buf, binary.LittleEndian, checksum))
+
+		// Write to file with a valid header
+		file, err := os.Create(segmentPath)
+		require.NoError(t, err)
+		header := core.NewFileHeader(core.WALMagicNumber, core.CompressionNone)
+		require.NoError(t, binary.Write(file, binary.LittleEndian, &header))
+		_, err = file.Write(buf.Bytes())
+		require.NoError(t, err)
+		file.Close()
+	}
+
+	t.Run("RecordExceedsLimit", func(t *testing.T) {
+		// Write a record slightly larger than the limit
+		writeRecordWithLength(t, core.WALMaxSegmentSize+1)
+
+		sr, err := OpenSegmentForRead(segmentPath)
+		require.NoError(t, err)
+		defer sr.Close()
+
+		_, err = sr.ReadRecord()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds sanity limit")
+	})
+
+	t.Run("RecordAtLimit", func(t *testing.T) {
+		// Write a record exactly at the limit
+		writeRecordWithLength(t, core.WALMaxSegmentSize)
+
+		sr, err := OpenSegmentForRead(segmentPath)
+		require.NoError(t, err)
+		defer sr.Close()
+
+		_, err = sr.ReadRecord()
+		require.NoError(t, err) // Should not error, as it's exactly at the limit
+	})
 }

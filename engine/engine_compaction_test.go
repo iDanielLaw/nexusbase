@@ -136,7 +136,7 @@ func setupCompactionManagerWithMockWriter(t *testing.T, mockWriter *MockSSTableW
 	t.Helper()
 	logger := slog.Default()
 
-	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"), levels.PickOldest,1.5,1.0)
+	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"), levels.PickOldest, 1.5, 1.0)
 	t.Cleanup(func() { lm.Close() })
 
 	// Create a dummy engine just to get a stringStore
@@ -642,8 +642,6 @@ func TestCompactionManager_CompactLNToLNPlus1_RemoveOldSSTableError(t *testing.T
 	sstL2_no_overlap := createDummySSTable(t, dummyEngine, sstL2ID, []testEntry{
 		{metric: "metric.ln", tags: map[string]string{"id": "z"}, value: "4"},
 	})
-	t.Cleanup(func() { sstL1.Close() })
-	t.Cleanup(func() { sstL2_no_overlap.Close() })
 
 	mockRemover := cm.fileRemover.(*mockFileRemover)
 	mockRemover.failPaths[sstL1.FilePath()] = errMockRemove
@@ -1219,7 +1217,7 @@ func TestCompactionManager_RetentionPolicy(t *testing.T) {
 	cutoffTime := mockNow.Add(-retentionDuration).UnixNano()
 
 	// Setup LevelsManager
-	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"), levels.PickOldest,1.5,1.0)
+	lm, _ := levels.NewLevelsManager(3, 2, 1024, trace.NewNoopTracerProvider().Tracer("test"), levels.PickOldest, 1.5, 1.0)
 	defer lm.Close()
 
 	// Setup a dummy engine to get a StringStore, ensure it uses the same data directory
@@ -1733,8 +1731,8 @@ func TestCompactionManager_IntraL0Compaction(t *testing.T) {
 		DataDir:                           tempDir,
 		Logger:                            logger,
 		MaxLevels:                         3,
-		MaxL0Files:                        10, // High L0->L1 trigger to ensure it doesn't run
-		IntraL0CompactionTriggerFiles:     3,  // Trigger with 3 small files
+		MaxL0Files:                        10,   // High L0->L1 trigger to ensure it doesn't run
+		IntraL0CompactionTriggerFiles:     3,    // Trigger with 3 small files
 		IntraL0CompactionMaxFileSizeBytes: 1024, // Files <= 1KB are "small"
 		SSTableCompressor:                 &compressors.NoCompressionCompressor{},
 		CompactionIntervalSeconds:         3600, // Disable auto compaction
@@ -1750,9 +1748,9 @@ func TestCompactionManager_IntraL0Compaction(t *testing.T) {
 	cm := concreteEngine.compactor.(*CompactionManager)
 
 	// 2. Arrange: Create 3 small SSTables and 1 large one in L0
-	smallSST1 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.a", value: "v1"}}) // small
-	smallSST2 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.b", value: "v2"}}) // small
-	smallSST3 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.c", value: "v3"}}) // small
+	smallSST1 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.a", value: "v1"}})                          // small
+	smallSST2 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.b", value: "v2"}})                          // small
+	smallSST3 := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.c", value: "v3"}})                          // small
 	largeSST := createDummySSTable(t, dummyEngine, dummyEngine.GetNextSSTableID(), []testEntry{{metric: "intra.l0.large", value: string(make([]byte, 2048))}}) // large
 
 	require.NoError(t, lm.AddL0Table(smallSST1))
@@ -1820,10 +1818,10 @@ func TestCompactionManager_IntraL0Compaction_ShouldNotRun(t *testing.T) {
 		// Setup: Feature is disabled via config (TriggerFiles = 0)
 		opts := StorageEngineOptions{
 			DataDir:                           t.TempDir(),
-			MaxLevels:                         3, // Add MaxLevels to prevent panic
-			MaxL0Files:                        100, // High L0->L1 trigger to ensure it doesn't run
+			MaxLevels:                         3,                  // Add MaxLevels to prevent panic
+			MaxL0Files:                        100,                // High L0->L1 trigger to ensure it doesn't run
 			L0CompactionTriggerSize:           1024 * 1024 * 1024, // High size trigger to ensure it doesn't run
-			IntraL0CompactionTriggerFiles:     0, // Feature disabled
+			IntraL0CompactionTriggerFiles:     0,                  // Feature disabled
 			IntraL0CompactionMaxFileSizeBytes: 1024,
 		}
 		engine, cm := setupTestEngine(t, opts)
@@ -1847,10 +1845,10 @@ func TestCompactionManager_IntraL0Compaction_ShouldNotRun(t *testing.T) {
 		// Setup: Trigger requires 4 files, but we only have 3
 		opts := StorageEngineOptions{
 			DataDir:                           t.TempDir(),
-			MaxLevels:                         3, // Add MaxLevels to prevent panic
-			MaxL0Files:                        100, // High L0->L1 trigger to ensure it doesn't run
+			MaxLevels:                         3,                  // Add MaxLevels to prevent panic
+			MaxL0Files:                        100,                // High L0->L1 trigger to ensure it doesn't run
 			L0CompactionTriggerSize:           1024 * 1024 * 1024, // High size trigger
-			IntraL0CompactionTriggerFiles:     4, // Needs 4 files
+			IntraL0CompactionTriggerFiles:     4,                  // Needs 4 files
 			IntraL0CompactionMaxFileSizeBytes: 1024,
 		}
 		engine, cm := setupTestEngine(t, opts)
@@ -1875,8 +1873,8 @@ func TestCompactionManager_IntraL0Compaction_ShouldNotRun(t *testing.T) {
 		// Setup: All files are larger than the max size threshold
 		opts := StorageEngineOptions{
 			DataDir:                           t.TempDir(),
-			MaxLevels:                         3, // Add MaxLevels to prevent panic
-			MaxL0Files:                        100, // High L0->L1 trigger to ensure it doesn't run
+			MaxLevels:                         3,                  // Add MaxLevels to prevent panic
+			MaxL0Files:                        100,                // High L0->L1 trigger to ensure it doesn't run
 			L0CompactionTriggerSize:           1024 * 1024 * 1024, // High size trigger
 			IntraL0CompactionTriggerFiles:     3,
 			IntraL0CompactionMaxFileSizeBytes: 100, // Only files <= 100 bytes are small

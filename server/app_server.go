@@ -14,6 +14,8 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -32,6 +34,10 @@ type AppServer struct {
 	logger      *slog.Logger
 	engine      engine.StorageEngineInterface
 	cancel      context.CancelFunc
+
+	// Replication components
+	replicationManager *replication.Manager
+	walApplier         *replication.WALApplier
 }
 
 // NewAppServer creates and initializes a new application server.
@@ -48,11 +54,7 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 	}
 
 	// Create dedicated worker pools
-	// Pool for single Puts (high frequency, short jobs)
 	putWorkerPool := NewWorkerPool(runtime.NumCPU(), 1024, eng, logger.With("pool", "put"))
-
-	// Pool for Batch Puts (lower frequency, potentially long jobs)
-	// We can configure this pool with different resources if needed, e.g., fewer workers.
 	batchWorkerPool := NewWorkerPool(runtime.NumCPU(), 512, eng, logger.With("pool", "batch"))
 
 	appSrv := &AppServer{
@@ -63,7 +65,6 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 		batchWorker: batchWorkerPool,
 	}
 
-	// 1. Initialize the gRPC server if the port is configured.
 	if cfg.Server.GRPCPort > 0 {
 		grpcAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort)
 		grpcLis, err := net.Listen("tcp", grpcAddr)
@@ -85,7 +86,6 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 
 	executor := nbql.NewExecutor(eng, clock.SystemClockDefault)
 
-	// 2. Initialize the TCP (NBQL) server if the port is configured.
 	if cfg.Server.TCPPort > 0 {
 		tcpAddr := fmt.Sprintf(":%d", cfg.Server.TCPPort)
 		tcpLis, err := net.Listen("tcp", tcpAddr)
@@ -105,17 +105,53 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 		queryServer := NewHTTPServer(&cfg.QueryServer, logger, executor)
 		appSrv.queryServer = queryServer
 	}
+
+	// --- Replication Setup ---
+	if cfg.Replication.Mode != "disabled" {
+		replicationLogger := logger.With("component", "replication")
+
+		if cfg.Replication.Mode == "leader" {
+			// Create the replication gRPC server (Leader side)
+			replicationServer := replication.NewServer(
+				eng.GetWAL(),
+				eng.GetStringStore().(*indexer.StringStore), // Type assertion
+				eng.GetSnapshotManager(),
+				eng.GetSnapshotsBaseDir(),
+				replicationLogger,
+			)
+
+			// Create the replication manager
+			replManager, err := replication.NewManager(cfg.Replication, replicationServer, replicationLogger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create replication manager: %w", err)
+			}
+			appSrv.replicationManager = replManager
+		}
+
+		if cfg.Replication.Mode == "follower" {
+			// Create the WAL applier (Follower side)
+			logger.Debug("Leader Address", "addr", cfg.Replication.LeaderAddress)
+			walApplier := replication.NewWALApplier(
+				cfg.Replication.LeaderAddress,
+				eng, // eng now satisfies the ReplicatedEngine interface
+				eng.GetSnapshotManager(),
+				eng.GetSnapshotsBaseDir(),
+				replicationLogger,
+			)
+			appSrv.walApplier = walApplier
+		}
+	}
+
 	return appSrv, nil
 }
 
 // Start runs all configured servers in parallel. It blocks until all servers stop.
 func (s *AppServer) Start() error {
-	if s.grpcServer == nil && s.tcpServer == nil && s.queryServer == nil {
-		s.logger.Error("No servers to start.")
+	if s.grpcServer == nil && s.tcpServer == nil && s.queryServer == nil && s.replicationManager == nil && s.walApplier == nil {
+		s.logger.Error("No servers or replication components to start.")
 		return nil
 	}
 
-	// Create a new context for the errgroup that can be cancelled by Stop().
 	g, ctx := errgroup.WithContext(context.Background())
 	var appCtx context.Context
 	appCtx, s.cancel = context.WithCancel(ctx)
@@ -123,10 +159,8 @@ func (s *AppServer) Start() error {
 	s.putWorker.Start()
 	s.batchWorker.Start()
 
-	// Start gRPC server if it exists
 	if s.grpcServer != nil {
 		g.Go(func() error {
-			// This goroutine waits for the shutdown signal and stops the gRPC server.
 			go func() {
 				<-appCtx.Done()
 				s.logger.Info("Context cancelled, stopping gRPC server...")
@@ -137,10 +171,8 @@ func (s *AppServer) Start() error {
 		})
 	}
 
-	// Start TCP (NBQL) server if it exists
 	if s.tcpServer != nil {
 		g.Go(func() error {
-			// This goroutine waits for the shutdown signal and stops the TCP server.
 			go func() {
 				<-appCtx.Done()
 				s.logger.Info("Context cancelled, stopping TCP server...")
@@ -151,10 +183,8 @@ func (s *AppServer) Start() error {
 		})
 	}
 
-	//Start Query Server if it exist
 	if s.queryServer != nil {
 		g.Go(func() error {
-			// This goroutine waits for the shutdfown signal and stop the Query Server.
 			go func() {
 				<-appCtx.Done()
 				s.logger.Info("Context cancelled, stopping Query Server...")
@@ -165,18 +195,39 @@ func (s *AppServer) Start() error {
 		})
 	}
 
+	if s.replicationManager != nil {
+		g.Go(func() error {
+			go func() {
+				<-appCtx.Done()
+				s.logger.Info("Context cancelled, stopping replication manager...")
+				s.replicationManager.Stop()
+			}()
+			s.logger.Info("Starting replication manager...")
+			return s.replicationManager.Start(appCtx)
+		})
+	}
+
+	if s.walApplier != nil {
+		g.Go(func() error {
+			go func() {
+				<-appCtx.Done()
+				s.logger.Info("Context cancelled, stopping WAL applier...")
+				s.walApplier.Stop()
+			}()
+			s.logger.Info("Starting WAL applier...")
+			s.walApplier.Start(appCtx)
+			return nil
+		})
+	}
+
 	s.logger.Info("Application server started. Waiting for servers to exit.")
-	// Wait for all servers to stop. g.Wait() returns the first non-nil error.
 	err := g.Wait()
 
-	// Differentiate between a graceful shutdown and an actual error.
-	// On graceful shutdown, Serve() returns specific errors.
 	if err != nil && !errors.Is(err, grpc.ErrServerStopped) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
 		s.logger.Error("A server has failed, initiating shutdown.", "error", err)
 		return fmt.Errorf("server group failed: %w", err)
 	}
 
-	// Stop the worker pools after all servers have shut down to process in-flight requests.
 	s.logger.Info("Stopping worker pools...")
 	s.putWorker.Stop()
 	s.batchWorker.Stop()
@@ -187,8 +238,13 @@ func (s *AppServer) Start() error {
 
 // Stop gracefully shuts down all servers.
 func (s *AppServer) Stop() {
-	// Trigger the cancellation of the context created in Start().
-	// This will cause the goroutines in the errgroup to stop.
+	if s.walApplier != nil {
+		s.walApplier.Stop()
+	}
+	if s.replicationManager != nil {
+		s.replicationManager.Stop()
+	}
+
 	if s.cancel != nil {
 		s.cancel()
 	}

@@ -17,7 +17,7 @@ import (
 // TestPostSSTableCreateHook verifies that the PostSSTableCreate hook is triggered
 // correctly after a memtable flush.
 func TestPostSSTableCreateHook(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	// Disable periodic compaction to have full control
 	opts.CompactionIntervalSeconds = 3600
 	engine, err := NewStorageEngine(opts)
@@ -57,7 +57,7 @@ func TestPostSSTableCreateHook(t *testing.T) {
 // TestPreSSTableDeleteHook verifies that the PreSSTableDelete hook is triggered
 // before a table is removed during compaction.
 func TestPreSSTableDeleteHook(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	// Use small memtable and L0 trigger to force compaction
 	opts.MemtableThreshold = 512
 	opts.MaxL0Files = 2
@@ -116,7 +116,7 @@ func TestPreSSTableDeleteHook(t *testing.T) {
 // TestPostManifestWriteHook verifies that the PostManifestWrite hook is triggered
 // after the manifest is persisted.
 func TestPostManifestWriteHook(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
 	require.NoError(t, engine.Start())
@@ -146,7 +146,7 @@ func TestPostManifestWriteHook(t *testing.T) {
 }
 
 func TestCacheHooks(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.BlockCacheCapacity = 1 // Very small cache to force evictions
 	opts.SSTableDefaultBlockSize = 32
 
@@ -214,7 +214,7 @@ func TestCacheHooks(t *testing.T) {
 }
 
 func TestWALHooks(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.WALMaxSegmentSize = 1024         // Small segment size to force rotation
 	opts.WALSyncMode = core.WALSyncAlways // CRITICAL: Ensure writes are flushed to disk so size check works.
 

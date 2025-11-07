@@ -25,7 +25,7 @@ func (m *mockLevelsManager) GetLevelTableCounts() (map[int]int, error) {
 
 func TestCollectAndStoreMetrics(t *testing.T) {
 	// 1. Setup
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.SelfMonitoringEnabled = false // Disable the automatic loop to test the function in isolation.
 	opts.SelfMonitoringPrefix = "__test."
 
@@ -118,7 +118,7 @@ func TestCollectAndStoreMetrics(t *testing.T) {
 }
 
 func TestStartMetrics_Loop(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.SelfMonitoringEnabled = true
 	opts.SelfMonitoringIntervalMs = 50 // Use a short interval for the test
 	opts.SelfMonitoringPrefix = "__test_start."
@@ -147,7 +147,7 @@ func TestStartMetrics_Loop(t *testing.T) {
 }
 
 func TestStartMetrics_Disabled(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.SelfMonitoringEnabled = false // Explicitly disable
 	opts.SelfMonitoringPrefix = "__test_disabled."
 

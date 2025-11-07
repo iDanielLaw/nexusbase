@@ -37,7 +37,7 @@ func setupLoaderForTest(t *testing.T, opts StorageEngineOptions) (*storageEngine
 }
 
 func TestStateLoader_Load_FreshStart(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	eng, loader := setupLoaderForTest(t, opts)
 
 	// Action: Load state into the fresh engine.
@@ -52,7 +52,7 @@ func TestStateLoader_Load_FreshStart(t *testing.T) {
 }
 
 func TestStateLoader_Load_FromManifest(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 
 	// --- Phase 1: Create a valid engine state with a manifest ---
 
@@ -101,7 +101,7 @@ func TestStateLoader_Load_FromManifest(t *testing.T) {
 }
 
 func TestStateLoader_Load_FallbackScan(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	dataDir := opts.DataDir
 
 	// --- Phase 1: Create a valid engine state with SSTables but no manifest ---
@@ -143,7 +143,7 @@ func TestStateLoader_Load_FallbackScan(t *testing.T) {
 }
 
 func TestStateLoader_Load_WithWALRecovery(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 
 	// --- Phase 1: Write to WAL and then crash ---
 	crashEngine(t, opts, func(e StorageEngineInterface) {
@@ -234,7 +234,7 @@ func crashEngine(t *testing.T, opts StorageEngineOptions, fn func(e StorageEngin
 }
 
 func TestStateLoader_Load_CorruptedManifest(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	dataDir := opts.DataDir
 
 	// --- Phase 1: Create a valid engine state with SSTables and a manifest ---
@@ -275,7 +275,7 @@ func TestStateLoader_Load_CorruptedManifest(t *testing.T) {
 }
 
 func TestStateLoader_Load_WithCheckpoint(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.WALMaxSegmentSize = 512 // Small segment size to force rotation
 
 	// --- Phase 1: Create state with multiple WAL segments and a checkpoint ---
@@ -314,7 +314,7 @@ func TestStateLoader_Load_WithCheckpoint(t *testing.T) {
 }
 
 func TestStateLoader_Load_PopulateActiveSeriesFromLog(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	// dataDir := opts.DataDir
 
 	// --- Phase 1: Create a state with some series ---
@@ -352,7 +352,7 @@ func TestStateLoader_Load_PopulateActiveSeriesFromLog(t *testing.T) {
 }
 
 func TestStateLoader_Load_ErrorReadingCheckpoint(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	dataDir := opts.DataDir
 
 	// Create a corrupted checkpoint file

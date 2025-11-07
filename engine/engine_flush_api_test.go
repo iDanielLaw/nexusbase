@@ -14,7 +14,7 @@ import (
 
 // TestStorageEngine_ForceFlush_Async tests the non-blocking (wait=false) flush.
 func TestStorageEngine_ForceFlush_Async(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	// Disable background loops to control the flush manually
 	opts.MemtableFlushIntervalMs = 0
 	opts.CompactionIntervalSeconds = 0
@@ -71,7 +71,7 @@ func TestStorageEngine_ForceFlush_Async(t *testing.T) {
 
 // TestStorageEngine_ForceFlush_Sync tests the blocking (wait=true) flush.
 func TestStorageEngine_ForceFlush_Sync(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	// Disable background loops to control the flush manually, but we will run the flush loop manually.
 	opts.MemtableFlushIntervalMs = 0
 	opts.CompactionIntervalSeconds = 0
@@ -126,7 +126,7 @@ func TestStorageEngine_ForceFlush_Sync(t *testing.T) {
 // TestStorageEngine_ForceFlush_Sync_Idle tests that a synchronous flush on an idle engine
 // (no data in memtable) completes successfully and creates a checkpoint.
 func TestStorageEngine_ForceFlush_Sync_Idle(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.MemtableFlushIntervalMs = 0
 	opts.CompactionIntervalSeconds = 0
 	opts.CheckpointIntervalSeconds = 0

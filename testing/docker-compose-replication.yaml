@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  nexusbase-leader:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nexusbase-leader
+    hostname: nexusbase-leader
+    ports:
+      - "50051:50051"  # gRPC
+      - "50052:50052"  # TCP
+      - "50053:50053"  # Replication
+      - "8088:8088"    # Query UI
+      - "6060:6060"    # Debug/Metrics
+    volumes:
+      - ../configs/config-docker-leader.yaml:/app/config.yaml:ro
+      - leader-data:/app/data
+    environment:
+      - NEXUSBASE_CONFIG=/app/config.yaml
+    command: ["--config=/app/config.yaml"]
+    networks:
+      - nexusbase-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6060/debug/vars"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  nexusbase-follower:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nexusbase-follower
+    hostname: nexusbase-follower
+    ports:
+      - "50055:50055"  # gRPC
+      - "50056:50056"  # TCP
+      - "8089:8089"    # Query UI
+      - "6061:6061"    # Debug/Metrics
+    volumes:
+      - ../configs/config-docker-follower.yaml:/app/config.yaml:ro
+      - follower-data:/app/data
+    environment:
+      - NEXUSBASE_CONFIG=/app/config.yaml
+    command: ["--config=/app/config.yaml"]
+    networks:
+      - nexusbase-net
+    depends_on:
+      nexusbase-leader:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6061/debug/vars"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  nexusbase-net:
+    driver: bridge
+
+volumes:
+  leader-data:
+    driver: local
+  follower-data:
+    driver: local

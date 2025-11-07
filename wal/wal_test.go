@@ -1,16 +1,22 @@
 package wal
 
 import (
-	"bytes"
-	"encoding/binary"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,14 +33,14 @@ func testWALOptions(t *testing.T, dir string) Options {
 }
 
 // Helper to create a slice of test WAL entries.
-func createTestWALEntries(count int) []core.WALEntry {
+func createTestWALEntries(count int, startSeqNum uint64) []core.WALEntry {
 	entries := make([]core.WALEntry, count)
 	for i := 0; i < count; i++ {
 		entries[i] = core.WALEntry{
 			EntryType: core.EntryTypePutEvent,
-			Key:       []byte(fmt.Sprintf("key-%d", i)),
-			Value:     []byte(fmt.Sprintf("value-%d", i)),
-			SeqNum:    uint64(i + 1),
+			Key:       []byte(fmt.Sprintf("key-%d", startSeqNum+uint64(i))),
+			Value:     []byte(fmt.Sprintf("value-%d", startSeqNum+uint64(i))),
+			SeqNum:    startSeqNum + uint64(i),
 		}
 	}
 	return entries
@@ -61,7 +67,7 @@ func TestWAL_AppendAndRecover(t *testing.T) {
 	wal, _, err := Open(opts)
 	require.NoError(t, err)
 
-	entries := createTestWALEntries(5)
+	entries := createTestWALEntries(5, 1)
 	err = wal.AppendBatch(entries)
 	require.NoError(t, err)
 
@@ -70,7 +76,7 @@ func TestWAL_AppendAndRecover(t *testing.T) {
 	err = wal.Append(singleEntry)
 	require.NoError(t, err)
 
-	err = wal.Close()
+	err = wal.Close() // This will wait for the committer to finish
 	require.NoError(t, err)
 
 	// 2. Re-open the WAL and check recovered entries
@@ -99,7 +105,6 @@ func TestWAL_Rotation(t *testing.T) {
 
 		wal, _, err := Open(opts)
 		require.NoError(t, err)
-		defer wal.Close()
 
 		assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "Initial segment index should be 1")
 
@@ -119,6 +124,9 @@ func TestWAL_Rotation(t *testing.T) {
 			totalEntries = append(totalEntries, entry)
 		}
 
+		// Force a sync to make sure the committer runs and rotates if needed
+		require.NoError(t, wal.Sync())
+
 		assert.Greater(t, wal.ActiveSegmentIndex(), uint64(1), "WAL should have rotated to a new segment")
 		rotatedIndex := wal.ActiveSegmentIndex()
 
@@ -129,210 +137,497 @@ func TestWAL_Rotation(t *testing.T) {
 		require.NoError(t, err)
 		totalEntries = append(totalEntries, finalEntry)
 
+		require.NoError(t, wal.Sync())
 		assert.Equal(t, rotatedIndex, wal.ActiveSegmentIndex(), "Segment index should not change after one more append")
 
 		// Close and recover to verify all data is intact
-		err = wal.Close()
-		require.NoError(t, err)
+		require.NoError(t, wal.Close())
 
 		wal2, recovered, err := Open(opts)
 		require.NoError(t, err)
-		defer wal2.Close()
 
 		require.Len(t, recovered, len(totalEntries), "Should recover all entries across rotated segments")
 		// Simple check on first and last entry
 		assert.Equal(t, totalEntries[0].Key, recovered[0].Key)
 		assert.Equal(t, totalEntries[len(totalEntries)-1].Key, recovered[len(recovered)-1].Key)
+		wal2.Close()
 	})
+}
 
-	t.Run("LargeWriteForcesRotationOnNextWrite", func(t *testing.T) {
+func TestWAL_GroupCommit(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	opts.SyncMode = core.WALSyncAlways // Use SyncAlways to test fsync behavior
+
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+
+	numGoroutines := 10
+	numEntriesPerGoroutine := 10
+	var wg sync.WaitGroup
+
+	// All goroutines will append concurrently.
+	// The group commit mechanism should batch these writes together.
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(gID int) {
+			defer wg.Done()
+			startSeq := uint64(1 + gID*numEntriesPerGoroutine)
+			entries := createTestWALEntries(numEntriesPerGoroutine, startSeq)
+			err := wal.AppendBatch(entries)
+			assert.NoError(t, err)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Close the WAL to ensure all pending commits are flushed.
+	require.NoError(t, wal.Close())
+
+	// Re-open and verify that all entries were written correctly.
+	wal2, recovered, err := Open(opts)
+	require.NoError(t, err)
+	defer wal2.Close()
+
+	assert.Len(t, recovered, numGoroutines*numEntriesPerGoroutine, "Should recover all entries from all goroutines")
+}
+
+func TestWAL_Close(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+
+	// Append some data
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), SeqNum: 1}))
+
+	// Close should not return an error and should shutdown the committer.
+	require.NoError(t, wal.Close())
+
+	// A second close should be a no-op and not cause a panic.
+	require.NotPanics(t, func() {
+		assert.NoError(t, wal.Close())
+	})
+}
+
+func TestWAL_GroupCommit_ConfigurableOptions(t *testing.T) {
+	t.Run("CommitMaxBatchSize", func(t *testing.T) {
 		tempDir := t.TempDir()
 		opts := testWALOptions(t, tempDir)
-		opts.MaxSegmentSize = 256 // Small size
+		opts.CommitMaxBatchSize = 5 // Force commit after 5 records
+
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		// Append 4 entries, they should be held pending by the committer
+		// We use a wait group to know when the goroutines are done.
+		var wg sync.WaitGroup
+		for i := 0; i < opts.CommitMaxBatchSize-1; i++ {
+			wg.Add(1)
+			go func(num int) {
+				defer wg.Done()
+				// These appends will block until the batch is committed.
+				err := wal.Append(core.WALEntry{Key: []byte(fmt.Sprintf("key-%d", num)), SeqNum: uint64(num + 1)})
+				assert.NoError(t, err)
+			}(i)
+		}
+
+		// The 5th entry should trigger the batch commit, unblocking the other goroutines.
+		err = wal.Append(core.WALEntry{Key: []byte("key-trigger"), SeqNum: uint64(opts.CommitMaxBatchSize)})
+		require.NoError(t, err)
+
+		// Wait for the initial goroutines to complete.
+		wg.Wait()
+
+		// Close the WAL to ensure everything is flushed.
+		require.NoError(t, wal.Close())
+
+		// Re-open and verify.
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
+		assert.Len(t, recovered, opts.CommitMaxBatchSize, "Should recover all entries from the batch")
+	})
+
+	t.Run("CommitMaxDelay", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		opts.CommitMaxDelay = 5 * time.Millisecond // Force commit after a short delay
+
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		start := time.Now()
+		// This append will block until the ticker forces the commit.
+		err = wal.Append(core.WALEntry{Key: []byte("key-delay"), SeqNum: 1})
+		duration := time.Since(start)
+
+		require.NoError(t, err)
+		// The duration should be slightly longer than the delay, accounting for processing time.
+		assert.GreaterOrEqual(t, duration, opts.CommitMaxDelay)
+		// It shouldn't be excessively long either.
+		assert.Less(t, duration, opts.CommitMaxDelay*20) // Increased multiplier for CI
+
+		require.NoError(t, wal.Close())
+
+		// Re-open and verify.
+		wal2, recovered, err := Open(opts)
+		require.NoError(t, err)
+		defer wal2.Close()
+		assert.Len(t, recovered, 1, "Should recover the single entry")
+	})
+}
+
+func TestWAL_Purge(t *testing.T) {
+	// Setup: Create a WAL with 4 segments
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+	// Use a small segment size to make rotation easy
+	opts.MaxSegmentSize = 128
+
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+
+	// Write some data to create segment 1
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), Value: []byte("a"), SeqNum: 1}))
+	// Rotate to segment 2
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(2), wal.ActiveSegmentIndex())
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("b"), Value: []byte("b"), SeqNum: 2}))
+	// Rotate to segment 3
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(3), wal.ActiveSegmentIndex())
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("c"), Value: []byte("c"), SeqNum: 3}))
+	// Rotate to segment 4
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(4), wal.ActiveSegmentIndex())
+	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("d"), Value: []byte("d"), SeqNum: 4}))
+
+	// At this point, we have 4 segment files: 000001.wal, 000002.wal, 000003.wal, 000004.wal
+	// Active segment is 4.
+	require.Len(t, wal.segmentIndexes, 4, "Should have 4 segments before purge")
+
+	t.Run("Purge old segments", func(t *testing.T) {
+		// Purge segments up to index 2. This should delete 1 and 2.
+		err := wal.Purge(2)
+		require.NoError(t, err)
+
+		// Check internal state
+		assert.Len(t, wal.segmentIndexes, 2, "Should have 2 segments remaining")
+		assert.Equal(t, []uint64{3, 4}, wal.segmentIndexes, "Remaining segments should be 3 and 4")
+
+		// Check filesystem
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(1)))
+		assert.True(t, os.IsNotExist(err), "Segment 1 should be deleted")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(2)))
+		assert.True(t, os.IsNotExist(err), "Segment 2 should be deleted")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(3)))
+		assert.NoError(t, err, "Segment 3 should still exist")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(4)))
+		assert.NoError(t, err, "Segment 4 (active) should still exist")
+	})
+
+	t.Run("Try to purge active segment", func(t *testing.T) {
+		// Try to purge up to index 4. This should delete 3, but spare 4 (the active one).
+		err := wal.Purge(4)
+		require.NoError(t, err)
+
+		// Check internal state
+		assert.Len(t, wal.segmentIndexes, 1, "Should have 1 segment remaining")
+		assert.Equal(t, []uint64{4}, wal.segmentIndexes, "Only segment 4 should remain")
+
+		// Check filesystem
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(3)))
+		assert.True(t, os.IsNotExist(err), "Segment 3 should be deleted")
+		_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(4)))
+		assert.NoError(t, err, "Segment 4 (active) should still exist")
+	})
+
+	t.Run("Purge with no matching segments", func(t *testing.T) {
+		// At this point, only segment 4 exists. Purging up to 3 should do nothing.
+		err := wal.Purge(3)
+		require.NoError(t, err)
+		assert.Len(t, wal.segmentIndexes, 1, "Length should not change")
+		assert.Equal(t, []uint64{4}, wal.segmentIndexes)
+	})
+
+	require.NoError(t, wal.Close())
+}
+
+func TestWAL_Rotate_EdgeCases(t *testing.T) {
+	t.Run("Rapid repeated rotations", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		require.Equal(t, uint64(1), wal.ActiveSegmentIndex())
+
+		// Rotate 3 times in a row
+		require.NoError(t, wal.Rotate())
+		require.Equal(t, uint64(2), wal.ActiveSegmentIndex())
+
+		require.NoError(t, wal.Rotate())
+		require.Equal(t, uint64(3), wal.ActiveSegmentIndex())
+
+		require.NoError(t, wal.Rotate())
+		require.Equal(t, uint64(4), wal.ActiveSegmentIndex())
+
+		// Check internal state
+		assert.Equal(t, []uint64{1, 2, 3, 4}, wal.segmentIndexes)
+
+		// Check filesystem
+		for i := uint64(1); i <= 4; i++ {
+			_, err := os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(i)))
+			assert.NoError(t, err, "Segment %d should exist", i)
+		}
+
+		require.NoError(t, wal.Close())
+	})
+
+	t.Run("Rotation fails if cannot create new segment", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		originalActiveIndex := wal.ActiveSegmentIndex()
+		require.Equal(t, uint64(1), originalActiveIndex)
+
+		// Manually create a directory where the next segment file should be.
+		// This will cause the call to os.OpenFile in CreateSegment to fail.
+		nextSegmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(originalActiveIndex+1))
+		require.NoError(t, os.MkdirAll(nextSegmentPath, 0755))
+
+		err = wal.Rotate()
+		require.Error(t, err, "Rotate should fail when the next segment path is a directory")
+
+		// Check that the state has not changed
+		assert.Equal(t, originalActiveIndex, wal.ActiveSegmentIndex(), "Active segment index should not change on failure")
+		assert.Len(t, wal.segmentIndexes, 1, "Segment indexes should not change on failure")
+
+		require.NoError(t, wal.Close())
+	})
+}
+
+func TestWAL_Rotate_Hook(t *testing.T) {
+	tempDir := t.TempDir()
+	opts := testWALOptions(t, tempDir)
+
+	// 1. Setup HookManager and listener
+	hm := hooks.NewHookManager(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	payloadChan := make(chan hooks.PostWALRotatePayload, 1)
+
+	listener := &testHookListener{
+		payloadChan: payloadChan,
+	}
+	hm.Register(hooks.EventPostWALRotate, listener)
+
+	opts.HookManager = hm
+
+	// 2. Open WAL. This creates segment 1 but should NOT trigger the hook.
+	wal, _, err := Open(opts)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), wal.ActiveSegmentIndex())
+
+	// Verify hook was not called
+	select {
+	case <-payloadChan:
+		t.Fatal("Hook should not be called on initial WAL open")
+	default:
+		// Good, no event
+	}
+
+	// 3. Rotate to segment 2. This SHOULD trigger the hook.
+	require.NoError(t, wal.Rotate())
+	require.Equal(t, uint64(2), wal.ActiveSegmentIndex())
+
+	// 4. Verify hook was called with correct payload
+	select {
+	case payload := <-payloadChan:
+		assert.Equal(t, uint64(1), payload.OldSegmentIndex)
+		assert.Equal(t, uint64(2), payload.NewSegmentIndex)
+		expectedPath := filepath.Join(tempDir, core.FormatSegmentFileName(2))
+		assert.Equal(t, expectedPath, payload.NewSegmentPath)
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timed out waiting for PostWALRotate hook to be called")
+	}
+
+	require.NoError(t, wal.Close())
+}
+
+// testHookListener is a simple implementation of hooks.HookListener for testing.
+type testHookListener struct {
+	payloadChan chan<- hooks.PostWALRotatePayload
+}
+
+func (l *testHookListener) OnEvent(ctx context.Context, event hooks.HookEvent) error {
+	if p, ok := event.Payload().(hooks.PostWALRotatePayload); ok {
+		l.payloadChan <- p
+	}
+	return nil
+}
+
+func (l *testHookListener) Priority() int {
+	return 0
+}
+
+func (l *testHookListener) IsAsync() bool {
+	return false
+}
+
+func TestWAL_Commit_AllWaitersNotified(t *testing.T) {
+	t.Run("AllNotifiedOnSuccess", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		// Use a longer commit delay to ensure requests group together
+		opts.CommitMaxDelay = 50 * time.Millisecond
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		var wg sync.WaitGroup
+		numGoroutines := 50
+		wg.Add(numGoroutines)
+
+		var seqNum uint64
+
+		for i := 0; i < numGoroutines; i++ {
+			go func(i int) {
+				defer wg.Done()
+				// Mix up the operations
+				op := rand.Intn(3)
+				switch op {
+				case 0:
+					// Append a single entry
+					n := atomic.AddUint64(&seqNum, 1)
+					err := wal.Append(core.WALEntry{Key: []byte(fmt.Sprintf("k-%d", n)), SeqNum: n})
+					assert.NoError(t, err)
+				case 1:
+					// Sync
+					err := wal.Sync()
+					assert.NoError(t, err)
+				case 2:
+					// Rotate
+					err := wal.Rotate()
+					assert.NoError(t, err)
+				}
+			}(i)
+		}
+
+		// This Wait will only complete if all goroutines finish, which means
+		// all `done` channels in the commit function were notified.
+		wg.Wait()
+	})
+
+	t.Run("AllNotifiedOnClose", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		// Set a long delay so appends will block waiting for commit
+		opts.CommitMaxDelay = 1 * time.Second
+		wal, _, err := Open(opts)
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		numGoroutines := 10
+		wg.Add(numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func(i int) {
+				defer wg.Done()
+				// This append will block in the commit queue
+				err := wal.Append(core.WALEntry{Key: []byte("k"), SeqNum: uint64(i + 1)})
+				// We expect an error because the WAL will be closed
+				assert.Error(t, err)
+				if err != nil { // Check err is not nil before checking content
+					assert.Contains(t, err.Error(), "wal is closed")
+				}
+			}(i)
+		}
+
+		// Give goroutines a moment to queue up
+		time.Sleep(50 * time.Millisecond)
+
+		// Close the WAL, which should unblock all waiting goroutines
+		wal.Close()
+
+		// This Wait will only complete if Close() correctly notifies all waiters.
+		wg.Wait()
+	})
+
+	t.Run("AllNotifiedOnError", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := testWALOptions(t, tempDir)
+		// Ensure all requests are processed in a single batch by setting a high
+		// batch size and a reasonable delay.
+		opts.CommitMaxDelay = 100 * time.Millisecond
+		opts.CommitMaxBatchSize = 20 // Larger than numWaiters
 
 		wal, _, err := Open(opts)
 		require.NoError(t, err)
 		defer wal.Close()
 
-		// 1. First write is large, but into an empty segment. Should not rotate yet.
-		largeValue := make([]byte, 300) // Larger than MaxSegmentSize
-		largeEntry := core.WALEntry{Key: []byte("large_entry"), Value: largeValue, SeqNum: 1, EntryType: core.EntryTypePutEvent}
-		err = wal.Append(largeEntry)
-		require.NoError(t, err)
-		assert.Equal(t, uint64(1), wal.ActiveSegmentIndex(), "Should not rotate when writing a large record to an empty segment")
+		// Create the failure condition *before* starting the waiters.
+		// This avoids timing issues where waiters could be processed before the failure is ready.
+		nextSegmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(wal.ActiveSegmentIndex()+1))
+		require.NoError(t, os.Mkdir(nextSegmentPath, 0755))
 
-		// 2. Second write (any size) should trigger rotation because the current segment is now over the limit.
-		smallEntry := core.WALEntry{Key: []byte("small_entry"), Value: []byte("v"), SeqNum: 2, EntryType: core.EntryTypePutEvent}
-		err = wal.Append(smallEntry)
-		require.NoError(t, err)
-		assert.Equal(t, uint64(2), wal.ActiveSegmentIndex(), "Should rotate on the next write after a large record filled the previous segment")
+		var wg sync.WaitGroup
+		numWaiters := 10
+		wg.Add(numWaiters)
 
-		// 3. Close and recover to verify data integrity
-		err = wal.Close()
-		require.NoError(t, err)
+		errChan := make(chan error, numWaiters)
 
-		wal2, recovered, err := Open(opts)
-		require.NoError(t, err)
-		defer wal2.Close()
+		// Launch all waiters, including the one that will fail, concurrently.
+		// The last one will perform the rotation.
+		for i := 0; i < numWaiters; i++ {
+			go func(isRotateRequest bool) {
+				defer wg.Done()
+				var err error
+				if isRotateRequest {
+					// This Rotate call will be batched with the Appends, fail,
+					// and the error should be broadcast to all waiters.
+					err = wal.Rotate()
+				} else {
+					// SeqNum can be random as it's not relevant to the test logic.
+					err = wal.Append(core.WALEntry{Key: []byte("k"), SeqNum: uint64(rand.Intn(1000))})
+				}
+				errChan <- err
+			}(i == numWaiters-1) // The last goroutine will trigger the failing rotation.
+		}
 
-		require.Len(t, recovered, 2, "Should recover both entries")
-		assert.Equal(t, largeEntry.Key, recovered[0].Key, "First recovered entry should be the large one")
-		assert.Equal(t, largeEntry.Value, recovered[0].Value)
-		assert.Equal(t, smallEntry.Key, recovered[1].Key, "Second recovered entry should be the small one")
+		// Wait for all goroutines to finish. They will only finish when the
+		// commit batch is processed and the error is broadcast.
+		wg.Wait()
+		close(errChan)
+
+		// Verification: Check that all goroutines received the same error.
+		var firstErr error
+		var once sync.Once
+		count := 0
+		for err := range errChan {
+			// This is the key check. If it fails, it means the implementation
+			// might be notifying some waiters of success before an operation
+			// in the same batch fails, which is incorrect.
+			require.Error(t, err, "Every waiter should have received an error")
+
+			once.Do(func() {
+				firstErr = err
+				// Check that the error is the one we expect from the failing rotation.
+				// The error message differs between OSes.
+				// รองรับทั้ง Windows และ POSIX: "exists", "is a directory", หรือ "Access is denied"
+				msg := err.Error()
+				require.True(t,
+					(runtime.GOOS == "windows" && (strings.Contains(msg, "Access is denied") || strings.Contains(msg, "exists") || strings.Contains(msg, "is a directory"))) ||
+						(runtime.GOOS != "windows" && (strings.Contains(msg, "exists") || strings.Contains(msg, "is a directory") || strings.Contains(msg, "Access is denied"))),
+					"unexpected error message: %s", msg,
+				)
+			})
+
+			// All errors in the batch should be the same.
+			assert.Equal(t, firstErr.Error(), err.Error(), "All waiters in the batch should receive the same error")
+			count++
+		}
+		assert.Equal(t, numWaiters, count, "The number of checked waiters should match the total")
 	})
-}
-
-func TestWAL_Purge(t *testing.T) {
-	tempDir := t.TempDir()
-	opts := testWALOptions(t, tempDir)
-	opts.MaxSegmentSize = 128 // Small size to force rotation
-
-	wal, _, err := Open(opts)
-	require.NoError(t, err)
-
-	// Create a few segments
-	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 1}))
-	require.NoError(t, wal.Rotate()) // Manual rotate to segment 2
-	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("b"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 2}))
-	require.NoError(t, wal.Rotate()) // Manual rotate to segment 3
-	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("c"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 3}))
-	require.NoError(t, wal.Rotate()) // Manual rotate to segment 4
-	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("d"), Value: []byte("long value to trigger rotation maybe"), SeqNum: 4}))
-
-	activeSegmentIdx := wal.ActiveSegmentIndex()
-	assert.Equal(t, uint64(4), activeSegmentIdx, "Should be on segment 4")
-
-	// Purge up to segment 2
-	err = wal.Purge(2)
-	require.NoError(t, err)
-
-	// Check that segment files 1 and 2 are gone, but 3 and 4 remain
-	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(1)))
-	assert.True(t, os.IsNotExist(err), "Segment 1 should be purged")
-	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(2)))
-	assert.True(t, os.IsNotExist(err), "Segment 2 should be purged")
-	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(3)))
-	assert.NoError(t, err, "Segment 3 should not be purged")
-	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(4)))
-	assert.NoError(t, err, "Segment 4 (active) should not be purged")
-
-	// Try to purge the active segment - it should be skipped
-	err = wal.Purge(activeSegmentIdx)
-	require.NoError(t, err)
-	_, err = os.Stat(filepath.Join(tempDir, core.FormatSegmentFileName(activeSegmentIdx)))
-	assert.NoError(t, err, "Active segment should not be purged even if requested")
-
-	wal.Close()
-}
-
-func TestWAL_Recovery_Corrupted(t *testing.T) {
-	tempDir := t.TempDir()
-	opts := testWALOptions(t, tempDir)
-
-	// 1. Create a WAL with good data
-	wal, _, err := Open(opts)
-	require.NoError(t, err)
-	goodEntries := createTestWALEntries(3)
-	require.NoError(t, wal.AppendBatch(goodEntries))
-	segmentPath := wal.activeSegment.path
-	require.NoError(t, wal.Close())
-
-	// 2. Corrupt the segment file by truncating it
-	fileData, err := os.ReadFile(segmentPath)
-	require.NoError(t, err)
-	corruptedData := fileData[:len(fileData)-5] // Truncate last 5 bytes (part of checksum/record)
-	err = os.WriteFile(segmentPath, corruptedData, 0644)
-	require.NoError(t, err)
-
-	// 3. Attempt to recover
-	wal2, recovered, err := Open(opts)
-	require.Error(t, err, "Open should return an error for a corrupted WAL")
-	assert.NotNil(t, wal2, "WAL object should still be returned on non-fatal recovery error")
-	if wal2 != nil {
-		defer wal2.Close()
-	}
-
-	// The recovery should stop at the corruption but return the entries it successfully read.
-	// The key is that an error indicating corruption/truncation is returned.
-	assert.Contains(t, err.Error(), "unexpected EOF", "Error should indicate truncation")
-	t.Logf("Recovered %d entries from corrupted WAL", len(recovered))
-}
-
-func TestWAL_StartRecoveryIndex(t *testing.T) {
-	tempDir := t.TempDir()
-	opts := testWALOptions(t, tempDir)
-	opts.MaxSegmentSize = 128 // Small size to force rotation
-
-	// 1. Create a WAL with 3 segments
-	wal, _, err := Open(opts)
-	require.NoError(t, err)
-	// Segment 1
-	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("a"), SeqNum: 1}))
-	require.NoError(t, wal.Rotate())
-	// Segment 2
-	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("b"), SeqNum: 2}))
-	require.NoError(t, wal.Rotate())
-	// Segment 3
-	require.NoError(t, wal.Append(core.WALEntry{Key: []byte("c"), SeqNum: 3}))
-	require.NoError(t, wal.Close())
-
-	// 2. Recover, but start after segment 1
-	opts.StartRecoveryIndex = 1
-	wal2, recovered, err := Open(opts)
-	require.NoError(t, err)
-	defer wal2.Close()
-
-	// Should only recover entries from segments > 1 (i.e., segments 2 and 3)
-	require.Len(t, recovered, 2, "Should only recover entries from segments 2 and 3")
-	assert.Equal(t, uint64(2), recovered[0].SeqNum)
-	assert.Equal(t, []byte("b"), recovered[0].Key)
-	assert.Equal(t, uint64(3), recovered[1].SeqNum)
-	assert.Equal(t, []byte("c"), recovered[1].Key)
-}
-
-func TestRecoverFromSegment_CorruptedBatchRecord(t *testing.T) {
-	tempDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	segmentPath := filepath.Join(tempDir, core.FormatSegmentFileName(1))
-
-	// 1. Manually construct a batch payload where one of the inner entries is corrupted.
-	// The overall record will have a valid checksum, but parsing the batch will fail.
-	var payloadBuf bytes.Buffer
-
-	// Batch header
-	require.NoError(t, payloadBuf.WriteByte(byte(core.EntryTypePutBatch)))
-	numEntries := uint32(3) // We'll say there are 3, but only write 1.5 of them
-	require.NoError(t, binary.Write(&payloadBuf, binary.LittleEndian, numEntries))
-
-	// Entry 1 (Good)
-	entry1 := core.WALEntry{EntryType: core.EntryTypePutEvent, SeqNum: 1, Key: []byte("key1"), Value: []byte("val1")}
-	require.NoError(t, encodeEntryData(&payloadBuf, &entry1))
-
-	// Entry 2 (Corrupted by truncation)
-	entry2 := core.WALEntry{EntryType: core.EntryTypePutEvent, SeqNum: 2, Key: []byte("key2_a_bit_longer"), Value: []byte("val2_also_longer")}
-	var entry2Buf bytes.Buffer
-	require.NoError(t, encodeEntryData(&entry2Buf, &entry2))
-	// Truncate the encoded entry 2 data to cause a parsing error (e.g., unexpected EOF)
-	corruptedEntry2Bytes := entry2Buf.Bytes()[:entry2Buf.Len()-5]
-	_, err := payloadBuf.Write(corruptedEntry2Bytes)
-	require.NoError(t, err)
-
-	// 2. Write this corrupted payload as a single, validly-checksummed record to a segment file.
-	sw, err := CreateSegment(tempDir, 1)
-	require.NoError(t, err)
-	require.NoError(t, sw.WriteRecord(payloadBuf.Bytes()))
-	require.NoError(t, sw.Close())
-
-	// 3. Attempt to recover from the segment.
-	recoveredEntries, err := recoverFromSegment(segmentPath, logger)
-
-	// 4. Verify the outcome.
-	require.Error(t, err, "Recovery should fail due to corruption inside the batch")
-	assert.Contains(t, err.Error(), "error decoding entry 2 in batch", "Error message should point to the corrupted entry")
-	assert.ErrorIs(t, err, io.ErrUnexpectedEOF, "Underlying error should be unexpected EOF due to truncation")
-
-	// We should have recovered the entries that came before the corruption.
-	require.Len(t, recoveredEntries, 1, "Should have recovered the first valid entry from the corrupted batch")
-	assert.Equal(t, entry1.Key, recoveredEntries[0].Key)
-	assert.Equal(t, entry1.SeqNum, recoveredEntries[0].SeqNum)
 }

@@ -17,7 +17,7 @@ func init() {
 }
 
 func TestStorageEngine_PutEvent(t *testing.T) {
-	opts := getBaseOptsForFlushTest(t) // Re-use helper from flush test
+	opts := GetBaseOptsForTest(t, "test") // Re-use helper from flush test
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = engine.Start()
@@ -171,7 +171,7 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := getBaseOptsForFlushTest(t)
+			opts := GetBaseOptsForTest(t, "test")
 			if tc.setupOpts != nil {
 				tc.setupOpts(&opts)
 			}

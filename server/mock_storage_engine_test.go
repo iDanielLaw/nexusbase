@@ -7,6 +7,10 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/replication/proto"
+	"github.com/INLOpen/nexusbase/snapshot"
+	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/mock"
 )
@@ -21,6 +25,37 @@ type MockStorageEngine struct {
 
 // Ensure MockStorageEngine implements the interface.
 var _ engine.StorageEngineInterface = (*MockStorageEngine)(nil)
+
+// ReplaceWithSnapshot is a stub for testing purposes.
+func (m *MockStorageEngine) ReplaceWithSnapshot(snapshotDir string) error {
+	return nil
+}
+
+// GetWAL returns nil for testing purposes.
+func (m *MockStorageEngine) GetWAL() wal.WALInterface {
+	return nil
+}
+
+// GetStringStore returns a dummy implementation for testing purposes.
+func (m *MockStorageEngine) GetStringStore() indexer.StringStoreInterface {
+	return &indexer.StringStore{} // Always return non-nil dummy object
+}
+
+// GetSnapshotManager returns nil for testing purposes.
+func (m *MockStorageEngine) GetSnapshotManager() snapshot.ManagerInterface {
+	return nil
+}
+
+// GetLatestAppliedSeqNum returns a mock sequence number for replication tests.
+func (m *MockStorageEngine) GetLatestAppliedSeqNum() uint64 {
+	return 0
+}
+
+// ApplyReplicatedEntry is a mock implementation for replication tests.
+func (m *MockStorageEngine) ApplyReplicatedEntry(ctx context.Context, entry *proto.WALEntry) error {
+	args := m.Called(ctx, entry)
+	return args.Error(0)
+}
 
 func (m *MockStorageEngine) GetNextSSTableID() uint64 {
 	return m.nextId.Add(1)
@@ -192,6 +227,11 @@ func (m *MockStorageEngine) GetClock() clock.Clock {
 	return args.Get(0).(clock.Clock)
 }
 
+func (m *MockStorageEngine) GetSequenceNumber() uint64 {
+	args := m.Called()
+	return args.Get(0).(uint64)
+}
+
 // MockQueryResultIterator is a manual mock implementation of core.QueryResultIteratorInterface.
 // It's designed to be stateful for testing iteration logic.
 type MockQueryResultIterator struct {
@@ -248,3 +288,39 @@ func (m *MockQueryResultIterator) UnderlyingAt() (*core.IteratorNode, error) {
 	// Tests that need specific underlying data can extend this mock.
 	return nil, nil
 }
+
+// Dummy implementation for indexer.StringStoreInterface
+// Ensure only one definition exists in the test package
+// Add all required methods for the interface
+
+type dummyStringStore struct{}
+
+func (d *dummyStringStore) GetOrCreateID(s string) (uint64, error) {
+	return 0, nil
+}
+
+func (d *dummyStringStore) GetID(s string) (uint64, bool) {
+	return 0, false
+}
+
+func (d *dummyStringStore) Put(ctx context.Context, key string, value string) error {
+	return nil
+}
+
+func (d *dummyStringStore) Get(ctx context.Context, key string) (string, error) {
+	return "", nil
+}
+
+func (d *dummyStringStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (d *dummyStringStore) GetString(id uint64) (string, bool) {
+	return "", false
+}
+func (d *dummyStringStore) Sync() error                       { return nil }
+func (d *dummyStringStore) Close() error                      { return nil }
+func (d *dummyStringStore) LoadFromFile(dataDir string) error { return nil }
+
+// Ensure dummyStringStore implements indexer.StringStoreInterface
+var _ indexer.StringStoreInterface = (*dummyStringStore)(nil)

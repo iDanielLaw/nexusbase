@@ -8,6 +8,10 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/indexer"
+	pb "github.com/INLOpen/nexusbase/replication/proto"
+	"github.com/INLOpen/nexusbase/snapshot"
+	"github.com/INLOpen/nexusbase/wal"
 	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/mock"
@@ -185,6 +189,50 @@ func (m *MockStorageEngine) GetClock() clock.Clock {
 		return nil
 	}
 	return args.Get(0).(clock.Clock)
+}
+
+func (m *MockStorageEngine) ApplyReplicatedEntry(ctx context.Context, entry *pb.WALEntry) error {
+	args := m.Called(ctx, entry)
+	return args.Error(0)
+}
+
+func (m *MockStorageEngine) GetLatestAppliedSeqNum() uint64 {
+	args := m.Called()
+	return args.Get(0).(uint64)
+}
+
+func (m *MockStorageEngine) ReplaceWithSnapshot(snapshotDir string) error {
+	args := m.Called(snapshotDir)
+	return args.Error(0)
+}
+
+func (m *MockStorageEngine) GetWAL() wal.WALInterface {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(wal.WALInterface)
+}
+
+func (m *MockStorageEngine) GetStringStore() indexer.StringStoreInterface {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(indexer.StringStoreInterface)
+}
+
+func (m *MockStorageEngine) GetSnapshotManager() snapshot.ManagerInterface {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(snapshot.ManagerInterface)
+}
+
+func (m *MockStorageEngine) GetSequenceNumber() uint64 {
+	args := m.Called()
+	return args.Get(0).(uint64)
 }
 
 func TestExecutor_SnapshotRestore(t *testing.T) {

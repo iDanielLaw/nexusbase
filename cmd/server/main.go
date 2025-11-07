@@ -271,6 +271,8 @@ func main() {
 		IntraL0CompactionTriggerFiles:     cfg.Engine.Compaction.IntraL0TriggerFileCount,
 		IntraL0CompactionMaxFileSizeBytes: cfg.Engine.Compaction.IntraL0MaxFileSizeBytes,
 		Logger:                            logger,
+		ReplicationMode:                   cfg.Replication.Mode,             // Pass replication mode
+		LeaderAddress:                     cfg.SelfMonitoring.LeaderAddress, // Use self-monitoring leader address
 	}
 
 	// Create the storage engine instance first.

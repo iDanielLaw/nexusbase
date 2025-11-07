@@ -542,7 +542,7 @@ func TestStorageEngine_Recovery_FallbackScan(t *testing.T) {
 	dataDir := t.TempDir()
 	// --- Phase 1: Create a valid engine state with some SSTables ---
 	{
-		setupOpts := getBaseOptsForFlushTest(t)
+		setupOpts := GetBaseOptsForTest(t, "test")
 		setupOpts.DataDir = dataDir
 		setupEngine, err := NewStorageEngine(setupOpts)
 		require.NoError(t, err)
@@ -562,7 +562,7 @@ func TestStorageEngine_Recovery_FallbackScan(t *testing.T) {
 	}
 
 	// --- Phase 2: Create a new engine, which should load the state via fallback scan ---
-	opts := getBaseOptsForFlushTest(t)
+	opts := GetBaseOptsForTest(t, "test")
 	opts.DataDir = dataDir // Use the same directory
 	engine, err := NewStorageEngine(opts)
 	require.NoError(t, err)

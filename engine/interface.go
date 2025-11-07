@@ -5,7 +5,11 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/indexer"
+	pb "github.com/INLOpen/nexusbase/replication/proto"
+	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/sys"
+	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 )
 
@@ -46,6 +50,14 @@ type StorageEngineInterface interface {
 	CreateSnapshot(ctx context.Context) (snapshotPath string, err error)
 	RestoreFromSnapshot(ctx context.Context, path string, overwrite bool) error
 
+	// Replication
+	// ApplyReplicatedEntry applies a change from the leader without writing to its own WAL.
+	ApplyReplicatedEntry(ctx context.Context, entry *pb.WALEntry) error
+	// GetLatestAppliedSeqNum returns the latest sequence number that has been applied from the leader.
+	GetLatestAppliedSeqNum() uint64
+	// ReplaceWithSnapshot replaces the entire engine state with the contents of a snapshot.
+	ReplaceWithSnapshot(snapshotDir string) error
+
 	// CleanupEngine is intended for internal use by the constructor to clean up
 	// resources if initialization fails.
 	CleanupEngine()
@@ -61,4 +73,9 @@ type StorageEngineInterface interface {
 	GetDataDir() string
 	GetWALPath() string
 	GetClock() clock.Clock
+	GetWAL() wal.WALInterface
+	GetStringStore() indexer.StringStoreInterface
+	GetSnapshotManager() snapshot.ManagerInterface
+
+	GetSequenceNumber() uint64
 }
