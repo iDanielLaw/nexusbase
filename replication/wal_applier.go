@@ -404,3 +404,9 @@ func (a *WALApplier) Stop() {
 	}
 	a.connMu.Unlock()
 }
+
+// SetDialOptions allows callers (tests or advanced setups) to provide custom
+// gRPC dial options, e.g. a custom dialer for in-memory listeners like bufconn.
+func (a *WALApplier) SetDialOptions(opts []grpc.DialOption) {
+	a.dialOpts = opts
+}

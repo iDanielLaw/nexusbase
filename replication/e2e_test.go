@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // replicationTestHarness holds all the components for a leader-follower test setup.
@@ -34,10 +35,10 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 
 	// --- Leader Setup ---
 
-	leaderLis, err := net.Listen("tcp", ":0")
-	require.NoError(t, err)
-	leaderAddr := leaderLis.Addr().String()
-	_ = leaderLis.Close()
+	// Use an in-memory listener to avoid binding real TCP ports in tests.
+	const bufSize = 1024 * 1024
+	lis := bufconn.Listen(bufSize)
+	leaderAddr := lis.Addr().String()
 
 	leaderOpts := engine.GetBaseOptsForTest(t, "leader_")
 	leaderOpts.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: true}))
@@ -63,7 +64,8 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 		replicationLogger,
 	)
 
-	leaderManager, err := replication.NewManager(leaderCfg.Replication, replicationServer, replicationLogger)
+	// Use the listener-backed NewManager so the manager will serve on our bufconn listener.
+	leaderManager, err := replication.NewManagerWithListener(leaderCfg.Replication, replicationServer, replicationLogger, lis)
 	require.NoError(t, err)
 
 	// --- Follower Setup ---
@@ -104,11 +106,22 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 
 	// Wait for the leader to be connectable before starting the follower.
 	// This avoids race conditions in the test setup.
+	// Dial the bufconn listener using a custom dialer
 	connCtx, connCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer connCancel()
-	conn, err := grpc.DialContext(connCtx, leaderAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+		return lis.DialContext(ctx)
+	}
+	conn, err := grpc.DialContext(connCtx, leaderAddr, grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	require.NoError(t, err, "could not connect to leader gRPC server in test setup")
 	conn.Close()
+
+	// Inject the bufconn dialer into the WAL applier so it uses the in-memory
+	// listener instead of trying to dial a TCP address named like "bufconn".
+	h.followerApplier.SetDialOptions([]grpc.DialOption{
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	})
 
 	h.followerApplier.Start(context.Background())
 

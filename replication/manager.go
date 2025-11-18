@@ -114,6 +114,73 @@ func NewManager(cfg config.ReplicationConfig, replicationServer pb.ReplicationSe
 	}, nil
 }
 
+// NewManagerWithListener is like NewManager but uses the provided net.Listener
+// instead of creating one itself. This is useful for tests (e.g. bufconn).
+func NewManagerWithListener(cfg config.ReplicationConfig, replicationServer pb.ReplicationServiceServer, logger *slog.Logger, lis net.Listener) (*Manager, error) {
+	// Prepare server options
+	var serverOpts []grpc.ServerOption
+	tlsEnabled := false
+
+	// Configure TLS if enabled
+	if cfg.TLS.Enabled {
+		tlsConfig, err := loadServerTLSConfig(cfg.TLS)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS config: %w", err)
+		}
+		creds := credentials.NewTLS(tlsConfig)
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+		tlsEnabled = true
+		logger.Info("TLS enabled for replication gRPC server")
+	}
+
+	// Create a new gRPC server instance.
+	grpcServer := grpc.NewServer(serverOpts...)
+
+	// Register the replication service implementation with the gRPC server.
+	pb.RegisterReplicationServiceServer(grpcServer, replicationServer)
+
+	logger.Info("Replication gRPC server listening", "address", lis.Addr().String(), "tls_enabled", tlsEnabled)
+	logger.Info("Replication manager starting", "mode", cfg.Mode)
+
+	followers := make(map[string]*FollowerState)
+	for _, addr := range cfg.Followers {
+		followers[addr] = &FollowerState{Addr: addr, Healthy: false}
+	}
+
+	// Prepare client dial options for health checks
+	var clientDialOpts []grpc.DialOption
+	if tlsEnabled {
+		// For client connections to followers, use TLS
+		tlsConfig, err := loadClientTLSConfig(cfg.TLS)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client TLS config: %w", err)
+		}
+		creds := credentials.NewTLS(tlsConfig)
+		clientDialOpts = append(clientDialOpts, grpc.WithTransportCredentials(creds))
+	} else {
+		// Use insecure credentials only if TLS is not enabled
+		clientDialOpts = append(clientDialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	// Set graceful stop timeout
+	gracefulStopTimeout := time.Duration(cfg.GracefulStopTimeoutSeconds) * time.Second
+	if gracefulStopTimeout == 0 {
+		gracefulStopTimeout = 30 * time.Second // Default to 30 seconds
+	}
+
+	return &Manager{
+		grpcServer:          grpcServer,
+		config:              cfg,
+		logger:              logger.With("component", "replication_manager"),
+		listener:            lis,
+		followers:           followers,
+		stopCh:              make(chan struct{}),
+		gracefulStopTimeout: gracefulStopTimeout,
+		tlsEnabled:          tlsEnabled,
+		clientDialOptions:   clientDialOpts,
+	}, nil
+}
+
 // loadServerTLSConfig loads TLS configuration for the gRPC server
 func loadServerTLSConfig(tlsCfg config.TLSConfig) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile)
