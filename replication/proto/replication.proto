@@ -97,6 +97,8 @@ message HealthCheckResponse {
   Status status = 1;
   // Sequence number ล่าสุดที่ node ได้ประมวลผล
   uint64 last_applied_sequence = 2;
+  // Timestamp ของเวลาที่ node ประมวลผล entry ล่าสุด (optional)
+  google.protobuf.Timestamp last_applied_at = 4;
   // ข้อมูลเพิ่มเติมเกี่ยวกับสถานะ
   string message = 3;
 }

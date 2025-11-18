@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        v6.31.1
-// source: replication.proto
+// source: replication/proto/replication.proto
 
 package proto
 
@@ -59,11 +59,11 @@ func (x WALEntry_EntryType) String() string {
 }
 
 func (WALEntry_EntryType) Descriptor() protoreflect.EnumDescriptor {
-	return file_replication_proto_enumTypes[0].Descriptor()
+	return file_replication_proto_replication_proto_enumTypes[0].Descriptor()
 }
 
 func (WALEntry_EntryType) Type() protoreflect.EnumType {
-	return &file_replication_proto_enumTypes[0]
+	return &file_replication_proto_replication_proto_enumTypes[0]
 }
 
 func (x WALEntry_EntryType) Number() protoreflect.EnumNumber {
@@ -72,7 +72,7 @@ func (x WALEntry_EntryType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WALEntry_EntryType.Descriptor instead.
 func (WALEntry_EntryType) EnumDescriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{1, 0}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{1, 0}
 }
 
 // สถานะสุขภาพของ node
@@ -109,11 +109,11 @@ func (x HealthCheckResponse_Status) String() string {
 }
 
 func (HealthCheckResponse_Status) Descriptor() protoreflect.EnumDescriptor {
-	return file_replication_proto_enumTypes[1].Descriptor()
+	return file_replication_proto_replication_proto_enumTypes[1].Descriptor()
 }
 
 func (HealthCheckResponse_Status) Type() protoreflect.EnumType {
-	return &file_replication_proto_enumTypes[1]
+	return &file_replication_proto_replication_proto_enumTypes[1]
 }
 
 func (x HealthCheckResponse_Status) Number() protoreflect.EnumNumber {
@@ -122,7 +122,7 @@ func (x HealthCheckResponse_Status) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use HealthCheckResponse_Status.Descriptor instead.
 func (HealthCheckResponse_Status) EnumDescriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{8, 0}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{8, 0}
 }
 
 // StreamWALRequest คือ message ที่ follower ส่งไปหา leader ตอนเริ่มต้น stream
@@ -137,7 +137,7 @@ type StreamWALRequest struct {
 
 func (x *StreamWALRequest) Reset() {
 	*x = StreamWALRequest{}
-	mi := &file_replication_proto_msgTypes[0]
+	mi := &file_replication_proto_replication_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -149,7 +149,7 @@ func (x *StreamWALRequest) String() string {
 func (*StreamWALRequest) ProtoMessage() {}
 
 func (x *StreamWALRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[0]
+	mi := &file_replication_proto_replication_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -162,7 +162,7 @@ func (x *StreamWALRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamWALRequest.ProtoReflect.Descriptor instead.
 func (*StreamWALRequest) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{0}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *StreamWALRequest) GetFromSequenceNumber() uint64 {
@@ -189,7 +189,7 @@ type WALEntry struct {
 
 func (x *WALEntry) Reset() {
 	*x = WALEntry{}
-	mi := &file_replication_proto_msgTypes[1]
+	mi := &file_replication_proto_replication_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -201,7 +201,7 @@ func (x *WALEntry) String() string {
 func (*WALEntry) ProtoMessage() {}
 
 func (x *WALEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[1]
+	mi := &file_replication_proto_replication_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +214,7 @@ func (x *WALEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WALEntry.ProtoReflect.Descriptor instead.
 func (*WALEntry) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{1}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *WALEntry) GetSequenceNumber() uint64 {
@@ -281,7 +281,7 @@ type GetLatestSnapshotInfoRequest struct {
 
 func (x *GetLatestSnapshotInfoRequest) Reset() {
 	*x = GetLatestSnapshotInfoRequest{}
-	mi := &file_replication_proto_msgTypes[2]
+	mi := &file_replication_proto_replication_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -293,7 +293,7 @@ func (x *GetLatestSnapshotInfoRequest) String() string {
 func (*GetLatestSnapshotInfoRequest) ProtoMessage() {}
 
 func (x *GetLatestSnapshotInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[2]
+	mi := &file_replication_proto_replication_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -306,7 +306,7 @@ func (x *GetLatestSnapshotInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLatestSnapshotInfoRequest.ProtoReflect.Descriptor instead.
 func (*GetLatestSnapshotInfoRequest) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{2}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{2}
 }
 
 type SnapshotInfo struct {
@@ -321,7 +321,7 @@ type SnapshotInfo struct {
 
 func (x *SnapshotInfo) Reset() {
 	*x = SnapshotInfo{}
-	mi := &file_replication_proto_msgTypes[3]
+	mi := &file_replication_proto_replication_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -333,7 +333,7 @@ func (x *SnapshotInfo) String() string {
 func (*SnapshotInfo) ProtoMessage() {}
 
 func (x *SnapshotInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[3]
+	mi := &file_replication_proto_replication_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -346,7 +346,7 @@ func (x *SnapshotInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotInfo.ProtoReflect.Descriptor instead.
 func (*SnapshotInfo) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{3}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SnapshotInfo) GetId() string {
@@ -387,7 +387,7 @@ type StreamSnapshotRequest struct {
 
 func (x *StreamSnapshotRequest) Reset() {
 	*x = StreamSnapshotRequest{}
-	mi := &file_replication_proto_msgTypes[4]
+	mi := &file_replication_proto_replication_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -399,7 +399,7 @@ func (x *StreamSnapshotRequest) String() string {
 func (*StreamSnapshotRequest) ProtoMessage() {}
 
 func (x *StreamSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[4]
+	mi := &file_replication_proto_replication_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -412,7 +412,7 @@ func (x *StreamSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*StreamSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{4}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *StreamSnapshotRequest) GetId() string {
@@ -435,7 +435,7 @@ type SnapshotChunk struct {
 
 func (x *SnapshotChunk) Reset() {
 	*x = SnapshotChunk{}
-	mi := &file_replication_proto_msgTypes[5]
+	mi := &file_replication_proto_replication_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -447,7 +447,7 @@ func (x *SnapshotChunk) String() string {
 func (*SnapshotChunk) ProtoMessage() {}
 
 func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[5]
+	mi := &file_replication_proto_replication_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -460,7 +460,7 @@ func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotChunk.ProtoReflect.Descriptor instead.
 func (*SnapshotChunk) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{5}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SnapshotChunk) GetContent() isSnapshotChunk_Content {
@@ -518,7 +518,7 @@ type FileInfo struct {
 
 func (x *FileInfo) Reset() {
 	*x = FileInfo{}
-	mi := &file_replication_proto_msgTypes[6]
+	mi := &file_replication_proto_replication_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -530,7 +530,7 @@ func (x *FileInfo) String() string {
 func (*FileInfo) ProtoMessage() {}
 
 func (x *FileInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[6]
+	mi := &file_replication_proto_replication_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -543,7 +543,7 @@ func (x *FileInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileInfo.ProtoReflect.Descriptor instead.
 func (*FileInfo) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{6}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FileInfo) GetPath() string {
@@ -568,7 +568,7 @@ type HealthCheckRequest struct {
 
 func (x *HealthCheckRequest) Reset() {
 	*x = HealthCheckRequest{}
-	mi := &file_replication_proto_msgTypes[7]
+	mi := &file_replication_proto_replication_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -580,7 +580,7 @@ func (x *HealthCheckRequest) String() string {
 func (*HealthCheckRequest) ProtoMessage() {}
 
 func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[7]
+	mi := &file_replication_proto_replication_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -593,7 +593,7 @@ func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckRequest.ProtoReflect.Descriptor instead.
 func (*HealthCheckRequest) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{7}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{7}
 }
 
 type HealthCheckResponse struct {
@@ -601,6 +601,8 @@ type HealthCheckResponse struct {
 	Status HealthCheckResponse_Status `protobuf:"varint,1,opt,name=status,proto3,enum=replication.HealthCheckResponse_Status" json:"status,omitempty"`
 	// Sequence number ล่าสุดที่ node ได้ประมวลผล
 	LastAppliedSequence uint64 `protobuf:"varint,2,opt,name=last_applied_sequence,json=lastAppliedSequence,proto3" json:"last_applied_sequence,omitempty"`
+	// Timestamp ของเวลาที่ node ประมวลผล entry ล่าสุด (optional)
+	LastAppliedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=last_applied_at,json=lastAppliedAt,proto3" json:"last_applied_at,omitempty"`
 	// ข้อมูลเพิ่มเติมเกี่ยวกับสถานะ
 	Message       string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -609,7 +611,7 @@ type HealthCheckResponse struct {
 
 func (x *HealthCheckResponse) Reset() {
 	*x = HealthCheckResponse{}
-	mi := &file_replication_proto_msgTypes[8]
+	mi := &file_replication_proto_replication_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -621,7 +623,7 @@ func (x *HealthCheckResponse) String() string {
 func (*HealthCheckResponse) ProtoMessage() {}
 
 func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_replication_proto_msgTypes[8]
+	mi := &file_replication_proto_replication_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -634,7 +636,7 @@ func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckResponse.ProtoReflect.Descriptor instead.
 func (*HealthCheckResponse) Descriptor() ([]byte, []int) {
-	return file_replication_proto_rawDescGZIP(), []int{8}
+	return file_replication_proto_replication_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *HealthCheckResponse) GetStatus() HealthCheckResponse_Status {
@@ -651,6 +653,13 @@ func (x *HealthCheckResponse) GetLastAppliedSequence() uint64 {
 	return 0
 }
 
+func (x *HealthCheckResponse) GetLastAppliedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastAppliedAt
+	}
+	return nil
+}
+
 func (x *HealthCheckResponse) GetMessage() string {
 	if x != nil {
 		return x.Message
@@ -658,11 +667,11 @@ func (x *HealthCheckResponse) GetMessage() string {
 	return ""
 }
 
-var File_replication_proto protoreflect.FileDescriptor
+var File_replication_proto_replication_proto protoreflect.FileDescriptor
 
-const file_replication_proto_rawDesc = "" +
+const file_replication_proto_replication_proto_rawDesc = "" +
 	"\n" +
-	"\x11replication.proto\x12\vreplication\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"D\n" +
+	"#replication/proto/replication.proto\x12\vreplication\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"D\n" +
 	"\x10StreamWALRequest\x120\n" +
 	"\x14from_sequence_number\x18\x01 \x01(\x04R\x12fromSequenceNumber\"\xc3\x03\n" +
 	"\bWALEntry\x12'\n" +
@@ -701,10 +710,11 @@ const file_replication_proto_rawDesc = "" +
 	"\bFileInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bchecksum\x18\x02 \x01(\tR\bchecksum\"\x14\n" +
-	"\x12HealthCheckRequest\"\xd7\x01\n" +
+	"\x12HealthCheckRequest\"\x9b\x02\n" +
 	"\x13HealthCheckResponse\x12?\n" +
 	"\x06status\x18\x01 \x01(\x0e2'.replication.HealthCheckResponse.StatusR\x06status\x122\n" +
-	"\x15last_applied_sequence\x18\x02 \x01(\x04R\x13lastAppliedSequence\x12\x18\n" +
+	"\x15last_applied_sequence\x18\x02 \x01(\x04R\x13lastAppliedSequence\x12B\n" +
+	"\x0flast_applied_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\rlastAppliedAt\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\"1\n" +
 	"\x06Status\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\v\n" +
@@ -717,20 +727,20 @@ const file_replication_proto_rawDesc = "" +
 	"\vHealthCheck\x12\x1f.replication.HealthCheckRequest\x1a .replication.HealthCheckResponse\"\x00B0Z.github.com/INLOpen/nexusbase/replication/protob\x06proto3"
 
 var (
-	file_replication_proto_rawDescOnce sync.Once
-	file_replication_proto_rawDescData []byte
+	file_replication_proto_replication_proto_rawDescOnce sync.Once
+	file_replication_proto_replication_proto_rawDescData []byte
 )
 
-func file_replication_proto_rawDescGZIP() []byte {
-	file_replication_proto_rawDescOnce.Do(func() {
-		file_replication_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_replication_proto_rawDesc), len(file_replication_proto_rawDesc)))
+func file_replication_proto_replication_proto_rawDescGZIP() []byte {
+	file_replication_proto_replication_proto_rawDescOnce.Do(func() {
+		file_replication_proto_replication_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_replication_proto_replication_proto_rawDesc), len(file_replication_proto_replication_proto_rawDesc)))
 	})
-	return file_replication_proto_rawDescData
+	return file_replication_proto_replication_proto_rawDescData
 }
 
-var file_replication_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_replication_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
-var file_replication_proto_goTypes = []any{
+var file_replication_proto_replication_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_replication_proto_replication_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_replication_proto_replication_proto_goTypes = []any{
 	(WALEntry_EntryType)(0),              // 0: replication.WALEntry.EntryType
 	(HealthCheckResponse_Status)(0),      // 1: replication.HealthCheckResponse.Status
 	(*StreamWALRequest)(nil),             // 2: replication.StreamWALRequest
@@ -746,34 +756,35 @@ var file_replication_proto_goTypes = []any{
 	(*structpb.Struct)(nil),              // 12: google.protobuf.Struct
 	(*timestamppb.Timestamp)(nil),        // 13: google.protobuf.Timestamp
 }
-var file_replication_proto_depIdxs = []int32{
+var file_replication_proto_replication_proto_depIdxs = []int32{
 	0,  // 0: replication.WALEntry.entry_type:type_name -> replication.WALEntry.EntryType
 	11, // 1: replication.WALEntry.tags:type_name -> replication.WALEntry.TagsEntry
 	12, // 2: replication.WALEntry.fields:type_name -> google.protobuf.Struct
 	13, // 3: replication.SnapshotInfo.created_at:type_name -> google.protobuf.Timestamp
 	8,  // 4: replication.SnapshotChunk.file_info:type_name -> replication.FileInfo
 	1,  // 5: replication.HealthCheckResponse.status:type_name -> replication.HealthCheckResponse.Status
-	2,  // 6: replication.ReplicationService.StreamWAL:input_type -> replication.StreamWALRequest
-	4,  // 7: replication.ReplicationService.GetLatestSnapshotInfo:input_type -> replication.GetLatestSnapshotInfoRequest
-	6,  // 8: replication.ReplicationService.StreamSnapshot:input_type -> replication.StreamSnapshotRequest
-	9,  // 9: replication.ReplicationService.HealthCheck:input_type -> replication.HealthCheckRequest
-	3,  // 10: replication.ReplicationService.StreamWAL:output_type -> replication.WALEntry
-	5,  // 11: replication.ReplicationService.GetLatestSnapshotInfo:output_type -> replication.SnapshotInfo
-	7,  // 12: replication.ReplicationService.StreamSnapshot:output_type -> replication.SnapshotChunk
-	10, // 13: replication.ReplicationService.HealthCheck:output_type -> replication.HealthCheckResponse
-	10, // [10:14] is the sub-list for method output_type
-	6,  // [6:10] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	13, // 6: replication.HealthCheckResponse.last_applied_at:type_name -> google.protobuf.Timestamp
+	2,  // 7: replication.ReplicationService.StreamWAL:input_type -> replication.StreamWALRequest
+	4,  // 8: replication.ReplicationService.GetLatestSnapshotInfo:input_type -> replication.GetLatestSnapshotInfoRequest
+	6,  // 9: replication.ReplicationService.StreamSnapshot:input_type -> replication.StreamSnapshotRequest
+	9,  // 10: replication.ReplicationService.HealthCheck:input_type -> replication.HealthCheckRequest
+	3,  // 11: replication.ReplicationService.StreamWAL:output_type -> replication.WALEntry
+	5,  // 12: replication.ReplicationService.GetLatestSnapshotInfo:output_type -> replication.SnapshotInfo
+	7,  // 13: replication.ReplicationService.StreamSnapshot:output_type -> replication.SnapshotChunk
+	10, // 14: replication.ReplicationService.HealthCheck:output_type -> replication.HealthCheckResponse
+	11, // [11:15] is the sub-list for method output_type
+	7,  // [7:11] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
-func init() { file_replication_proto_init() }
-func file_replication_proto_init() {
-	if File_replication_proto != nil {
+func init() { file_replication_proto_replication_proto_init() }
+func file_replication_proto_replication_proto_init() {
+	if File_replication_proto_replication_proto != nil {
 		return
 	}
-	file_replication_proto_msgTypes[5].OneofWrappers = []any{
+	file_replication_proto_replication_proto_msgTypes[5].OneofWrappers = []any{
 		(*SnapshotChunk_FileInfo)(nil),
 		(*SnapshotChunk_ChunkData)(nil),
 	}
@@ -781,18 +792,18 @@ func file_replication_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_replication_proto_rawDesc), len(file_replication_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_replication_proto_replication_proto_rawDesc), len(file_replication_proto_replication_proto_rawDesc)),
 			NumEnums:      2,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_replication_proto_goTypes,
-		DependencyIndexes: file_replication_proto_depIdxs,
-		EnumInfos:         file_replication_proto_enumTypes,
-		MessageInfos:      file_replication_proto_msgTypes,
+		GoTypes:           file_replication_proto_replication_proto_goTypes,
+		DependencyIndexes: file_replication_proto_replication_proto_depIdxs,
+		EnumInfos:         file_replication_proto_replication_proto_enumTypes,
+		MessageInfos:      file_replication_proto_replication_proto_msgTypes,
 	}.Build()
-	File_replication_proto = out.File
-	file_replication_proto_goTypes = nil
-	file_replication_proto_depIdxs = nil
+	File_replication_proto_replication_proto = out.File
+	file_replication_proto_replication_proto_goTypes = nil
+	file_replication_proto_replication_proto_depIdxs = nil
 }
