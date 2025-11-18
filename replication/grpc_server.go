@@ -376,6 +376,10 @@ func (s *Server) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*
 	// If available, populate the last applied sequence number so followers can compute lag/position.
 	if s.LatestSeqProvider != nil {
 		resp.LastAppliedSequence = s.LatestSeqProvider()
+		// Also provide a timestamp for when this check was serviced so followers
+		// can compute wall-clock lag. This is best-effort; it's set to the local
+		// server time at the moment of the RPC.
+		resp.LastAppliedAt = timestamppb.Now()
 	}
 
 	return resp, nil
