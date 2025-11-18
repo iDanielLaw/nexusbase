@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,11 +36,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func TestAppServer_StartStop_GRPC(t *testing.T) {
 	certFile, keyFile := generateTestCerts(t)
+
+	const bufSize = 1024 * 1024
 
 	testCases := []struct {
 		name       string
@@ -91,48 +95,40 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 
 			mockEngine.On("Close").Return(nil).Once()
 
-			// Create AppServer
-			appServer, err := NewAppServer(mockEngine, cfg, testLogger)
+			// Create a bufconn listener so tests don't need a real TCP port.
+			lis := bufconn.Listen(bufSize)
+
+			// Create AppServer with injected bufconn listener
+			appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, lis, nil)
 			require.NoError(t, err)
 			require.NotNil(t, appServer)
 
 			// Start the server in a goroutine
-			serverErrChan := make(chan error, 1)
+			serverErrSrc := make(chan error, 1)
+			serverErr := make(chan error, 1)
 			go func() {
-				t.Logf("Starting server for test '%s' on %s", tc.name, appServer.grpcLis.Addr().String())
-				serverErrChan <- appServer.Start()
+				serverErrSrc <- appServer.Start()
+			}()
+			// Monitor server return so we can log if it exits early.
+			go func() {
+				err := <-serverErrSrc
+				t.Logf("appServer.Start() returned: %v", err)
+				serverErr <- err
 			}()
 
-			// Wait for the server to be listening on the TCP port before we try to connect.
-			// This avoids race conditions where the client tries to dial before the server is ready,
-			// which can be more pronounced when TLS setup is involved.
-			serverReady := false
-			for i := 0; i < 20; i++ { // Retry for up to 2 seconds
-				conn, err := net.DialTimeout("tcp", appServer.grpcLis.Addr().String(), 100*time.Millisecond)
-				if err == nil {
-					conn.Close()
-					serverReady = true
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			require.True(t, serverReady, "gRPC server did not start listening in time")
-
-			// Wait for the server to be ready by performing a health check
+			// Wait for the server to be ready by performing a health check over bufconn
 			var conn *grpc.ClientConn
 			var healthCheckSuccessful bool
 			creds := tc.setupCreds(t, certFile)
 
-			for i := 0; i < 20; i++ { // Increased retries for robustness, especially with TLS
+			dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
+
+			for i := 0; i < 20; i++ {
 				dialCtx, dialCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-				dialAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
-				// Use grpc.DialContext for proper timeout handling on the connection attempt.
-				// grpc.NewClient is deprecated and doesn't handle contexts for dialing.
-				conn, err = grpc.DialContext(dialCtx, dialAddr, grpc.WithTransportCredentials(creds), grpc.WithBlock())
+				conn, err = grpc.DialContext(dialCtx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(creds), grpc.WithBlock())
 				dialCancel()
 				if err == nil {
 					healthClient := grpc_health_v1.NewHealthClient(conn)
-					// Use a new context for the RPC call itself
 					rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 					resp, rpcErr := healthClient.Check(rpcCtx, &grpc_health_v1.HealthCheckRequest{})
 					rpcCancel()
@@ -141,30 +137,25 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 						conn.Close()
 						break
 					}
-					conn.Close() // Close connection on failed health check before retrying
+					conn.Close()
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
 
 			require.True(t, healthCheckSuccessful, "Server did not become healthy in time")
-			t.Log("Server is healthy and serving.")
 
-			// Stop the server
-			t.Log("Stopping server...")
+			// Stop the server and wait for graceful shutdown
 			appServer.Stop()
-			t.Log("Server stop command issued, waiting for shutdown...")
-
-			// Wait for the server goroutine to exit gracefully
 			select {
-			case err := <-serverErrChan:
+			case err := <-serverErr:
 				assert.NoError(t, err, "appServer.Start() should return nil on graceful shutdown")
 			case <-time.After(2 * time.Second):
 				t.Fatal("Timed out waiting for server to stop")
 			}
 
-			// Manually call Close on the mock engine as it's no longer part of appServer.Stop()
+			// Close bufconn listener and mocks
+			lis.Close()
 			mockEngine.Close()
-			// Assert that all mock expectations were met
 			mockEngine.AssertExpectations(t)
 		})
 	}
@@ -173,56 +164,64 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 // setupTestGRPCServer is a helper function to initialize a server with a mock engine
 // and return a gRPC client connected to it, along with a cleanup function.
 func setupTestGRPCServer(t *testing.T) (tsdb.TSDBServiceClient, *MockStorageEngine, func()) {
+	// Delegate to the bufconn-based helper so tests use in-memory gRPC by default.
+	return setupTestGRPCServerBufconn(t)
+}
+
+// setupTestGRPCServerBufconn creates a bufconn-backed server and returns a gRPC client,
+// a mock engine, and a cleanup function. Use this for tests that should run in-memory.
+func setupTestGRPCServerBufconn(t *testing.T) (tsdb.TSDBServiceClient, *MockStorageEngine, func()) {
 	t.Helper()
 
 	mockEngine := new(MockStorageEngine)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	grpcPort := findFreePort(t)
+	const bufSize = 1024 * 1024
+	lis := bufconn.Listen(bufSize)
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			GRPCPort: grpcPort,
-			TCPPort:  0, // Disable TCP for this test
-			TLS: config.TLSConfig{
-				Enabled: false,
-			},
+			GRPCPort: 0, // ensure constructor doesn't try to create a real listener
+			TCPPort:  0,
+			TLS:      config.TLSConfig{Enabled: false},
 		},
 	}
 
-	// Expect the Close call during cleanup
+	// Expect Close during cleanup
 	mockEngine.On("Close").Return(nil).Once()
 
-	appServer, err := NewAppServer(mockEngine, cfg, testLogger)
+	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, lis, nil)
 	require.NoError(t, err)
 
 	serverErrChan := make(chan error, 1)
 	go func() {
-		// Start() is blocking, so it runs in a goroutine.
-		// We expect a net.ErrClosed or nil error on graceful shutdown.
-		if err := appServer.Start(); err != nil && !errors.Is(err, net.ErrClosed) {
-			serverErrChan <- err
-		}
-		close(serverErrChan)
+		serverErrChan <- appServer.Start()
 	}()
 
-	// Wait for server to be ready
+	// Dial via bufconn
+	dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer dialCancel()
-	dialAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
-	conn, err := grpc.DialContext(dialCtx, dialAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	require.NoError(t, err, "Failed to connect to test gRPC server")
+	conn, err := grpc.DialContext(dialCtx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	require.NoError(t, err, "Failed to connect to test gRPC server (bufconn)")
 
 	client := tsdb.NewTSDBServiceClient(conn)
 
 	cleanup := func() {
 		conn.Close()
 		appServer.Stop()
-		// Wait for the server to stop and check for unexpected errors.
-		if err, open := <-serverErrChan; open {
-			require.NoError(t, err, "Server exited with an unexpected error")
+		lis.Close()
+		// Wait for server to stop and assert no unexpected error
+		err := <-serverErrChan
+		if err != nil {
+			// bufconn.Listener errors can be wrapped, e.g. "server group failed: closed".
+			// Treat any error string containing "closed" or net.ErrClosed as expected shutdown.
+			if strings.Contains(err.Error(), "closed") || errors.Is(err, net.ErrClosed) {
+				// expected
+			} else {
+				require.NoError(t, err, "Server exited with an unexpected error (bufconn)")
+			}
 		}
 		mockEngine.Close()
-		// Verify that the mock's Close method was called.
 		mockEngine.AssertExpectations(t)
 	}
 
@@ -230,7 +229,7 @@ func setupTestGRPCServer(t *testing.T) (tsdb.TSDBServiceClient, *MockStorageEngi
 }
 
 func TestAppServer_GRPC_Put(t *testing.T) {
-	client, mockEngine, cleanup := setupTestGRPCServer(t)
+	client, mockEngine, cleanup := setupTestGRPCServerBufconn(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -270,7 +269,7 @@ func TestAppServer_GRPC_Put(t *testing.T) {
 }
 
 func TestAppServer_GRPC_Query_RawData(t *testing.T) {
-	client, mockEngine, cleanup := setupTestGRPCServer(t)
+	client, mockEngine, cleanup := setupTestGRPCServerBufconn(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -334,7 +333,7 @@ func TestAppServer_GRPC_Query_RawData(t *testing.T) {
 }
 
 func TestAppServer_GRPC_Query_AggregatedData(t *testing.T) {
-	client, mockEngine, cleanup := setupTestGRPCServer(t)
+	client, mockEngine, cleanup := setupTestGRPCServerBufconn(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -502,7 +501,11 @@ func TestAppServer_HealthCheck_Failure(t *testing.T) {
 
 	mockEngine.On("Close").Return(nil).Once()
 
-	appServer, err := NewAppServer(mockEngine, cfg, testLogger)
+	// Use bufconn to avoid using an actual TCP port
+	const bufSize = 1024 * 1024
+	lis := bufconn.Listen(bufSize)
+
+	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, lis, nil)
 	require.NoError(t, err)
 	require.NotNil(t, appServer)
 
@@ -512,11 +515,11 @@ func TestAppServer_HealthCheck_Failure(t *testing.T) {
 		serverErrChan <- appServer.Start()
 	}()
 
-	// 3. Create a gRPC client to check health
+	// 3. Create a gRPC client to check health over bufconn
 	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer testCancel()
-	dialAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
-	conn, err := grpc.DialContext(testCtx, dialAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
+	conn, err := grpc.DialContext(testCtx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	require.NoError(t, err)
 	defer conn.Close()
 	healthClient := grpc_health_v1.NewHealthClient(conn)
@@ -535,6 +538,7 @@ func TestAppServer_HealthCheck_Failure(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("Timed out waiting for server to stop")
 	}
+	lis.Close()
 	// Manually call Close on the mock engine as it's no longer part of appServer.Stop()
 	mockEngine.Close()
 	mockEngine.AssertExpectations(t)
@@ -562,7 +566,11 @@ func TestAppServer_TLS_BadCert(t *testing.T) {
 
 	mockEngine.On("Close").Return(nil).Once()
 
-	appServer, err := NewAppServer(mockEngine, cfg, testLogger)
+	// Use bufconn to avoid a real TCP port
+	const bufSize = 1024 * 1024
+	lis := bufconn.Listen(bufSize)
+
+	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, lis, nil)
 	require.NoError(t, err)
 
 	serverErrChan := make(chan error, 1)
@@ -580,24 +588,10 @@ func TestAppServer_TLS_BadCert(t *testing.T) {
 		if err, open := <-serverErrChan; open {
 			require.NoError(t, err, "Server exited with an unexpected error")
 		}
+		lis.Close()
 		mockEngine.Close()
 		mockEngine.AssertExpectations(t)
 	}()
-
-	// Wait for the server to be listening on the TCP port before we try to connect.
-	// This avoids race conditions where the client tries to dial before the server is ready.
-	serverReady := false
-	for i := 0; i < 20; i++ { // Retry for up to 2 seconds
-		conn, err := net.DialTimeout("tcp", appServer.grpcLis.Addr().String(), 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			serverReady = true
-			t.Log("Test server is listening.")
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	require.True(t, serverReady, "gRPC server did not start listening in time")
 
 	// 2. Setup Client with a DIFFERENT CA it trusts.
 	// To test a "bad certificate", we create a TLS config for the client that does NOT
@@ -616,14 +610,12 @@ func TestAppServer_TLS_BadCert(t *testing.T) {
 		RootCAs:    clientCertPool, // Trust only our dummy CA, not the server's CA
 	})
 
-	// 3. Attempt to connect
+	// 3. Attempt to connect over bufconn
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	dialAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
-	// The dial itself might not fail immediately, as the handshake can be lazy.
-	// We remove WithBlock() and check for the error on the first RPC call.
-	conn, dialErr := grpc.NewClient(dialAddr, grpc.WithTransportCredentials(creds))
-	require.NoError(t, dialErr, "grpc.NewClient should not return an immediate error")
+	dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
+	conn, dialErr := grpc.DialContext(ctx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(creds))
+	require.NoError(t, dialErr, "grpc.DialContext should not return an immediate error")
 	defer conn.Close()
 
 	// 4. Attempt an RPC call, which should trigger the handshake and fail.
@@ -640,7 +632,7 @@ func TestAppServer_TLS_BadCert(t *testing.T) {
 }
 
 func TestAppServer_GRPC_ForceFlush(t *testing.T) {
-	client, mockEngine, cleanup := setupTestGRPCServer(t)
+	client, mockEngine, cleanup := setupTestGRPCServerBufconn(t)
 	defer cleanup()
 
 	ctx := context.Background()

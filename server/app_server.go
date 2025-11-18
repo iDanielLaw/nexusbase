@@ -41,7 +41,16 @@ type AppServer struct {
 }
 
 // NewAppServer creates and initializes a new application server.
+// NewAppServer preserves the original API and delegates to NewAppServerWithListeners
+// with nil listeners (meaning it will create real TCP listeners based on config).
 func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger *slog.Logger) (*AppServer, error) {
+	return NewAppServerWithListeners(eng, cfg, logger, nil, nil)
+}
+
+// NewAppServerWithListeners creates and initializes a new application server.
+// If non-nil listeners are provided they will be used instead of calling
+// net.Listen. This makes it easy for tests to inject in-memory listeners.
+func NewAppServerWithListeners(eng engine.StorageEngineInterface, cfg *config.Config, logger *slog.Logger, grpcLis net.Listener, tcpLis net.Listener) (*AppServer, error) {
 	var authenticator core.IAuthenticator
 	if cfg.Security.Enabled {
 		var err error
@@ -65,17 +74,25 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 		batchWorker: batchWorkerPool,
 	}
 
-	if cfg.Server.GRPCPort > 0 {
-		grpcAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort)
-		grpcLis, err := net.Listen("tcp", grpcAddr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to listen on gRPC port %s: %w", grpcAddr, err)
+	// gRPC: prefer provided listener, otherwise create if port configured > 0
+	if grpcLis != nil || cfg.Server.GRPCPort > 0 {
+		var err error
+		if grpcLis == nil {
+			grpcAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort)
+			grpcLis, err = net.Listen("tcp", grpcAddr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to listen on gRPC port %s: %w", grpcAddr, err)
+			}
+			logger.Info("gRPC server will listen on", "address", grpcLis.Addr().String())
+		} else {
+			logger.Info("gRPC server will use provided listener", "address", grpcLis.Addr().String())
 		}
-		logger.Info("gRPC server will listen on", "address", grpcLis.Addr().String())
 
 		grpcSrv, err := NewGRPCServer(eng, putWorkerPool, batchWorkerPool, &cfg.Server, authenticator, logger)
 		if err != nil {
-			grpcLis.Close()
+			if cfg.Server.GRPCPort > 0 && grpcLis != nil {
+				grpcLis.Close()
+			}
 			return nil, fmt.Errorf("failed to create gRPC server: %w", err)
 		}
 		appSrv.grpcServer = grpcSrv
@@ -86,14 +103,21 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 
 	executor := nbql.NewExecutor(eng, clock.SystemClockDefault)
 
-	if cfg.Server.TCPPort > 0 {
-		tcpAddr := fmt.Sprintf(":%d", cfg.Server.TCPPort)
-		tcpLis, err := net.Listen("tcp", tcpAddr)
-		if err != nil {
-			if appSrv.grpcLis != nil {
-				appSrv.grpcLis.Close()
+	// TCP: prefer provided listener, otherwise create if port configured > 0
+	if tcpLis != nil || cfg.Server.TCPPort > 0 {
+		var err error
+		if tcpLis == nil {
+			tcpAddr := fmt.Sprintf(":%d", cfg.Server.TCPPort)
+			tcpLis, err = net.Listen("tcp", tcpAddr)
+			if err != nil {
+				if appSrv.grpcLis != nil {
+					appSrv.grpcLis.Close()
+				}
+				return nil, fmt.Errorf("failed to create TCP server: %w", err)
 			}
-			return nil, fmt.Errorf("failed to create TCP server: %w", err)
+		} else {
+			// if a tcp listener was provided, log it
+			logger.Info("TCP server will use provided listener", "address", tcpLis.Addr().String())
 		}
 
 		tcpServer := NewTCP2Server(executor, authenticator, cfg.Security.Enabled, logger)
