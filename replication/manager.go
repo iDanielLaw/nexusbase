@@ -165,25 +165,32 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // monitorFollowers handles retry, reconnect, health check, and lag callback for each follower.
 func (m *Manager) monitorFollowers(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-m.stopCh:
-			m.logger.Info("Replication manager stopping")
-			return
-		case <-ticker.C:
-			for _, f := range m.followers {
-				go m.checkFollowerHealth(f)
+	// Start one worker goroutine per follower to avoid spawning multiple
+	// overlapping health-check goroutines for the same follower.
+	for _, f := range m.followers {
+		go func(f *FollowerState) {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-m.stopCh:
+					return
+				case <-ticker.C:
+					m.checkFollowerHealth(f)
+				}
 			}
-		}
+		}(f)
 	}
+
+	// Block until stop signal so this method remains a blocking call for tests.
+	<-m.stopCh
+	m.logger.Info("Replication manager stopping")
 }
 
 // checkFollowerHealth performs a real health check (gRPC HealthCheck RPC), updates lag, and handles reconnect.
 func (m *Manager) checkFollowerHealth(f *FollowerState) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	// Do not hold the follower mutex while performing network I/O. Only lock
+	// to update the follower state to avoid blocking other callers.
 
 	// Create a context with timeout for the health check
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -192,8 +199,10 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 	// Establish connection to follower using the prepared dial options
 	conn, err := grpc.DialContext(ctx, f.Addr, append(m.clientDialOptions, grpc.WithBlock())...)
 	if err != nil {
+		f.mu.Lock()
 		f.Healthy = false
 		f.RetryCount++
+		f.mu.Unlock()
 		m.logger.Warn("Follower unreachable", "addr", f.Addr, "retries", f.RetryCount, "error", err)
 		return
 	}
@@ -205,39 +214,44 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 	// Call the HealthCheck RPC
 	resp, err := client.HealthCheck(ctx, &pb.HealthCheckRequest{})
 	if err != nil {
+		f.mu.Lock()
 		f.Healthy = false
 		f.RetryCount++
+		f.mu.Unlock()
 		m.logger.Warn("Health check RPC failed", "addr", f.Addr, "retries", f.RetryCount, "error", err)
 		return
 	}
 
-	// Check the health status from the response
+	// Update follower state under lock and compute lag based on previous timestamp.
+	now := time.Now()
+	var lag time.Duration
+	f.mu.Lock()
+	prevLastPing := f.LastPing
+	f.LastPing = now
+	f.LastAckSeq = resp.LastAppliedSequence
 	if resp.Status == pb.HealthCheckResponse_HEALTHY {
 		f.Healthy = true
 		f.RetryCount = 0
-		f.LastPing = time.Now()
-		f.LastAckSeq = resp.LastAppliedSequence
-
-		lag := time.Since(f.LastPing)
-		if f.LagCallback != nil {
-			f.LagCallback(lag)
-		}
-
-		m.logger.Info("Follower health check",
-			"addr", f.Addr,
-			"healthy", f.Healthy,
-			"last_seq", f.LastAckSeq,
-			"lag", lag,
-			"message", resp.Message)
 	} else {
 		f.Healthy = false
 		f.RetryCount++
-		m.logger.Warn("Follower reported unhealthy",
-			"addr", f.Addr,
-			"retries", f.RetryCount,
-			"status", resp.Status.String(),
-			"message", resp.Message)
 	}
+	// compute lag as interval since previous successful ping if available
+	if !prevLastPing.IsZero() {
+		lag = now.Sub(prevLastPing)
+	}
+	f.mu.Unlock()
+
+	if f.LagCallback != nil && lag > 0 {
+		f.LagCallback(lag)
+	}
+
+	m.logger.Info("Follower health check",
+		"addr", f.Addr,
+		"healthy", f.Healthy,
+		"last_seq", f.LastAckSeq,
+		"lag", lag,
+		"message", resp.Message)
 }
 
 // Stop gracefully shuts down the gRPC server and follower monitoring with timeout.

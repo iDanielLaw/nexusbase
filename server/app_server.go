@@ -119,6 +119,9 @@ func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger 
 				eng.GetSnapshotsBaseDir(),
 				replicationLogger,
 			)
+			// Provide a function so the replication server can report the latest
+			// applied sequence number in HealthCheck responses.
+			replicationServer.LatestSeqProvider = func() uint64 { return eng.GetLatestAppliedSeqNum() }
 
 			// Create the replication manager
 			replManager, err := replication.NewManager(cfg.Replication, replicationServer, replicationLogger)
