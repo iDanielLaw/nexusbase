@@ -5,6 +5,33 @@ import (
 	"sync/atomic"
 )
 
+// Package-level preallocation cache and counters
+// ---------------------------------------------
+// The code in this package tries to determine whether a given device /
+// filesystem supports efficient preallocation (e.g., fallocate on Linux or
+// FILE_ALLOCATION_INFO on Windows). To avoid repeated expensive checks
+// (fstatfs, feature probes), we cache a boolean per-device id.
+//
+// The helpers below encapsulate access to the cache and counters. Use the
+// helpers instead of referencing `preallocCache` or counter variables
+// directly so we can change the underlying implementation without touching
+// platform code.
+//
+// Example usage (platform implementation):
+//
+//    if allow, found := preallocCacheLoad(dev); found {
+//        preallocCacheHit()
+//        if !allow {
+//            return ErrPreallocNotSupported
+//        }
+//        // attempt prealloc
+//    }
+//
+//    // on miss:
+//    preallocCacheMiss()
+//    // compute allowed and then store
+//    preallocCacheStore(dev, allowed)
+
 // preallocCache caches preallocation capability per-device (dev ID).
 // Key: uint64 device ID -> bool (true = allowed)
 // Access to the cache should go through the small API below so callers
