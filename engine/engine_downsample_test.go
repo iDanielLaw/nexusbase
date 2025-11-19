@@ -11,7 +11,7 @@ import (
 )
 
 func init() {
-	sys.SetDebugMode(true)
+	sys.SetDebugMode(false)
 }
 
 func TestStorageEngine_Query_MultiFieldDownsample(t *testing.T) {

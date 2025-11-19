@@ -26,7 +26,7 @@ import (
 )
 
 func init() {
-	sys.SetDebugMode(true)
+	sys.SetDebugMode(false)
 }
 
 // TestStorageEngine_PeriodicFlush_Success verifies that a non-full memtable is flushed

@@ -15,7 +15,7 @@ import (
 )
 
 func init() {
-	sys.SetDebugMode(true)
+	sys.SetDebugMode(false)
 }
 
 func TestWALRecovery_Successful(t *testing.T) {

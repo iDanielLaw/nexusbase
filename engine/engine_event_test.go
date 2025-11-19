@@ -13,7 +13,7 @@ import (
 )
 
 func init() {
-	sys.SetDebugMode(true)
+	sys.SetDebugMode(false)
 }
 
 func TestStorageEngine_PutEvent(t *testing.T) {

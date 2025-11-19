@@ -20,7 +20,7 @@ import (
 )
 
 func init() {
-	sys.SetDebugMode(true)
+	sys.SetDebugMode(false)
 }
 
 // testDataPoint is a helper struct for defining test data points in this file.
