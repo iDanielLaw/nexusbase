@@ -7,7 +7,18 @@ import (
 	"time"
 )
 
-var defaultFile atomic.Pointer[File]
+// fileWrapper is a stable concrete type used to store the File interface
+// inside an atomic.Value. atomic.Value requires that all stored values
+// have the same concrete type; wrapping the File interface in this small
+// struct ensures we can swap different File implementations safely.
+type fileWrapper struct {
+	f File
+}
+
+// defaultFile stores the current platform `File` implementation wrapped in a
+// concrete `fileWrapper`. We store `fileWrapper` (not the interface) so that
+// `atomic.Value` always sees the same concrete type across stores.
+var defaultFile atomic.Value // stores fileWrapper
 var debugMode atomic.Bool
 
 // FileOpener defines an interface for opening files with specific sharing modes.
@@ -24,9 +35,13 @@ type File interface {
 	WriteFile(name string, data []byte, perm os.FileMode) error
 
 	GC() error
+	// Convenience helpers
+	CreateTemp(dir, pattern string) (*os.File, error)
+	NewFile(fd uintptr, name string) *os.File
+	OpenInRoot(dir, name string) (*os.File, error)
 }
 
-type FileInterface interface {
+type FileHandle interface {
 	io.ReadWriteCloser
 	io.ReaderAt
 	io.WriterAt
@@ -46,9 +61,9 @@ type SafeRemoveOptions interface {
 	GetIntervalRetry() time.Duration
 }
 
-type CreateHandler func(name string) (FileInterface, error)
-type OpenHandler func(name string) (FileInterface, error)
-type OpenFileHandler func(name string, flag int, perm os.FileMode) (FileInterface, error)
+type CreateHandler func(name string) (FileHandle, error)
+type OpenHandler func(name string) (FileHandle, error)
+type OpenFileHandler func(name string, flag int, perm os.FileMode) (FileHandle, error)
 type WriteFileHandler func(name string, data []byte, perm os.FileMode) error
 type GCFileHandler func() error
 type RemoveHandler func(name string) error
@@ -56,22 +71,29 @@ type RemoveHandler func(name string) error
 func init() {
 	debugMode.Store(false)
 	file := NewFile()
-	defaultFile.Store(&file)
+	defaultFile.Store(fileWrapper{f: file})
 }
 
 func SetDefaultFile(file File) {
-	defaultFile.Store(&file)
+	// Store a pointer to the provided File value. Using a pointer
+	// Store the provided File value atomically wrapped in fileWrapper.
+	defaultFile.Store(fileWrapper{f: file})
 }
 
 func SetDebugMode(mode bool) {
-	// debugMode.Store(mode)
+	debugMode.Store(mode)
 }
 
-var Create CreateHandler = (func(name string) (FileInterface, error) {
-	file := (*defaultFile.Load())
-	if file == nil {
+var Create CreateHandler = (func(name string) (FileHandle, error) {
+	p := defaultFile.Load()
+	if p == nil {
 		return nil, os.ErrInvalid
 	}
+	fw, ok := p.(fileWrapper)
+	if !ok || fw.f == nil {
+		return nil, os.ErrInvalid
+	}
+	file := fw.f
 
 	if debugMode.Load() {
 		return DCreate(file, name)
@@ -79,22 +101,32 @@ var Create CreateHandler = (func(name string) (FileInterface, error) {
 	return RCreate(file, name)
 })
 
-var Open OpenHandler = (func(name string) (FileInterface, error) {
-	file := (*defaultFile.Load())
-	if file == nil {
+var Open OpenHandler = (func(name string) (FileHandle, error) {
+	p := defaultFile.Load()
+	if p == nil {
 		return nil, os.ErrInvalid
 	}
+	fw, ok := p.(fileWrapper)
+	if !ok || fw.f == nil {
+		return nil, os.ErrInvalid
+	}
+	file := fw.f
 	if debugMode.Load() {
 		return DOpen(file, name)
 	}
 	return ROpen(file, name)
 })
 
-var OpenFile OpenFileHandler = (func(name string, flag int, perm os.FileMode) (FileInterface, error) {
-	file := (*defaultFile.Load())
-	if file == nil {
+var OpenFile OpenFileHandler = (func(name string, flag int, perm os.FileMode) (FileHandle, error) {
+	p := defaultFile.Load()
+	if p == nil {
 		return nil, os.ErrInvalid
 	}
+	fw, ok := p.(fileWrapper)
+	if !ok || fw.f == nil {
+		return nil, os.ErrInvalid
+	}
+	file := fw.f
 	if debugMode.Load() {
 		return DOpenFile(file, name, flag, perm)
 	}
@@ -102,19 +134,27 @@ var OpenFile OpenFileHandler = (func(name string, flag int, perm os.FileMode) (F
 })
 
 var GC GCFileHandler = (func() error {
-	file := (*defaultFile.Load())
-	if file == nil {
+	p := defaultFile.Load()
+	if p == nil {
 		return os.ErrInvalid
 	}
-	return file.GC()
+	fw, ok := p.(fileWrapper)
+	if !ok || fw.f == nil {
+		return os.ErrInvalid
+	}
+	return fw.f.GC()
 })
 
 var WriteFile WriteFileHandler = (func(name string, data []byte, perm os.FileMode) error {
-	file := (*defaultFile.Load())
-	if file == nil {
+	p := defaultFile.Load()
+	if p == nil {
 		return os.ErrInvalid
 	}
-	return file.WriteFile(name, data, perm)
+	fw, ok := p.(fileWrapper)
+	if !ok || fw.f == nil {
+		return os.ErrInvalid
+	}
+	return fw.f.WriteFile(name, data, perm)
 })
 
 var Remove RemoveHandler = (func(name string) error {

@@ -10,7 +10,7 @@ type ConnectOp byte
 type ResponseOp byte
 
 const (
-	ConnectRequestAuthenticationOp ConnectOp = 1
+	ConnectRequestAuthenticationOp  ConnectOp = 1
 	ConnectResponseAuthenticationOp ConnectOp = 100
 )
 

@@ -22,7 +22,7 @@ import (
 
 // StringStore manages the mapping between strings (metrics, tag keys, tag values) and integer IDs.
 type StringStore struct {
-	logFile sys.FileInterface
+	logFile sys.FileHandle
 	nextID  atomic.Uint64 // Use uint32 for IDs to save space
 	logger  *slog.Logger
 	mu      sync.RWMutex

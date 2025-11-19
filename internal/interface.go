@@ -41,8 +41,8 @@ type PrivateSnapshotHelper interface {
 	MkdirTemp(dir, pattern string) (string, error)
 	Rename(oldpath, newpath string) error
 	Stat(name string) (os.FileInfo, error)
-	Open(name string) (sys.FileInterface, error)
-	Create(name string) (sys.FileInterface, error) // Added
+	Open(name string) (sys.FileHandle, error)
+	Create(name string) (sys.FileHandle, error) // Added
 	MkdirAll(path string, perm os.FileMode) error
 	WriteFile(name string, data []byte, perm os.FileMode) error
 	CopyDirectoryContents(src, dst string) error

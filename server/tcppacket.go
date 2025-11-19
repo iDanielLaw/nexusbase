@@ -6,17 +6,16 @@ import (
 	"fmt"
 )
 
-
 type ConnectOp byte
 type ResponseOp byte
 
 const (
-	ConnectRequestAuthenticationOp ConnectOp = 1
+	ConnectRequestAuthenticationOp  ConnectOp = 1
 	ConnectResponseAuthenticationOp ConnectOp = 100
 )
 
 const (
-	ResponseOK ResponseOp = 1
+	ResponseOK    ResponseOp = 1
 	ResponseError ResponseOp = 2
 )
 
@@ -27,7 +26,7 @@ type IPacket interface {
 
 type AuthenticationPacket struct {
 	Version byte
-	Op    ConnectOp
+	Op      ConnectOp
 	Payload IPacket
 }
 

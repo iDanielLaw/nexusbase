@@ -54,6 +54,10 @@ type WALApplier struct {
 	retrySleep  time.Duration
 }
 
+// ErrCriticalApply is returned when applying a replicated entry fails repeatedly
+// and should be treated as a fatal error for the applier (stop replication).
+var ErrCriticalApply = errors.New("critical apply failure")
+
 // NewWALApplier creates a new WAL applier.
 func NewWALApplier(leaderAddr string, engine ReplicatedEngine, snapshotMgr snapshot.ManagerInterface, snapshotDir string, logger *slog.Logger) *WALApplier {
 	return &WALApplier{
@@ -326,18 +330,45 @@ func (a *WALApplier) replicationLoop(ctx context.Context) error {
 
 			err = a.processStream(ctx, stream)
 			if err != nil {
+				// If the outer context is cancelled, stop immediately.
+				if ctx.Err() != nil {
+					a.logger.Info("Replication loop stopping due to context cancellation.", "error", ctx.Err())
+					return ctx.Err()
+				}
+
+				// If the error is a critical apply failure, stop the applier so
+				// deferred cleanup (Stop) runs and the connection is closed.
+				if errors.Is(err, ErrCriticalApply) {
+					a.logger.Error("Critical apply failure, stopping applier", "error", err)
+					return err
+				}
+
+				// EOF means the stream ended gracefully on the server side; retry quickly.
 				if errors.Is(err, io.EOF) {
 					a.logger.Info("WAL stream ended gracefully, will attempt to re-establish.")
 					time.Sleep(500 * time.Millisecond)
 					continue
 				}
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					a.logger.Info("Replication loop stopping due to context cancellation or deadline.", "error", err)
-					return err
+
+				// For gRPC errors, inspect the status code. Certain codes are
+				// transient (Canceled/Unavailable/Internal) and we should retry
+				// the stream instead of terminating the applier.
+				if st, ok := status.FromError(err); ok {
+					switch st.Code() {
+					case codes.Canceled, codes.Unavailable, codes.Internal:
+						a.logger.Warn("Transient WAL stream error, will retry", "error", err, "code", st.Code())
+						time.Sleep(a.retrySleep)
+						continue
+					}
 				}
-				a.logger.Error("Follower WAL stream error", "error", err)
-				a.Stop() // Self-terminate on critical error
-				return err
+
+				// For other errors, log and retry after a backoff rather than
+				// stopping the applier. This makes the follower more robust
+				// to leader restarts or WAL rotations that briefly interrupt
+				// streaming.
+				a.logger.Error("Follower WAL stream error (will retry)", "error", err)
+				time.Sleep(a.retrySleep)
+				continue
 			}
 		}
 	}
@@ -384,8 +415,8 @@ func (a *WALApplier) processStream(ctx context.Context, stream pb.ReplicationSer
 				"error", applyErr,
 				"seq_num", actualSeqNum,
 			)
-			return fmt.Errorf("failed to apply replicated entry %d after %d retries: %w",
-				actualSeqNum, maxApplyRetries, applyErr)
+			return fmt.Errorf("%w: failed to apply replicated entry %d after %d retries: %v",
+				ErrCriticalApply, actualSeqNum, maxApplyRetries, applyErr)
 		}
 
 		a.logger.Info("Follower applied WAL entry", "seq_num", actualSeqNum, "entry_type", entry.EntryType)

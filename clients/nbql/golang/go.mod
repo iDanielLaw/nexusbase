@@ -1,6 +1,6 @@
 module github.com/INLOpen/nexusbase/clients/nbql/golang
 
-go 1.23.10
+go 1.23.4
 
 require (
 	github.com/bits-and-blooms/bitset v1.12.0

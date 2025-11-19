@@ -15,7 +15,7 @@ import (
 
 // Segment represents a single WAL segment file.
 type Segment struct {
-	file  sys.FileInterface
+	file  sys.FileHandle
 	path  string
 	index uint64
 }

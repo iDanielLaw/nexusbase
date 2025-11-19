@@ -17,50 +17,50 @@ type Handler interface {
 }
 
 type FuncHandler func(ctx context.Context, conn net.Conn)
+
 var _ Handler = FuncHandler(nil)
 
 func (f FuncHandler) HandlerConnection(ctx context.Context, conn net.Conn) {
 	f(ctx, conn)
 }
 
-
 type Middleware func(Handler) Handler
 
 type Option func(*TCPServerOptions)
 
 type TCPServerOptions struct {
-	Logger *slog.Logger
-	MaxConnections int
-	ReadTimeout time.Duration
-	WriteTimeout time.Duration
+	Logger          *slog.Logger
+	MaxConnections  int
+	ReadTimeout     time.Duration
+	WriteTimeout    time.Duration
 	ShutdownTimeout time.Duration
 }
 
 type TCPServer struct {
-	opts *TCPServerOptions
-	listener net.Listener
-	baseHandler Handler
+	opts         *TCPServerOptions
+	listener     net.Listener
+	baseHandler  Handler
 	chainHandler Handler
-	logger *slog.Logger
+	logger       *slog.Logger
 
 	middlewares []Middleware
 
-	wg sync.WaitGroup
+	wg    sync.WaitGroup
 	conns chan net.Conn
 
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	chShutdown chan os.Signal
-	done chan struct{}
+	done       chan struct{}
 }
 
 func DefaultOptions() *TCPServerOptions {
 	return &TCPServerOptions{
-		Logger: slog.Default(),
-		MaxConnections: 0,
-		ReadTimeout: 0,
-		WriteTimeout: 0,
+		Logger:          slog.Default(),
+		MaxConnections:  0,
+		ReadTimeout:     0,
+		WriteTimeout:    0,
 		ShutdownTimeout: 30 * time.Second,
 	}
 }
@@ -80,18 +80,18 @@ func NewTCPServer(handler Handler, opts ...Option) (*TCPServer, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &TCPServer{
-		opts: options,
+		opts:        options,
 		baseHandler: handler,
-		logger: slog.Default(),
-		conns: make(chan net.Conn, 30),
-		ctx:        ctx,
-		cancel:     cancel,
-		chShutdown: make(chan os.Signal, 1),
-		done:       make(chan struct{}),
+		logger:      slog.Default(),
+		conns:       make(chan net.Conn, 30),
+		ctx:         ctx,
+		cancel:      cancel,
+		chShutdown:  make(chan os.Signal, 1),
+		done:        make(chan struct{}),
 	}
 
 	signal.Notify(s.chShutdown, syscall.SIGINT, syscall.SIGTERM)
-	
+
 	return s, nil
 }
 
@@ -108,9 +108,9 @@ func (s *TCPServer) Use(middlewares ...Middleware) {
 
 func (s *TCPServer) Start(lis net.Listener) error {
 	s.buildChain()
-	
+
 	s.listener = lis
-	
+
 	go s.handleShutdown()
 
 	for {
@@ -121,7 +121,7 @@ func (s *TCPServer) Start(lis net.Listener) error {
 		default:
 			conn, err := s.listener.Accept()
 			if err != nil {
-				if opErr,ok := err.(*net.OpError); ok && opErr.Op == "accept" && opErr.Err.Error() == "use of closed network connection" {
+				if opErr, ok := err.(*net.OpError); ok && opErr.Op == "accept" && opErr.Err.Error() == "use of closed network connection" {
 					return nil
 				}
 				continue
@@ -147,7 +147,7 @@ func (s *TCPServer) Start(lis net.Listener) error {
 	}
 }
 
-func (s *TCPServer) handleClient(conn net.Conn){
+func (s *TCPServer) handleClient(conn net.Conn) {
 	defer func() {
 		conn.Close()
 		s.wg.Done() // Decrement WaitGroup when goroutine finishes
@@ -171,7 +171,7 @@ func (s *TCPServer) handleClient(conn net.Conn){
 	defer connCancel()
 
 	// Call the user-defined handler
-	s.chainHandler.HandlerConnection(connCtx,conn)
+	s.chainHandler.HandlerConnection(connCtx, conn)
 }
 
 func (s *TCPServer) handleShutdown() {
@@ -225,7 +225,6 @@ func (s *TCPServer) Shutdown() {
 	}
 	<-s.done // Wait for the shutdown process to complete
 }
-
 
 // WithReadTimeout sets the read timeout for connections.
 func WithReadTimeout(d time.Duration) Option {

@@ -36,4 +36,3 @@ type WALInterface interface {
 	// from the entry immediately after the given sequence number.
 	NewStreamReader(fromSeqNum uint64) (StreamReader, error)
 }
-

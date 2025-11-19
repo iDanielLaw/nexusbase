@@ -5,6 +5,7 @@ package sys
 
 import (
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -46,6 +47,21 @@ func (ufo *unixFile) Open(name string) (*os.File, error) {
 
 func (ufo *unixFile) OpenWithRetry(path string, flag int, perm os.FileMode, maxRetries int, retryInterval time.Duration) (*os.File, error) {
 	return ufo.OpenFile(path, flag, perm)
+}
+
+func (ufo *unixFile) CreateTemp(dir, pattern string) (*os.File, error) {
+	return os.CreateTemp(dir, pattern)
+}
+
+func (ufo *unixFile) NewFile(fd uintptr, name string) *os.File {
+	return os.NewFile(fd, name)
+}
+
+func (ufo *unixFile) OpenInRoot(dir, name string) (*os.File, error) {
+	// Open a file inside the provided directory. This is a thin helper
+	// that uses filepath.Join; callers that require symlink or security
+	// checks should perform them separately.
+	return os.OpenFile(filepath.Join(dir, name), os.O_RDONLY, 0)
 }
 
 // SafeRemove, retries remove

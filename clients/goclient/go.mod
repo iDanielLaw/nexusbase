@@ -1,6 +1,6 @@
 module github.com/INLOpen/nexusbase/clients/goclient
 
-go 1.23.10
+go 1.23.4
 
 require (
 	google.golang.org/grpc v1.64.0

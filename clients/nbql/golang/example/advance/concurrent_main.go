@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	numWriters      = 5  // จำนวน Goroutine ที่ทำหน้าที่เขียนข้อมูล
-	numReaders      = 2  // จำนวน Goroutine ที่ทำหน้าที่อ่านข้อมูล
+	numWriters      = 5   // จำนวน Goroutine ที่ทำหน้าที่เขียนข้อมูล
+	numReaders      = 2   // จำนวน Goroutine ที่ทำหน้าที่อ่านข้อมูล
 	writesPerWriter = 100 // จำนวนข้อมูลที่แต่ละ Writer จะส่ง
 	host            = "10.1.1.1:50052"
 )

@@ -52,7 +52,6 @@ func newTestSSTableWithTombstones(t *testing.T, id uint64, entries []testEntryWi
 	return tbl
 }
 
-
 func TestNewLevelsManager(t *testing.T) {
 	lm, err := NewLevelsManager(7, 4, 1024, trace.NewNoopTracerProvider().Tracer("test"), PickOldest, 1.5, 1.0)
 	require.NoError(t, err)
@@ -759,14 +758,14 @@ func TestLevelsManager_ApplyCompactionResults_InvalidLevels(t *testing.T) {
 }
 
 func TestLevelsManager_MaxLevels(t *testing.T) {
-	lm, _ := NewLevelsManager(5, 4, 1024, nil, PickOldest,1.5,1.0)
+	lm, _ := NewLevelsManager(5, 4, 1024, nil, PickOldest, 1.5, 1.0)
 	defer lm.Close()
 	assert.Equal(t, 5, lm.MaxLevels())
 }
 
 func TestLevelsManager_GetTotalSizeForLevel(t *testing.T) {
 
-	lm, _ := NewLevelsManager(3, 2, 100, nil, PickOldest,1.5,1.0)
+	lm, _ := NewLevelsManager(3, 2, 100, nil, PickOldest, 1.5, 1.0)
 	defer lm.Close()
 
 	assert.Zero(t, lm.GetTotalSizeForLevel(0), "Expected total size for L0 to be 0")
