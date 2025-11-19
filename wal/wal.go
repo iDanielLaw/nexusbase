@@ -133,6 +133,13 @@ type Options struct {
 	// WriterBufferSize configures the size of the buffered writer used for segment writes.
 	// If zero, a sensible default will be used.
 	WriterBufferSize int
+	// PreallocateSegments controls whether new segment files should be preallocated
+	// to `PreallocSize` bytes at creation time. This is performed using a
+	// platform-specific helper and is best-effort by default.
+	PreallocateSegments bool
+	// PreallocSize is the size (in bytes) to preallocate for new segments when
+	// `PreallocateSegments` is enabled. If zero, `MaxSegmentSize` is used.
+	PreallocSize int64
 }
 
 // Open creates or opens a WAL directory.
@@ -153,6 +160,15 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 	}
 	if opts.WriterBufferSize == 0 {
 		opts.WriterBufferSize = 64 * 1024 // 64 KiB default
+	}
+	// Default to preallocating segments; users can disable via Options.
+	if !opts.PreallocateSegments {
+		// If the user didn't explicitly set PreallocateSegments (zero value is false),
+		// enable it by default for better IO behavior.
+		opts.PreallocateSegments = true
+	}
+	if opts.PreallocSize == 0 {
+		opts.PreallocSize = opts.MaxSegmentSize
 	}
 
 	if err := os.MkdirAll(opts.Dir, 0755); err != nil {
@@ -372,7 +388,11 @@ func (w *WAL) rotateLocked() error {
 		nextIndex = w.segmentIndexes[len(w.segmentIndexes)-1] + 1
 	}
 
-	newSegment, err := CreateSegment(w.dir, nextIndex, w.opts.WriterBufferSize, w.opts.MaxSegmentSize)
+	prealloc := int64(0)
+	if w.opts.PreallocateSegments {
+		prealloc = w.opts.PreallocSize
+	}
+	newSegment, err := CreateSegment(w.dir, nextIndex, w.opts.WriterBufferSize, prealloc)
 	if err != nil {
 		return err
 	}

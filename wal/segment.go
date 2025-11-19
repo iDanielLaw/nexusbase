@@ -49,11 +49,13 @@ func CreateSegment(dir string, index uint64, writerBufSize int, preallocSize int
 		return nil, fmt.Errorf("failed to write segment header to %s: %w", path, err)
 	}
 
-	// Optionally preallocate file blocks using platform-specific APIs.
+	// Optionally preallocate the segment file to reduce fragmentation and growth cost.
+	// Treat preallocation as best-effort: if it fails, log a warning and continue
+	// rather than failing segment creation. This avoids hard failures on filesystems
+	// that don't support fallocate or when the operation is not permitted.
 	if preallocSize > 0 {
 		if err := sys.Preallocate(file, preallocSize); err != nil {
-			file.Close()
-			return nil, fmt.Errorf("failed to preallocate segment file %s to %d: %w", path, preallocSize, err)
+			fmt.Printf("warning: failed to preallocate segment file %s to %d: %v\n", path, preallocSize, err)
 		}
 	}
 
