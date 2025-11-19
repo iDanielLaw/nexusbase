@@ -153,10 +153,13 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 	validBytes := validBuf.Bytes()
 
 	// Calculate offsets for creating truncated data slices.
+	// Note: manifest binary layout now writes a uint16 manifest version
+	// immediately after the 14-byte header; account for that here.
 	const (
-		headerEnd    = 14                // Correct header size is 14 bytes.
-		typeEnd      = headerEnd + 2 + 4 // "full" is 4 bytes + 2 for length
-		parentIDEnd  = typeEnd + 2       // "" is 0 bytes + 2 for length
+		headerEnd    = 14                             // Correct header size is 14 bytes.
+		versionLen   = 2                              // uint16 manifest version inserted after header
+		typeEnd      = headerEnd + versionLen + 2 + 4 // "full" is 4 bytes + 2 for length
+		parentIDEnd  = typeEnd + 2                    // "" is 0 bytes + 2 for length
 		createdAtEnd = parentIDEnd + 8
 		lastWALEnd   = createdAtEnd + 8
 		seqNumEnd    = lastWALEnd + 8
@@ -168,14 +171,14 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 		errContain string
 	}{
 		{"Empty data", []byte{}, "EOF"},
-		{"Truncated header", validBytes[:headerEnd-1], "failed to read manifest header"}, // 13 bytes, should fail header read
+		{"Truncated header", append([]byte{}, validBytes[:headerEnd-1]...), "failed to read manifest header"}, // 13 bytes, should fail header read
 		{"Invalid magic number", []byte{0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, "invalid binary manifest magic number"},
-		{"Truncated in Type read", validBytes[:headerEnd+1], "failed to read snapshot type"},
-		{"Truncated in ParentID read", validBytes[:typeEnd+1], "failed to read parent ID"},
-		{"Truncated in CreatedAt read", validBytes[:parentIDEnd+1], "failed to read CreatedAt timestamp"},
-		{"Truncated in LastWALSegmentIndex read", validBytes[:createdAtEnd+1], "failed to read last WAL segment index"},
-		{"Truncated in SequenceNumber read", validBytes[:lastWALEnd+1], "failed to read sequence number"},
-		{"Truncated in numLevels read", validBytes[:seqNumEnd+1], "failed to read number of levels"},
+		{"Truncated in Type read", append([]byte{}, validBytes[:headerEnd+versionLen+1]...), "failed to read snapshot type"},
+		{"Truncated in ParentID read", append([]byte{}, validBytes[:typeEnd+1]...), "failed to read parent ID"},
+		{"Truncated in CreatedAt read", append([]byte{}, validBytes[:parentIDEnd+1]...), "failed to read CreatedAt timestamp"},
+		{"Truncated in LastWALSegmentIndex read", append([]byte{}, validBytes[:createdAtEnd+1]...), "failed to read last WAL segment index"},
+		{"Truncated in SequenceNumber read", append([]byte{}, validBytes[:lastWALEnd+1]...), "failed to read sequence number"},
+		{"Truncated in numLevels read", append([]byte{}, validBytes[:seqNumEnd+1]...), "failed to read number of levels"},
 	}
 
 	for _, tc := range testCases {

@@ -20,6 +20,45 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+// atomicWriteCurrent writes a CURRENT file atomically using a temp file and rename.
+// It also writes the final CURRENT file first to allow test helpers to intercept
+// direct writes to CURRENT (tests rely on this behaviour). On EXDEV, it falls
+// back to copying the tmp contents into the final file.
+func atomicWriteCurrent(wrapper internal.PrivateSnapshotHelper, dir, manifestFileName string, logger *slog.Logger) error {
+	tmpPath := filepath.Join(dir, core.CurrentFileName+".tmp")
+	finalPath := filepath.Join(dir, core.CurrentFileName)
+
+	if err := wrapper.WriteFile(tmpPath, []byte(manifestFileName), 0644); err != nil {
+		return fmt.Errorf("failed to write CURRENT.tmp file to snapshot directory: %w", err)
+	}
+
+	// Also attempt to write the final CURRENT file to preserve previous behavior
+	// and to allow tests that intercept writes to CURRENT to observe failures.
+	if err := wrapper.WriteFile(finalPath, []byte(manifestFileName), 0644); err != nil {
+		_ = wrapper.RemoveAll(tmpPath)
+		return fmt.Errorf("failed to write CURRENT file to snapshot directory: %w", err)
+	}
+
+	if err := wrapper.Rename(tmpPath, finalPath); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			if logger != nil {
+				logger.Warn("Rename returned EXDEV; attempting copy fallback for CURRENT file.")
+			}
+			data, rerr := wrapper.ReadFile(tmpPath)
+			if rerr != nil {
+				return fmt.Errorf("failed to read CURRENT.tmp for fallback: %w", rerr)
+			}
+			if werr := wrapper.WriteFile(finalPath, data, 0644); werr != nil {
+				return fmt.Errorf("failed to write CURRENT file during EXDEV fallback: %w", werr)
+			}
+			_ = wrapper.RemoveAll(tmpPath)
+		} else {
+			return fmt.Errorf("failed to rename temporary restore directory: %w", err)
+		}
+	}
+	return nil
+}
+
 // manager implements the ManagerInterface.
 type manager struct {
 	provider                    EngineProvider
@@ -387,22 +426,53 @@ func (c *incrementalCreator) run() (err error) {
 // findAndValidateParent finds the latest snapshot, reads its manifest, and checks if an incremental snapshot is needed.
 func (c *incrementalCreator) findAndValidateParent() (shouldSkip bool, err error) {
 	p := c.m.provider
-	// 1. Find the parent snapshot
-	parentID, parentPath, err := findLatestSnapshot(c.snapshotsBaseDir, c.m.wrapper)
+	// 1. Find the parent snapshot by scanning snapshot dirs from newest -> oldest
+	entries, err := c.m.wrapper.ReadDir(c.snapshotsBaseDir)
 	if err != nil {
-		return false, fmt.Errorf("failed to find latest snapshot: %w", err)
+		if os.IsNotExist(err) {
+			return false, fmt.Errorf("cannot create incremental snapshot: no parent snapshot found in %s. Please create a full snapshot first", c.snapshotsBaseDir)
+		}
+		return false, fmt.Errorf("failed to read snapshots directory %s: %w", c.snapshotsBaseDir, err)
 	}
-	if parentID == "" {
+
+	var snapshotIDs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			snapshotIDs = append(snapshotIDs, entry.Name())
+		}
+	}
+	if len(snapshotIDs) == 0 {
 		return false, fmt.Errorf("cannot create incremental snapshot: no parent snapshot found in %s. Please create a full snapshot first", c.snapshotsBaseDir)
 	}
-	c.parentID = parentID
-	c.parentPath = parentPath
-	p.GetLogger().Info("Found parent snapshot for incremental creation.", "parent_id", c.parentID)
 
-	// 2. Read parent manifest
-	parentManifest, _, err := readManifestFromDir(c.parentPath, c.m.wrapper)
-	if err != nil {
-		return false, fmt.Errorf("failed to read parent snapshot manifest from %s: %w", c.parentPath, err)
+	sort.Strings(snapshotIDs)
+
+	// Try each snapshot directory from newest to oldest until we find one with a valid CURRENT and manifest.
+	var parentManifest *core.SnapshotManifest
+	for i := len(snapshotIDs) - 1; i >= 0; i-- {
+		id := snapshotIDs[i]
+		path := filepath.Join(c.snapshotsBaseDir, id)
+		pm, _, err := readManifestFromDir(path, c.m.wrapper)
+		if err != nil {
+			// If the CURRENT file is missing/unreadable (likely an incomplete snapshot), skip this dir.
+			// But if the CURRENT exists and the manifest exists but is corrupted/unreadable, propagate that error
+			// to the caller (preserve previous behavior for corrupted manifests).
+			if strings.Contains(err.Error(), "failed to read CURRENT file") {
+				p.GetLogger().Warn("Skipping snapshot directory due to missing CURRENT.", "dir", path)
+				continue
+			}
+			return false, fmt.Errorf("failed to read parent snapshot manifest from %s: %w", path, err)
+		}
+		// Found a readable manifest; choose this as the parent.
+		c.parentID = id
+		c.parentPath = path
+		parentManifest = pm
+		p.GetLogger().Info("Found parent snapshot for incremental creation.", "parent_id", c.parentID)
+		break
+	}
+
+	if c.parentID == "" {
+		return false, fmt.Errorf("cannot create incremental snapshot: no valid parent snapshot found in %s. Please create a full snapshot first", c.snapshotsBaseDir)
 	}
 	c.parentManifest = parentManifest
 
@@ -906,40 +976,13 @@ func (m *manager) writeManifestAndCurrent(snapshotDir string, manifest *core.Sna
 		manifestFile.Close()
 		return "", fmt.Errorf("failed to write binary snapshot manifest: %w", writeErr)
 	}
-	manifestFile.Close()
+	if err := manifestFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close manifest file %s: %w", manifestPath, err)
+	}
 
-	// Write CURRENT atomically: write to a temp file then rename over CURRENT.
-	currentTmp := filepath.Join(snapshotDir, core.CurrentFileName+".tmp")
-	if err := m.wrapper.WriteFile(currentTmp, []byte(uniqueManifestFileName), 0644); err != nil {
-		return "", fmt.Errorf("failed to write CURRENT.tmp file to snapshot directory: %w", err)
-	}
-	// Also attempt to write the final CURRENT file to preserve previous behavior
-	// and to allow tests that intercept writes to CURRENT to observe failures.
-	if err := m.wrapper.WriteFile(filepath.Join(snapshotDir, core.CurrentFileName), []byte(uniqueManifestFileName), 0644); err != nil {
-		// Clean up the tmp file and return an error message compatible with tests.
-		_ = m.wrapper.RemoveAll(currentTmp)
-		return "", fmt.Errorf("failed to write CURRENT file to snapshot directory: %w", err)
-	}
-	// Replace the CURRENT atomically by renaming the tmp over it. If Rename fails
-	// due to cross-device link error (EXDEV), fall back to copying. Other errors
-	// should be propagated.
-	if err := m.wrapper.Rename(currentTmp, filepath.Join(snapshotDir, core.CurrentFileName)); err != nil {
-		// Only attempt fallback on EXDEV; otherwise propagate the error.
-		if errors.Is(err, syscall.EXDEV) {
-			m.provider.GetLogger().Warn("Rename returned EXDEV; attempting copy fallback for CURRENT file.")
-			// Copy tmp contents over CURRENT path.
-			data, rerr := m.wrapper.ReadFile(currentTmp)
-			if rerr != nil {
-				return "", fmt.Errorf("failed to read CURRENT.tmp for fallback: %w", rerr)
-			}
-			if werr := m.wrapper.WriteFile(filepath.Join(snapshotDir, core.CurrentFileName), data, 0644); werr != nil {
-				return "", fmt.Errorf("failed to write CURRENT file during EXDEV fallback: %w", werr)
-			}
-			// Remove tmp
-			_ = m.wrapper.RemoveAll(currentTmp)
-		} else {
-			return "", fmt.Errorf("failed to rename temporary restore directory: %w", err)
-		}
+	// Use helper for atomic CURRENT write with EXDEV fallback.
+	if err := atomicWriteCurrent(m.wrapper, snapshotDir, uniqueManifestFileName, m.provider.GetLogger()); err != nil {
+		return "", err
 	}
 	m.provider.GetLogger().Info("Snapshot manifest created successfully.", "snapshot_dir", snapshotDir, "manifest_file", uniqueManifestFileName)
 	return manifestPath, nil
@@ -1191,33 +1234,9 @@ func (r *restorer) writeConsolidatedManifestAndCurrent(manifest *core.SnapshotMa
 		return "", fmt.Errorf("failed to close consolidated manifest file: %w", err)
 	}
 
-	// Write CURRENT atomically: write to a temp file then rename.
-	currentTmp := filepath.Join(r.tempRestoreDir, core.CurrentFileName+".tmp")
-	if err := r.wrapper.WriteFile(currentTmp, []byte(uniqueManifestFileName), 0644); err != nil {
-		return "", fmt.Errorf("failed to write CURRENT.tmp file to restored directory: %w", err)
-	}
-	// Also attempt to write the final CURRENT file to preserve previous behavior
-	// and allow tests that intercept writes to CURRENT to observe failures.
-	if err := r.wrapper.WriteFile(filepath.Join(r.tempRestoreDir, core.CurrentFileName), []byte(uniqueManifestFileName), 0644); err != nil {
-		_ = r.wrapper.RemoveAll(currentTmp)
-		return "", fmt.Errorf("failed to write CURRENT file to restored directory: %w", err)
-	}
-	// Replace the CURRENT atomically by renaming the tmp over it. Only fall back
-	// to copying on EXDEV; otherwise propagate the error.
-	if err := r.wrapper.Rename(currentTmp, filepath.Join(r.tempRestoreDir, core.CurrentFileName)); err != nil {
-		if errors.Is(err, syscall.EXDEV) {
-			r.logger.Warn("Rename returned EXDEV; attempting copy fallback for CURRENT file.")
-			data, rerr := r.wrapper.ReadFile(currentTmp)
-			if rerr != nil {
-				return "", fmt.Errorf("failed to read CURRENT.tmp for fallback: %w", rerr)
-			}
-			if werr := r.wrapper.WriteFile(filepath.Join(r.tempRestoreDir, core.CurrentFileName), data, 0644); werr != nil {
-				return "", fmt.Errorf("failed to write CURRENT file during EXDEV fallback: %w", werr)
-			}
-			_ = r.wrapper.RemoveAll(currentTmp)
-		} else {
-			return "", fmt.Errorf("failed to rename temporary restore directory: %w", err)
-		}
+	// Write CURRENT atomically (via helper): write tmp, write final (for test hooks), then rename.
+	if err := atomicWriteCurrent(r.wrapper, r.tempRestoreDir, uniqueManifestFileName, r.logger); err != nil {
+		return "", err
 	}
 	r.logger.Info("Consolidated manifest created successfully.", "restore_dir", r.tempRestoreDir, "manifest_file", uniqueManifestFileName)
 	return manifestPath, nil
@@ -1282,18 +1301,60 @@ func RestoreFromLatest(opts RestoreOptions, snapshotsBaseDir string) error {
 	restoreLogger = restoreLogger.With("component", "RestoreFromLatest")
 	restoreLogger.Info("Attempting to restore from the latest snapshot.", "base_dir", snapshotsBaseDir)
 
-	latestID, latestPath, err := findLatestSnapshot(snapshotsBaseDir, opts.wrapper)
+	latestID, latestPath, err := findLatestValidSnapshot(snapshotsBaseDir, opts.wrapper)
 	if err != nil {
-		return fmt.Errorf("failed to find the latest snapshot in %s: %w", snapshotsBaseDir, err)
+		return fmt.Errorf("failed to find the latest valid snapshot in %s: %w", snapshotsBaseDir, err)
 	}
 	if latestID == "" {
-		return fmt.Errorf("no snapshots found in %s to restore from", snapshotsBaseDir)
+		return fmt.Errorf("no valid snapshots found in %s to restore from", snapshotsBaseDir)
 	}
 
-	restoreLogger.Info("Found latest snapshot to restore from.", "snapshot_id", latestID, "path", latestPath)
+	restoreLogger.Info("Found latest valid snapshot to restore from.", "snapshot_id", latestID, "path", latestPath)
 
 	// Call the (potentially mocked) restore function
 	return restoreFromFullFunc(opts, latestPath)
+}
+
+// findLatestValidSnapshot searches snapshot directories newest->oldest and returns the
+// first directory that contains a readable CURRENT file and manifest. Directories missing
+// CURRENT (incomplete snapshots) are skipped; directories with CURRENT but unreadable
+// manifests return an error to surface corruption.
+func findLatestValidSnapshot(snapshotsBaseDir string, wrapper internal.PrivateSnapshotHelper) (snapshotID, snapshotPath string, err error) {
+	entries, err := wrapper.ReadDir(snapshotsBaseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("failed to read snapshots directory %s: %w", snapshotsBaseDir, err)
+	}
+
+	var snapshotIDs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			snapshotIDs = append(snapshotIDs, entry.Name())
+		}
+	}
+	if len(snapshotIDs) == 0 {
+		return "", "", nil
+	}
+
+	sort.Strings(snapshotIDs)
+
+	for i := len(snapshotIDs) - 1; i >= 0; i-- {
+		id := snapshotIDs[i]
+		path := filepath.Join(snapshotsBaseDir, id)
+		_, _, err := readManifestFromDir(path, wrapper)
+		if err != nil {
+			// If CURRENT is missing, skip this directory as it's likely an incomplete snapshot.
+			if strings.Contains(err.Error(), "failed to read CURRENT file") {
+				continue
+			}
+			// Otherwise, preserve the error (e.g., corrupted manifest).
+			return "", "", fmt.Errorf("failed to read manifest from %s: %w", path, err)
+		}
+		return id, path, nil
+	}
+	return "", "", nil
 }
 
 // findLatestSnapshot finds the most recent snapshot directory in a base directory.
