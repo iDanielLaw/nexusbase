@@ -34,7 +34,8 @@ type SegmentReader struct {
 }
 
 // CreateSegment creates a new segment file in the given directory.
-func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
+// `writerBufSize` configures the size of the buffered writer for this segment.
+func CreateSegment(dir string, index uint64, writerBufSize int) (*SegmentWriter, error) {
 	path := filepath.Join(dir, core.FormatSegmentFileName(index))
 	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
@@ -55,7 +56,7 @@ func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 	}
 	return &SegmentWriter{
 		Segment: seg,
-		writer:  bufio.NewWriter(file),
+		writer:  bufio.NewWriterSize(file, writerBufSize),
 		size:    int64(header.Size()), // Initialize with header size
 	}, nil
 }

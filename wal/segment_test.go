@@ -35,7 +35,7 @@ func TestSegmentFileNameFormat(t *testing.T) {
 		})
 	}
 
-			t.Run("ParseError", func(t *testing.T) {
+	t.Run("ParseError", func(t *testing.T) {
 		_, err := core.ParseSegmentFileName("not_a_segment.log")
 		assert.Error(t, err)
 		_, err = core.ParseSegmentFileName("00000001.wal_backup")
@@ -47,7 +47,7 @@ func TestCreateSegment(t *testing.T) {
 	tempDir := t.TempDir()
 
 	t.Run("SuccessfulCreation", func(t *testing.T) {
-		sw, err := CreateSegment(tempDir, 1)
+		sw, err := CreateSegment(tempDir, 1, 64*1024)
 		require.NoError(t, err)
 		require.NotNil(t, sw)
 		defer sw.Close()
@@ -66,7 +66,7 @@ func TestCreateSegment(t *testing.T) {
 		// CreateSegment does not create the directory, os.MkdirAll in WAL.Open does.
 		// So this should fail.
 		nonExistentDir := filepath.Join(tempDir, "nonexistent")
-		_, err := CreateSegment(nonExistentDir, 1)
+		_, err := CreateSegment(nonExistentDir, 1, 64*1024)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	})
@@ -76,7 +76,7 @@ func TestSegment_WriteAndReadRecord(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// 1. Create and write to a segment
-	sw, err := CreateSegment(tempDir, 1)
+	sw, err := CreateSegment(tempDir, 1, 64*1024)
 	require.NoError(t, err)
 
 	record1 := []byte("hello world")
@@ -205,7 +205,7 @@ func TestOpenSegmentForRead_ErrorCases(t *testing.T) {
 
 func TestSegmentWriter_Close(t *testing.T) {
 	tempDir := t.TempDir()
-	sw, err := CreateSegment(tempDir, 1)
+	sw, err := CreateSegment(tempDir, 1, 64*1024)
 	require.NoError(t, err)
 
 	err = sw.Close()

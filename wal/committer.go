@@ -73,10 +73,15 @@ func (w *WAL) commit(records []*commitRecord) {
 
 	for i := range allEntries {
 		e := allEntries[i]
-		// encode this single entry into a temporary buffer to measure size
-		var tmp bytes.Buffer
-		if err := encodeEntryData(&tmp, &e); err != nil {
-			err := err
+		// encode this single entry into a pooled temporary buffer to measure size
+		bptr := w.bufPool.Get().(*[]byte)
+		tmp := (*bptr)[:0]
+		var err error
+		tmp, err = encodeEntryToSlice(&e, tmp)
+		if err != nil {
+			// return buffer and notify error
+			*bptr = (*bptr)[:0]
+			w.bufPool.Put(bptr)
 			for _, rec := range records {
 				rec.done <- err
 			}
@@ -84,7 +89,7 @@ func (w *WAL) commit(records []*commitRecord) {
 		}
 		// If adding this entry would exceed MaxSegmentSize for an empty payload and
 		// it's a single entry, return ErrRecordTooLarge.
-		entrySize := int64(tmp.Len())
+		entrySize := int64(len(tmp))
 		// estimated record overhead (length + checksum)
 		recordOverhead := int64(8)
 
@@ -115,12 +120,17 @@ func (w *WAL) commit(records []*commitRecord) {
 		}
 
 		// append the entry to currentBuf and currentEntries
-		if _, err := currentBuf.Write(tmp.Bytes()); err != nil {
+		if _, err := currentBuf.Write(tmp); err != nil {
+			*bptr = (*bptr)[:0]
+			w.bufPool.Put(bptr)
 			for _, rec := range records {
 				rec.done <- err
 			}
 			return
 		}
+		// return buffer to pool
+		*bptr = (*bptr)[:0]
+		w.bufPool.Put(bptr)
 		currentEntries = append(currentEntries, e)
 	}
 
@@ -207,4 +217,33 @@ func (w *WAL) commit(records []*commitRecord) {
 	// update metrics (silence unused vars if not used elsewhere)
 	_ = totalBytes
 	_ = totalEntries
+}
+
+// encodeEntryToSlice appends the binary encoding of a WALEntry into the provided
+// buffer and returns the extended slice. This avoids allocations done by
+// creating temporary bytes.Buffers per entry.
+func encodeEntryToSlice(entry *core.WALEntry, buf []byte) ([]byte, error) {
+	// entry type (1 byte)
+	buf = append(buf, byte(entry.EntryType))
+
+	// seq num (8 bytes little endian)
+	var seqBuf [8]byte
+	binary.LittleEndian.PutUint64(seqBuf[:], entry.SeqNum)
+	buf = append(buf, seqBuf[:]...)
+
+	// key length (uvarint) + key
+	var tmpVar [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(tmpVar[:], uint64(len(entry.Key)))
+	buf = append(buf, tmpVar[:n]...)
+	if len(entry.Key) > 0 {
+		buf = append(buf, entry.Key...)
+	}
+
+	// value length (uvarint) + value
+	n = binary.PutUvarint(tmpVar[:], uint64(len(entry.Value)))
+	buf = append(buf, tmpVar[:n]...)
+	if len(entry.Value) > 0 {
+		buf = append(buf, entry.Value...)
+	}
+	return buf, nil
 }

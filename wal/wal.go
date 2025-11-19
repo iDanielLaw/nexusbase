@@ -66,6 +66,9 @@ type WAL struct {
 
 	testingOnlyInjectCloseError  error
 	testingOnlyInjectAppendError error
+
+	// Buffer pool for encoding WALEntry payloads to reduce allocations.
+	bufPool *sync.Pool
 }
 
 var _ WALInterface = (*WAL)(nil)
@@ -127,6 +130,9 @@ type Options struct {
 	CommitMaxBatchSize int           // Max number of records in a batch before a commit is forced.
 	StartRecoveryIndex uint64
 	HookManager        hooks.HookManager
+	// WriterBufferSize configures the size of the buffered writer used for segment writes.
+	// If zero, a sensible default will be used.
+	WriterBufferSize int
 }
 
 // Open creates or opens a WAL directory.
@@ -145,6 +151,9 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 	if opts.CommitMaxBatchSize == 0 {
 		opts.CommitMaxBatchSize = 64
 	}
+	if opts.WriterBufferSize == 0 {
+		opts.WriterBufferSize = 64 * 1024 // 64 KiB default
+	}
 
 	if err := os.MkdirAll(opts.Dir, 0755); err != nil {
 		return nil, nil, fmt.Errorf("failed to create WAL directory %s: %w", opts.Dir, err)
@@ -158,6 +167,14 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 		metricsEntriesWritten: opts.EntriesWritten,
 		hookManager:           opts.HookManager,
 		streamers:             make(map[uint64]*streamerRegistration),
+	}
+	// Initialize buffer pool used for encoding entries
+	bufSize := opts.WriterBufferSize
+	w.bufPool = &sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 0, bufSize)
+			return &b
+		},
 	}
 	w.isClosing.Store(false)
 
@@ -355,7 +372,7 @@ func (w *WAL) rotateLocked() error {
 		nextIndex = w.segmentIndexes[len(w.segmentIndexes)-1] + 1
 	}
 
-	newSegment, err := CreateSegment(w.dir, nextIndex)
+	newSegment, err := CreateSegment(w.dir, nextIndex, w.opts.WriterBufferSize)
 	if err != nil {
 		return err
 	}
@@ -562,7 +579,7 @@ func (w *WAL) openForAppend() error {
 	}
 	w.activeSegment = &SegmentWriter{
 		Segment: seg,
-		writer:  bufio.NewWriter(f),
+		writer:  bufio.NewWriterSize(f, w.opts.WriterBufferSize),
 		size:    stat.Size(),
 	}
 	return nil
