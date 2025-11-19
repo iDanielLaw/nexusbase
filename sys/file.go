@@ -60,18 +60,21 @@ func init() {
 }
 
 func SetDefaultFile(file File) {
+	// Store a pointer to the provided File value. Using a pointer
+	// allows atomic load/store of the interface value across goroutines.
 	defaultFile.Store(&file)
 }
 
 func SetDebugMode(mode bool) {
-	// debugMode.Store(mode)
+	debugMode.Store(mode)
 }
 
 var Create CreateHandler = (func(name string) (FileInterface, error) {
-	file := (*defaultFile.Load())
-	if file == nil {
+	p := defaultFile.Load()
+	if p == nil {
 		return nil, os.ErrInvalid
 	}
+	file := *p
 
 	if debugMode.Load() {
 		return DCreate(file, name)
@@ -80,10 +83,11 @@ var Create CreateHandler = (func(name string) (FileInterface, error) {
 })
 
 var Open OpenHandler = (func(name string) (FileInterface, error) {
-	file := (*defaultFile.Load())
-	if file == nil {
+	p := defaultFile.Load()
+	if p == nil {
 		return nil, os.ErrInvalid
 	}
+	file := *p
 	if debugMode.Load() {
 		return DOpen(file, name)
 	}
@@ -91,10 +95,11 @@ var Open OpenHandler = (func(name string) (FileInterface, error) {
 })
 
 var OpenFile OpenFileHandler = (func(name string, flag int, perm os.FileMode) (FileInterface, error) {
-	file := (*defaultFile.Load())
-	if file == nil {
+	p := defaultFile.Load()
+	if p == nil {
 		return nil, os.ErrInvalid
 	}
+	file := *p
 	if debugMode.Load() {
 		return DOpenFile(file, name, flag, perm)
 	}
@@ -102,18 +107,20 @@ var OpenFile OpenFileHandler = (func(name string, flag int, perm os.FileMode) (F
 })
 
 var GC GCFileHandler = (func() error {
-	file := (*defaultFile.Load())
-	if file == nil {
+	p := defaultFile.Load()
+	if p == nil {
 		return os.ErrInvalid
 	}
+	file := *p
 	return file.GC()
 })
 
 var WriteFile WriteFileHandler = (func(name string, data []byte, perm os.FileMode) error {
-	file := (*defaultFile.Load())
-	if file == nil {
+	p := defaultFile.Load()
+	if p == nil {
 		return os.ErrInvalid
 	}
+	file := *p
 	return file.WriteFile(name, data, perm)
 })
 

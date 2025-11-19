@@ -37,8 +37,8 @@ func DOpenFile(sysFile File, name string, flag int, perm os.FileMode) (FileInter
 		return nil, err
 	}
 
-	nextID.Add(1)
-	id := nextID.Load()
+	// Atomically increment and use the returned value as the ID.
+	id := nextID.Add(1)
 	logger = logger.With("id", id)
 	logger = logger.With("file_name", name)
 	logger.Debug("Opening file")
