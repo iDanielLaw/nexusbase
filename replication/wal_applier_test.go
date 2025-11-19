@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"sync"
 	"testing"
 	"time"
@@ -21,7 +20,8 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/INLOpen/nexusbase/internal/testutil"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -165,7 +165,7 @@ func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicati
 		streamStopCh: make(chan struct{}),
 	}
 
-	lis := bufconn.Listen(bufSize)
+	lis := testutil.NewBufconnListener(bufSize)
 	s := grpc.NewServer()
 	pb.RegisterReplicationServiceServer(s, mockServer)
 
@@ -175,17 +175,9 @@ func setupTest(t *testing.T) (*WALApplier, *mockReplicatedEngine, *mockReplicati
 		}
 	}()
 
-	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
-		return lis.DialContext(ctx)
-	}
-
 	applier := NewWALApplier(lis.Addr().String(), mockEngine, nil, t.TempDir(), logger)
 	applier.retrySleep = 50 * time.Millisecond
-	applier.dialOpts = []grpc.DialOption{
-		grpc.WithContextDialer(dialer),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-	}
+	applier.dialOpts = append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 
 	cleanup := func() {
 		applier.Stop()

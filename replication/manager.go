@@ -289,11 +289,8 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 		return
 	}
 
-	// Update follower state under lock and compute lag based on follower-reported
-	// last-applied timestamp if available. Fall back to previous successful ping
-	// interval only if the follower did not report a timestamp.
+	// Update follower state under lock and compute lag using helper.
 	now := time.Now()
-	var lag time.Duration
 	f.mu.Lock()
 	prevLastPing := f.LastPing
 	f.LastPing = now
@@ -305,24 +302,13 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 		f.Healthy = false
 		f.RetryCount++
 	}
-	// Prefer using the follower-reported last_applied_at timestamp when present.
-	if resp.LastAppliedAt != nil {
-		lastApplied := resp.LastAppliedAt.AsTime()
-		if !lastApplied.IsZero() {
-			lag = now.Sub(lastApplied)
-			if lag < 0 {
-				// Negative lag indicates clock skew; treat as zero and log warning.
-				lag = 0
-				m.logger.Warn("Negative replication lag detected (clock skew)", "addr", f.Addr, "last_applied_at", lastApplied)
-			}
-		}
-	} else {
-		// Fallback: compute lag as interval since previous successful ping (crude health indicator).
-		if !prevLastPing.IsZero() {
-			lag = now.Sub(prevLastPing)
-		}
-	}
 	f.mu.Unlock()
+
+	// Compute lag (prefers follower-reported timestamp, falls back to prev ping).
+	lag, lastApplied, negative := computeLag(resp, prevLastPing, now)
+	if negative {
+		m.logger.Warn("Negative replication lag detected (clock skew)", "addr", f.Addr, "last_applied_at", lastApplied)
+	}
 
 	if f.LagCallback != nil && lag > 0 {
 		f.LagCallback(lag)
@@ -334,6 +320,26 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 		"last_seq", f.LastAckSeq,
 		"lag", lag,
 		"message", resp.Message)
+}
+
+// computeLag computes replication lag from a HealthCheckResponse. It prefers
+// the follower-reported LastAppliedAt timestamp; if absent, it falls back to
+// the interval since prevLastPing. It returns (lag, lastAppliedTime, negativeSkew).
+func computeLag(resp *pb.HealthCheckResponse, prevLastPing, now time.Time) (time.Duration, time.Time, bool) {
+	if resp.LastAppliedAt != nil {
+		lastApplied := resp.LastAppliedAt.AsTime()
+		if !lastApplied.IsZero() {
+			lag := now.Sub(lastApplied)
+			if lag < 0 {
+				return 0, lastApplied, true
+			}
+			return lag, lastApplied, false
+		}
+	}
+	if !prevLastPing.IsZero() {
+		return now.Sub(prevLastPing), time.Time{}, false
+	}
+	return 0, time.Time{}, false
 }
 
 // Stop gracefully shuts down the gRPC server and follower monitoring with timeout.

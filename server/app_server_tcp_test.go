@@ -15,6 +15,7 @@ import (
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/internal/testutil"
 	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
@@ -30,7 +31,8 @@ type testTCPServer struct {
 }
 
 // testInMemListener is set when tests replace the TCP listener with an in-memory listener.
-var testInMemListener *InMemoryListener
+// testInMemListener is set when tests replace the TCP listener with an in-memory listener.
+var testInMemListener *testutil.InMemoryListener
 
 // close stops the server and asserts mock expectations.
 func (s *testTCPServer) close(t *testing.T) {
@@ -63,7 +65,7 @@ func setupTCPServerTest(t *testing.T) *testTCPServer {
 	// Expect the Close call during cleanup
 	mockEngine.On("Close").Return(nil).Once()
 
-	lis := NewInMemoryListener()
+	lis := testutil.NewInMemoryListener()
 	testInMemListener = lis
 	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, nil, lis)
 	require.NoError(t, err)

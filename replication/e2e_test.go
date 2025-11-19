@@ -3,7 +3,6 @@ package replication_test
 import (
 	"context"
 	"log/slog"
-	"net"
 	"os"
 	"testing"
 	"time"
@@ -15,7 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/INLOpen/nexusbase/internal/testutil"
 )
 
 // replicationTestHarness holds all the components for a leader-follower test setup.
@@ -37,7 +37,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 
 	// Use an in-memory listener to avoid binding real TCP ports in tests.
 	const bufSize = 1024 * 1024
-	lis := bufconn.Listen(bufSize)
+	lis := testutil.NewBufconnListener(bufSize)
 	leaderAddr := lis.Addr().String()
 
 	leaderOpts := engine.GetBaseOptsForTest(t, "leader_")
@@ -109,21 +109,13 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	// Dial the bufconn listener using a custom dialer
 	connCtx, connCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer connCancel()
-	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
-		// bufconn.Listener only provides Dial(); ignore the context parameter
-		// because bufconn.Dial() does not accept a context.
-		return lis.Dial()
-	}
-	conn, err := grpc.DialContext(connCtx, leaderAddr, grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	conn, err := grpc.DialContext(connCtx, leaderAddr, append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())...)
 	require.NoError(t, err, "could not connect to leader gRPC server in test setup")
 	conn.Close()
 
-	// Inject the bufconn dialer into the WAL applier so it uses the in-memory
+	// Inject the bufconn dial options into the WAL applier so it uses the in-memory
 	// listener instead of trying to dial a TCP address named like "bufconn".
-	h.followerApplier.SetDialOptions([]grpc.DialOption{
-		grpc.WithContextDialer(dialer),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	})
+	h.followerApplier.SetDialOptions(append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials())))
 
 	h.followerApplier.Start(context.Background())
 

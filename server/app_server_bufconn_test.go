@@ -12,6 +12,7 @@ import (
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/internal/testutil"
 	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
@@ -19,69 +20,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// InMemoryListener is a simple net.Listener for in-process tests.
-// It uses net.Pipe to produce paired connections; the server receives
-// one end via Accept() and the test code obtains the client end with Dial().
-type InMemoryListener struct {
-	conns  chan net.Conn
-	closed chan struct{}
-	addr   net.Addr
-}
-
-type memAddr string
-
-func (m memAddr) Network() string { return "inmem" }
-func (m memAddr) String() string  { return string(m) }
-
-func NewInMemoryListener() *InMemoryListener {
-	return &InMemoryListener{
-		conns:  make(chan net.Conn, 16),
-		closed: make(chan struct{}),
-		addr:   memAddr("inmemory"),
-	}
-}
-
-func (l *InMemoryListener) Accept() (net.Conn, error) {
-	select {
-	case c := <-l.conns:
-		return c, nil
-	case <-l.closed:
-		return nil, net.ErrClosed
-	}
-}
-
-func (l *InMemoryListener) Close() error {
-	select {
-	case <-l.closed:
-		return nil
-	default:
-		close(l.closed)
-		return nil
-	}
-}
-
-func (l *InMemoryListener) Addr() net.Addr { return l.addr }
-
-// Dial creates a client-side connection paired with a server-side
-// connection that will be returned by the next Accept().
-func (l *InMemoryListener) Dial() (net.Conn, error) {
-	c1, c2 := net.Pipe()
-	select {
-	case l.conns <- c1:
-		return c2, nil
-	case <-l.closed:
-		c1.Close()
-		c2.Close()
-		return nil, net.ErrClosed
-	}
-}
-
 // testInMemServer holds the server and mock engine for a test that uses InMemoryListener.
 type testInMemServer struct {
 	appServer     *AppServer
 	mockEngine    *MockStorageEngine
 	serverErrChan chan error
-	lis           *InMemoryListener
+	lis           *testutil.InMemoryListener
 }
 
 func (s *testInMemServer) close(t *testing.T) {
@@ -107,7 +51,7 @@ func setupInMemoryServerTest(t *testing.T) *testInMemServer {
 
 	mockEngine.On("Close").Return(nil).Once()
 
-	lis := NewInMemoryListener()
+	lis := testutil.NewInMemoryListener()
 	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, nil, lis)
 	require.NoError(t, err)
 
@@ -119,8 +63,26 @@ func setupInMemoryServerTest(t *testing.T) *testInMemServer {
 		close(serverErrChan)
 	}()
 
-	// Ensure server goroutine has a moment to start Accept loop.
-	time.Sleep(10 * time.Millisecond)
+	// Wait for the TCP server accept loop to start instead of sleeping.
+	// Check the internal `isStarted` flag under the tcpServer mutex to avoid races.
+	ready := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if appServer.tcpServer != nil {
+			appServer.tcpServer.mu.Lock()
+			started := appServer.tcpServer.isStarted
+			appServer.tcpServer.mu.Unlock()
+			if started {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		// Fallback: if the server didn't report started, fail the setup early.
+		require.True(t, ready, "TCP server did not start within timeout")
+	}
 
 	return &testInMemServer{
 		appServer:     appServer,
@@ -217,6 +179,34 @@ func TestInMemoryServer_Query_RawData_WithResults(t *testing.T) {
 	endResp, err := api.DecodeQueryEndResponse(bytes.NewReader(payloadResp))
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(2), endResp.TotalRows)
+}
+
+func TestInMemoryListener_CloseDrainsPendingConns(t *testing.T) {
+	lis := testutil.NewInMemoryListener()
+
+	// Dial once to enqueue a server-side connection into lis.conns and get the client conn.
+	clientConn, err := lis.Dial()
+	require.NoError(t, err)
+
+	// Close the listener; Close should drain pending conns and close them.
+	require.NoError(t, lis.Close())
+
+	// Client side of the pipe should be closed by the drain logic.
+	// A Read should return an error (EOF or other) when the peer is closed.
+	buf := make([]byte, 1)
+	clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	_, err = clientConn.Read(buf)
+	require.Error(t, err)
+	_ = clientConn.Close()
+}
+
+func TestInMemoryListener_AcceptAfterCloseReturnsErr(t *testing.T) {
+	lis := testutil.NewInMemoryListener()
+	require.NoError(t, lis.Close())
+
+	// Accept should return net.ErrClosed when the listener is closed.
+	_, err := lis.Accept()
+	require.ErrorIs(t, err, net.ErrClosed)
 }
 
 // Test executor timestamp behavior using mock clock (doesn't require network).

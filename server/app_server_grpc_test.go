@@ -27,6 +27,7 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/indexer"
+	"github.com/INLOpen/nexusbase/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -97,7 +97,7 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 			mockEngine.On("Close").Return(nil).Once()
 
 			// Create a bufconn listener so tests don't need a real TCP port.
-			lis := bufconn.Listen(bufSize)
+			lis := testutil.NewBufconnListener(bufSize)
 
 			// Create AppServer with injected bufconn listener
 			appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, lis, nil)
@@ -122,11 +122,9 @@ func TestAppServer_StartStop_GRPC(t *testing.T) {
 			var healthCheckSuccessful bool
 			creds := tc.setupCreds(t, certFile)
 
-			dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
-
 			for i := 0; i < 20; i++ {
 				dialCtx, dialCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-				conn, err = grpc.DialContext(dialCtx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(creds), grpc.WithBlock())
+				conn, err = grpc.DialContext(dialCtx, "bufnet", append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(creds), grpc.WithBlock())...)
 				dialCancel()
 				if err == nil {
 					healthClient := grpc_health_v1.NewHealthClient(conn)
@@ -177,7 +175,7 @@ func setupTestGRPCServerBufconn(t *testing.T) (tsdb.TSDBServiceClient, *MockStor
 	mockEngine := new(MockStorageEngine)
 	testLogger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	const bufSize = 1024 * 1024
-	lis := bufconn.Listen(bufSize)
+	lis := testutil.NewBufconnListener(bufSize)
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -199,10 +197,9 @@ func setupTestGRPCServerBufconn(t *testing.T) (tsdb.TSDBServiceClient, *MockStor
 	}()
 
 	// Dial via bufconn
-	dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer dialCancel()
-	conn, err := grpc.DialContext(dialCtx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	conn, err := grpc.DialContext(dialCtx, "bufnet", append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())...)
 	require.NoError(t, err, "Failed to connect to test gRPC server (bufconn)")
 
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -504,7 +501,7 @@ func TestAppServer_HealthCheck_Failure(t *testing.T) {
 
 	// Use bufconn to avoid using an actual TCP port
 	const bufSize = 1024 * 1024
-	lis := bufconn.Listen(bufSize)
+	lis := testutil.NewBufconnListener(bufSize)
 
 	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, lis, nil)
 	require.NoError(t, err)
@@ -519,8 +516,7 @@ func TestAppServer_HealthCheck_Failure(t *testing.T) {
 	// 3. Create a gRPC client to check health over bufconn
 	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer testCancel()
-	dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
-	conn, err := grpc.DialContext(testCtx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	conn, err := grpc.DialContext(testCtx, "bufnet", append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())...)
 	require.NoError(t, err)
 	defer conn.Close()
 	healthClient := grpc_health_v1.NewHealthClient(conn)
@@ -568,7 +564,7 @@ func TestAppServer_TLS_BadCert(t *testing.T) {
 
 	// Use bufconn to avoid a real TCP port
 	const bufSize = 1024 * 1024
-	lis := bufconn.Listen(bufSize)
+	lis := testutil.NewBufconnListener(bufSize)
 
 	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, lis, nil)
 	require.NoError(t, err)
@@ -613,8 +609,7 @@ func TestAppServer_TLS_BadCert(t *testing.T) {
 	// 3. Attempt to connect over bufconn
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	dialer := func(ctx context.Context, s string) (net.Conn, error) { return lis.Dial() }
-	conn, dialErr := grpc.DialContext(ctx, "bufnet", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(creds))
+	conn, dialErr := grpc.DialContext(ctx, "bufnet", append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(creds))...)
 	require.NoError(t, dialErr, "grpc.DialContext should not return an immediate error")
 	defer conn.Close()
 
@@ -658,7 +653,7 @@ func TestAppServer_ErrorCases(t *testing.T) {
 
 	// Use bufconn listener instead of real port. This avoids flakiness on CI
 	const bufSize = 1024 * 1024
-	lis := bufconn.Listen(bufSize)
+	lis := testutil.NewBufconnListener(bufSize)
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
