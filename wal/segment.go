@@ -54,9 +54,12 @@ func CreateSegment(dir string, index uint64, writerBufSize int, preallocSize int
 	// rather than failing segment creation. This avoids hard failures on filesystems
 	// that don't support fallocate or when the operation is not permitted.
 	if preallocSize > 0 {
-		if err := sys.Preallocate(file, preallocSize); err != nil {
-			fmt.Printf("warning: failed to preallocate segment file %s to %d: %v\n", path, preallocSize, err)
-		}
+		// Attempt preallocation as best-effort. Suppress noisy warnings because
+		// many test environments and mount points (Windows mounts, tmpfs, etc.)
+		// don't expose a file descriptor suitable for fallocate; callers should
+		// not treat failures here as fatal. If you need to debug preallocation
+		// failures, enable a higher log level or instrument `sys.Preallocate`.
+		_ = sys.Preallocate(file, preallocSize)
 	}
 
 	seg := &Segment{

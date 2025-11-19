@@ -3,6 +3,7 @@
 package sys
 
 import (
+	"errors"
 	"fmt"
 	"unsafe"
 
@@ -23,7 +24,7 @@ func Preallocate(f FileInterface, size int64) error {
 	// The underlying FileInterface should expose Fd()
 	fg, ok := f.(interface{ Fd() uintptr })
 	if !ok {
-		return nil
+		return ErrPreallocNotSupported
 	}
 
 	// Use golang.org/x/sys/windows to call SetFileInformationByHandle
@@ -42,6 +43,12 @@ func Preallocate(f FileInterface, size int64) error {
 		return nil
 	}
 
-	// If allocation via SetFileInformationByHandle failed, return the error.
+	// Map common "not supported" errors to the sentinel so callers can suppress
+	// noisy warnings for expected filesystems or mounts that don't support this
+	// operation.
+	if errors.Is(err, windows.ERROR_INVALID_FUNCTION) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED) {
+		return ErrPreallocNotSupported
+	}
+
 	return fmt.Errorf("windows preallocation failed: %w", err)
 }
