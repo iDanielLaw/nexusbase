@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"log/slog"
+
 	"golang.org/x/sys/unix"
 
 	"github.com/INLOpen/nexusbase/sys"
@@ -21,11 +23,11 @@ func main() {
 
 	now := time.Now().UnixNano()
 	tmp := filepath.Join(*dir, fmt.Sprintf("nexusbase_prealloc_check_%d.tmp", now))
-	fmt.Printf("Creating test file: %s\n", tmp)
+	slog.Info("Creating test file", "path", tmp)
 
 	f, err := os.Create(tmp)
 	if err != nil {
-		fmt.Printf("failed to create file: %v\n", err)
+		slog.Error("failed to create file", "err", err)
 		os.Exit(2)
 	}
 	defer func() {
@@ -35,35 +37,35 @@ func main() {
 
 	// Try unix.Fallocate with KEEP_SIZE first and report exact error values.
 	fd := int(f.Fd())
-	fmt.Printf("Attempting unix.Fallocate(fd=%d, KEEP_SIZE, 0, %d)\n", fd, *size)
+	slog.Info("Attempting unix.Fallocate (KEEP_SIZE)", "fd", fd, "size", *size)
 	if err := unix.Fallocate(fd, unix.FALLOC_FL_KEEP_SIZE, 0, *size); err != nil {
 		// Print raw error and errno numeric when available.
-		fmt.Printf("unix.Fallocate KEEP_SIZE failed: %v\n", err)
+		slog.Error("unix.Fallocate KEEP_SIZE failed", "err", err)
 		if errno, ok := err.(unix.Errno); ok {
-			fmt.Printf("errno numeric: %d\n", int(errno))
+			slog.Error("errno numeric", "errno", int(errno))
 		}
 	} else {
-		fmt.Printf("unix.Fallocate KEEP_SIZE succeeded\n")
+		slog.Info("unix.Fallocate KEEP_SIZE succeeded", "fd", fd, "size", *size)
 	}
 
 	// Try plain fallocate (may change file size) as fallback.
-	fmt.Printf("Attempting unix.Fallocate(fd=%d, 0, 0, %d)\n", fd, *size)
+	slog.Info("Attempting unix.Fallocate (plain)", "fd", fd, "size", *size)
 	if err := unix.Fallocate(fd, 0, 0, *size); err != nil {
-		fmt.Printf("unix.Fallocate plain failed: %v\n", err)
+		slog.Error("unix.Fallocate plain failed", "err", err)
 		if errno, ok := err.(unix.Errno); ok {
-			fmt.Printf("errno numeric: %d\n", int(errno))
+			slog.Error("errno numeric", "errno", int(errno))
 		}
 	} else {
-		fmt.Printf("unix.Fallocate plain succeeded\n")
+		slog.Info("unix.Fallocate plain succeeded", "fd", fd, "size", *size)
 	}
 
 	// Now call the repository wrapper so we see the same result users get via sys.Preallocate.
-	fmt.Printf("Calling repo sys.Preallocate(file, %d)\n", *size)
+	slog.Info("Calling repo sys.Preallocate", "size", *size)
 	if err := sys.Preallocate(f, *size); err != nil {
-		fmt.Printf("sys.Preallocate returned: %v\n", err)
+		slog.Error("sys.Preallocate returned error", "err", err)
 	} else {
-		fmt.Printf("sys.Preallocate returned: nil (success)\n")
+		slog.Info("sys.Preallocate returned: nil (success)")
 	}
 
-	fmt.Println("Done")
+	slog.Info("Done")
 }

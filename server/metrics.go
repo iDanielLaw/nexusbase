@@ -9,6 +9,8 @@ import (
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
+
+	"github.com/INLOpen/nexusbase/sys"
 )
 
 // SystemCollector is responsible for periodically collecting system-level metrics
@@ -17,6 +19,8 @@ type SystemCollector struct {
 	cpuUsagePercent *expvar.Float
 	memUsagePercent *expvar.Float
 	diskUsage       *expvar.Float
+	preallocHits    *expvar.Int
+	preallocMisses  *expvar.Int
 	diskPath        string
 	interval        time.Duration
 	stopChan        chan struct{}
@@ -31,6 +35,8 @@ func NewSystemCollector(diskPath string, interval time.Duration, logger *slog.Lo
 		cpuUsagePercent: expvar.NewFloat("system_cpu_usage_percent"),
 		memUsagePercent: expvar.NewFloat("system_mem_usage_percent"),
 		diskUsage:       expvar.NewFloat("system_disk_usage_percent"),
+		preallocHits:    expvar.NewInt("prealloc_cache_hits"),
+		preallocMisses:  expvar.NewInt("prealloc_cache_misses"),
 		diskPath:        diskPath,
 		interval:        interval,
 		stopChan:        make(chan struct{}),
@@ -76,6 +82,12 @@ func (sc *SystemCollector) collectLoop() {
 			// Collect Disk Usage
 			if du, err := disk.Usage(sc.diskPath); err == nil {
 				sc.diskUsage.Set(du.UsedPercent)
+			}
+
+			// Collect preallocation cache stats (hits/misses) from sys package
+			if hits, misses := sys.PreallocCacheStats(); hits != 0 || misses != 0 {
+				sc.preallocHits.Set(int64(hits))
+				sc.preallocMisses.Set(int64(misses))
 			}
 		case <-sc.stopChan:
 			return
