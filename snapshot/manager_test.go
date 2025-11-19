@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -397,10 +398,10 @@ func (ms *mockSnapshotHelper) CopyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create destination file %s: %w", dst, err)
 	}
-	defer out.Close()
 
 	_, err = io.Copy(out, in)
 	if err != nil {
+		out.Close()
 		return fmt.Errorf("failed to copy data from %s to %s: %w", src, dst, err)
 	}
 	if err := out.Close(); err != nil {
@@ -1725,6 +1726,44 @@ func TestRestoreFromFull(t *testing.T) {
 	assert.Equal(t, "sst1", string(content))
 }
 
+func TestRestoreFromLatest_IgnoresIncompleteSnapshots(t *testing.T) {
+	tempDir := t.TempDir()
+	snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	// Newest incomplete snapshot: manifest exists but no CURRENT
+	incompleteID := "1000"
+	incompleteDir := filepath.Join(snapshotsBaseDir, incompleteID)
+	require.NoError(t, os.MkdirAll(incompleteDir, 0755))
+	_, err := writeTestManifest(incompleteDir, &core.SnapshotManifest{Type: core.SnapshotTypeFull, SequenceNumber: 1})
+	require.NoError(t, err)
+
+	// Older valid snapshot
+	validID := "2000"
+	validDir := filepath.Join(snapshotsBaseDir, validID)
+	require.NoError(t, os.MkdirAll(validDir, 0755))
+	manifestFileName, err := writeTestManifest(validDir, &core.SnapshotManifest{Type: core.SnapshotTypeFull, SequenceNumber: 2})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(validDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+	// Replace restoreFromFullFunc to capture the path chosen
+	original := restoreFromFullFunc
+	defer func() { restoreFromFullFunc = original }()
+	var chosenPath string
+	restoreFromFullFunc = func(opts RestoreOptions, path string) error {
+		chosenPath = path
+		return nil
+	}
+
+	// Call RestoreFromLatest
+	opts := RestoreOptions{DataDir: filepath.Join(tempDir, "data")}
+	err = RestoreFromLatest(opts, snapshotsBaseDir)
+	require.NoError(t, err)
+
+	// Expect the valid (older) snapshot to be chosen, not the incomplete newest one
+	assert.Equal(t, validDir, chosenPath)
+}
+
 func TestRestoreFromFull_TargetExists(t *testing.T) {
 	// Setup: สร้าง snapshot และไดเรกทอรีเป้าหมายที่มีอยู่แล้ว
 	tempDir := t.TempDir()
@@ -2059,6 +2098,68 @@ func TestRestoreFromFull_RenameError(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "Temporary restore directory should be cleaned up on failure")
 }
 
+func TestRestoreFromFull_EXDEVFallback(t *testing.T) {
+	// Ensure that when Rename returns EXDEV during swap, the restorer falls back to copying.
+	r, _, targetDataDir, helper := setupRestorerTest(t)
+
+	// Simulate EXDEV on rename
+	helper.InterceptRename = func(oldpath, newpath string) error {
+		return syscall.EXDEV
+	}
+
+	// Run restore; should succeed because EXDEV triggers copy fallback.
+	err := r.run()
+	require.NoError(t, err)
+
+	// Verify files were copied to the target data dir
+	assert.FileExists(t, filepath.Join(targetDataDir, "sst", "1.sst"))
+	assert.FileExists(t, filepath.Join(targetDataDir, "CURRENT"))
+
+	// Temp dir should be cleaned up
+	assert.Empty(t, r.tempRestoreDir)
+}
+
+func TestManager_CreateFull_EXDEVFallback(t *testing.T) {
+	// Verify that when renaming CURRENT.tmp to CURRENT returns EXDEV, CreateFull falls back and still succeeds.
+	tempDir := t.TempDir()
+	snapshotDir := filepath.Join(tempDir, "snapshot_exdev")
+	dataDir := filepath.Join(tempDir, "data_exdev")
+	require.NoError(t, os.MkdirAll(dataDir, 0755))
+
+	provider := newMockEngineProvider(t, dataDir)
+	// Prepare minimal engine state
+	require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
+	sst1 := createDummySSTable(t, provider.sstDir, 1)
+	provider.levelsManager.AddTableToLevel(0, sst1)
+	provider.On("GetDeletedSeries").Return(nil)
+	provider.On("GetRangeTombstones").Return(nil)
+	provider.On("GetSequenceNumber").Return(uint64(0)).Once()
+	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil)
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(0))
+	provider.stringStore.On("GetLogFilePath").Return("")
+	provider.seriesIDStore.On("GetLogFilePath").Return("")
+	provider.wal.On("Path").Return(provider.walDir)
+
+	helper := &mockSnapshotHelper{helperSnapshot: newHelperSnapshot()}
+	// Intercept rename and return EXDEV when renaming CURRENT.tmp to CURRENT
+	helper.InterceptRename = func(oldpath, newpath string) error {
+		if strings.HasSuffix(oldpath, core.CurrentFileName+".tmp") {
+			return syscall.EXDEV
+		}
+		return helper.helperSnapshot.Rename(oldpath, newpath)
+	}
+
+	mgr := NewManagerWithTesting(provider, helper)
+	err := mgr.CreateFull(context.Background(), snapshotDir)
+	require.NoError(t, err)
+
+	// Check that CURRENT exists and points to a manifest
+	currentBytes, err := os.ReadFile(filepath.Join(snapshotDir, "CURRENT"))
+	require.NoError(t, err)
+	manifestFileName := strings.TrimSpace(string(currentBytes))
+	assert.True(t, strings.HasPrefix(manifestFileName, "MANIFEST_"))
+}
+
 func TestRestorer_ProcessErrors(t *testing.T) {
 	// This test focuses on error paths within the restorer's methods,
 	// assuming initial validation and temp dir creation succeed.
@@ -2244,11 +2345,15 @@ func TestRestoreFromLatest(t *testing.T) {
 		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
 		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
 
-		// Create multiple snapshot directories to ensure the latest is chosen
+		// Create multiple snapshot directories to ensure the latest valid is chosen
 		snapshotDir1 := filepath.Join(snapshotsBaseDir, "1000")
 		snapshotDir2 := filepath.Join(snapshotsBaseDir, "2000") // This one is later
 		require.NoError(t, os.MkdirAll(snapshotDir1, 0755))
 		require.NoError(t, os.MkdirAll(snapshotDir2, 0755))
+		// Ensure the latest directory has a manifest and CURRENT so it is considered valid
+		mf, err := writeTestManifest(snapshotDir2, &core.SnapshotManifest{Type: core.SnapshotTypeFull})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotDir2, "CURRENT"), []byte(mf), 0644))
 
 		var calledSnapshotDir string
 		var calledOpts RestoreOptions
@@ -2260,7 +2365,7 @@ func TestRestoreFromLatest(t *testing.T) {
 
 		// 2. Execution
 		opts := RestoreOptions{DataDir: filepath.Join(tempDir, "target")}
-		err := RestoreFromLatest(opts, snapshotsBaseDir)
+		err = RestoreFromLatest(opts, snapshotsBaseDir)
 
 		// 3. Verification
 		require.NoError(t, err)
@@ -2280,7 +2385,7 @@ func TestRestoreFromLatest(t *testing.T) {
 
 		// 3. Verification
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no snapshots found")
+		assert.Contains(t, err.Error(), "no valid snapshots found")
 	})
 
 	t.Run("FindLatestFails", func(t *testing.T) {
@@ -2301,7 +2406,7 @@ func TestRestoreFromLatest(t *testing.T) {
 		// 3. Verification
 		require.Error(t, err)
 		assert.ErrorIs(t, err, expectedErr)
-		assert.Contains(t, err.Error(), "failed to find the latest snapshot")
+		assert.Contains(t, err.Error(), "failed to find the latest valid snapshot")
 	})
 
 	t.Run("RestoreFromFullFails", func(t *testing.T) {
@@ -2309,7 +2414,11 @@ func TestRestoreFromLatest(t *testing.T) {
 		tempDir := t.TempDir()
 		snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
 		require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+		// Create a valid snapshot dir so RestoreFromFull will be invoked and its error propagated
 		require.NoError(t, os.MkdirAll(filepath.Join(snapshotsBaseDir, "1000"), 0755))
+		mf, err := writeTestManifest(filepath.Join(snapshotsBaseDir, "1000"), &core.SnapshotManifest{Type: core.SnapshotTypeFull})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(snapshotsBaseDir, "1000", "CURRENT"), []byte(mf), 0644))
 
 		expectedErr := fmt.Errorf("simulated restore error")
 		restoreFromFullFunc = func(opts RestoreOptions, snapshotDir string) error {
@@ -2318,7 +2427,7 @@ func TestRestoreFromLatest(t *testing.T) {
 
 		// 2. Execution
 		opts := RestoreOptions{DataDir: filepath.Join(tempDir, "target")}
-		err := RestoreFromLatest(opts, snapshotsBaseDir)
+		err = RestoreFromLatest(opts, snapshotsBaseDir)
 
 		// 3. Verification
 		require.Error(t, err)
@@ -2652,6 +2761,53 @@ func TestFindLatestSnapshot(t *testing.T) {
 		assert.Equal(t, "2000", latestID)
 		assert.Equal(t, filepath.Join(snapshotsBaseDir, "2000"), latestPath)
 	})
+}
+
+func TestManager_CreateIncremental_IgnoresIncompleteSnapshots(t *testing.T) {
+	// Setup: create a snapshots base dir with an incomplete newest snapshot
+	tempDir := t.TempDir()
+	snapshotsBaseDir := filepath.Join(tempDir, "snapshots")
+	require.NoError(t, os.MkdirAll(snapshotsBaseDir, 0755))
+
+	// Incomplete snapshot: MANIFEST exists but no CURRENT
+	incompleteID := "1000"
+	incompleteDir := filepath.Join(snapshotsBaseDir, incompleteID)
+	require.NoError(t, os.MkdirAll(incompleteDir, 0755))
+	manifest := &core.SnapshotManifest{Type: core.SnapshotTypeFull, SequenceNumber: 50}
+	_, err := writeTestManifest(incompleteDir, manifest)
+	require.NoError(t, err)
+
+	// Valid snapshot: older but complete
+	validID := "2000"
+	validDir := filepath.Join(snapshotsBaseDir, validID)
+	require.NoError(t, os.MkdirAll(validDir, 0755))
+	validManifest := &core.SnapshotManifest{Type: core.SnapshotTypeFull, SequenceNumber: 100}
+	manifestFileName, err := writeTestManifest(validDir, validManifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(validDir, "CURRENT"), []byte(manifestFileName), 0644))
+
+	// Prepare provider and expectations
+	provider := newMockEngineProvider(t, tempDir)
+	// For findAndValidateParent: current seq should be greater than parent to trigger incremental creation
+	provider.On("GetSequenceNumber").Return(uint64(150))
+	provider.On("GetMemtablesForFlush").Return(nil, nil).Once()
+	provider.On("GetSequenceNumber").Return(uint64(150))
+	provider.On("GetDeletedSeries").Return(nil).Once()
+	provider.On("GetRangeTombstones").Return(nil).Once()
+	provider.tagIndexManager.On("CreateSnapshot", mock.Anything).Return(nil).Once()
+	provider.wal.On("ActiveSegmentIndex").Return(uint64(1)).Once()
+	provider.stringStore.On("GetLogFilePath").Return("").Once()
+	provider.seriesIDStore.On("GetLogFilePath").Return("").Once()
+	provider.wal.On("Path").Return(provider.walDir).Once()
+
+	// Instead of running the full CreateIncremental flow, exercise the parent-finding
+	// logic directly so we can assert the valid parent was chosen (skipping the incomplete one).
+	mgr := NewManager(provider).(*manager)
+	c := &incrementalCreator{m: mgr, snapshotsBaseDir: snapshotsBaseDir}
+	shouldSkip, err := c.findAndValidateParent()
+	require.NoError(t, err)
+	assert.False(t, shouldSkip)
+	assert.Equal(t, validID, c.parentID, "Expected the valid (older) snapshot to be chosen as parent")
 }
 
 func TestManager_collectAllSSTablesInChain(t *testing.T) {

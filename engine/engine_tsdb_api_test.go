@@ -20,7 +20,7 @@ import (
 )
 
 func init() {
-	sys.SetDebugMode(true)
+	sys.SetDebugMode(false)
 }
 
 func TestStorageEngine_PutAndGet(t *testing.T) {

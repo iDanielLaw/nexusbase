@@ -157,8 +157,8 @@ func TestReadManifestBinary_ErrorCases(t *testing.T) {
 		},
 		{
 			name:       "Truncated after header",
-			data:       validBytes[:14], // Header is 14 bytes, next read fails
-			errContain: "failed to read snapshot type",
+			data:       validBytes[:14], // Header is 14 bytes, next read fails (version follows header)
+			errContain: "failed to read manifest version",
 		},
 		{
 			name: "Invalid magic number",

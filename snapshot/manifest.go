@@ -76,6 +76,12 @@ func WriteManifestBinary(w io.Writer, manifest *core.SnapshotManifest) error {
 		return fmt.Errorf("failed to write manifest header: %w", err)
 	}
 
+	// 1.1 Manifest version for forward compatibility
+	var version uint16 = 1
+	if err := binary.Write(w, binary.LittleEndian, version); err != nil {
+		return fmt.Errorf("failed to write manifest version: %w", err)
+	}
+
 	// Write Type, ParentID, CreatedAt (as UnixNano)
 	if err := writeStringWithLength(w, string(manifest.Type)); err != nil {
 		return fmt.Errorf("failed to write snapshot type: %w", err)
@@ -162,6 +168,12 @@ func ReadManifestBinary(r io.Reader) (*core.SnapshotManifest, error) {
 	}
 	if header.Magic != core.ManifestMagicNumber {
 		return nil, fmt.Errorf("invalid binary manifest magic number. Got: %x", header.Magic)
+	}
+
+	// Read manifest version (for future compatibility)
+	var version uint16
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
+		return nil, fmt.Errorf("failed to read manifest version: %w", err)
 	}
 
 	// Read Type, ParentID, CreatedAt
