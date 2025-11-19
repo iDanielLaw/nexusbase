@@ -53,51 +53,119 @@ func DOpenFile(sysFile File, name string, flag int, perm os.FileMode) (FileHandl
 }
 
 func (df *DebugFile) Write(p []byte) (n int, err error) {
-	return df.f.Write(p)
+	n, err = df.f.Write(p)
+	if err != nil {
+		df.logger.Debug("Write failed", "bytes", len(p), "n", n, "error", err)
+	} else {
+		df.logger.Debug("Write", "bytes", len(p), "n", n)
+	}
+	return n, err
 }
 
 func (df *DebugFile) Read(p []byte) (n int, err error) {
-	return df.f.Read(p)
+	n, err = df.f.Read(p)
+	if err != nil {
+		df.logger.Debug("Read failed", "buflen", len(p), "n", n, "error", err)
+	} else {
+		df.logger.Debug("Read", "buflen", len(p), "n", n)
+	}
+	return n, err
 }
 
 func (df *DebugFile) Seek(offset int64, whence int) (int64, error) {
-	return df.f.Seek(offset, whence)
+	res, err := df.f.Seek(offset, whence)
+	if err != nil {
+		df.logger.Debug("Seek failed", "offset", offset, "whence", whence, "result", res, "error", err)
+	} else {
+		df.logger.Debug("Seek", "offset", offset, "whence", whence, "result", res)
+	}
+	return res, err
 }
 
 func (df *DebugFile) Stat() (os.FileInfo, error) {
-	return df.f.Stat()
+	fi, err := df.f.Stat()
+	if err != nil {
+		df.logger.Debug("Stat failed", "error", err)
+	} else {
+		df.logger.Debug("Stat", "name", df.f.Name(), "size", fi.Size())
+	}
+	return fi, err
 }
 
 func (df *DebugFile) Sync() error {
-	return df.f.Sync()
+	err := df.f.Sync()
+	if err != nil {
+		df.logger.Debug("Sync failed", "error", err)
+	} else {
+		df.logger.Debug("Sync")
+	}
+	return err
 }
 
 func (df *DebugFile) Truncate(size int64) error {
-	return df.f.Truncate(size)
+	err := df.f.Truncate(size)
+	if err != nil {
+		df.logger.Debug("Truncate failed", "size", size, "error", err)
+	} else {
+		df.logger.Debug("Truncate", "size", size)
+	}
+	return err
 }
 
 func (df *DebugFile) Name() string {
-	return df.f.Name()
+	name := df.f.Name()
+	df.logger.Debug("Name", "name", name)
+	return name
 }
 
 func (df *DebugFile) WriteAt(p []byte, off int64) (n int, err error) {
-	return df.f.WriteAt(p, off)
+	n, err = df.f.WriteAt(p, off)
+	if err != nil {
+		df.logger.Debug("WriteAt failed", "bytes", len(p), "n", n, "off", off, "error", err)
+	} else {
+		df.logger.Debug("WriteAt", "bytes", len(p), "n", n, "off", off)
+	}
+	return n, err
 }
 
 func (df *DebugFile) ReadAt(p []byte, off int64) (n int, err error) {
-	return df.f.ReadAt(p, off)
+	n, err = df.f.ReadAt(p, off)
+	if err != nil {
+		df.logger.Debug("ReadAt failed", "buflen", len(p), "n", n, "off", off, "error", err)
+	} else {
+		df.logger.Debug("ReadAt", "buflen", len(p), "n", n, "off", off)
+	}
+	return n, err
 }
 
 func (df *DebugFile) WriteString(s string) (n int, err error) {
-	return df.f.WriteString(s)
+	n, err = df.f.WriteString(s)
+	if err != nil {
+		df.logger.Debug("WriteString failed", "len", len(s), "n", n, "error", err)
+	} else {
+		df.logger.Debug("WriteString", "len", len(s), "n", n)
+	}
+	return n, err
 }
 
 func (df *DebugFile) WriteTo(w io.Writer) (n int64, err error) {
-	return df.f.WriteTo(w)
+	n, err = df.f.WriteTo(w)
+	if err != nil {
+		df.logger.Debug("WriteTo failed", "n", n, "error", err)
+	} else {
+		df.logger.Debug("WriteTo", "n", n)
+	}
+	return n, err
 }
 
 func (df *DebugFile) ReadFrom(r io.Reader) (n int64, err error) {
-	return df.f.ReadFrom(r)
+	n, err = df.f.ReadFrom(r)
+	if err != nil {
+		df.logger.Debug("ReadFrom failed", "n", n, "error", err)
+	} else {
+		df.logger.Debug("ReadFrom", "n", n)
+	}
+	return n, err
 }
 
 func (df *DebugFile) Close() error {
