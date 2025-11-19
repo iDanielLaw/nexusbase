@@ -67,13 +67,15 @@ func TestSetDefaultFileAndDebugMode(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Backup original and restore at end
-	origPtr := defaultFile.Load()
+	origAny := defaultFile.Load()
 	var orig File
-	if origPtr != nil {
-		orig = *origPtr
+	if origAny != nil {
+		if v, ok := origAny.(File); ok {
+			orig = v
+		}
 	}
 	defer func() {
-		if origPtr != nil {
+		if orig != nil {
 			SetDefaultFile(orig)
 		}
 		SetDebugMode(false)
