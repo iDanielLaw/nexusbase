@@ -35,7 +35,7 @@ type SegmentReader struct {
 
 // CreateSegment creates a new segment file in the given directory.
 // `writerBufSize` configures the size of the buffered writer for this segment.
-func CreateSegment(dir string, index uint64, writerBufSize int) (*SegmentWriter, error) {
+func CreateSegment(dir string, index uint64, writerBufSize int, preallocSize int64) (*SegmentWriter, error) {
 	path := filepath.Join(dir, core.FormatSegmentFileName(index))
 	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
@@ -47,6 +47,14 @@ func CreateSegment(dir string, index uint64, writerBufSize int) (*SegmentWriter,
 	if err := binary.Write(file, binary.LittleEndian, &header); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("failed to write segment header to %s: %w", path, err)
+	}
+
+	// Optionally preallocate file blocks using platform-specific APIs.
+	if preallocSize > 0 {
+		if err := sys.Preallocate(file, preallocSize); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("failed to preallocate segment file %s to %d: %w", path, preallocSize, err)
+		}
 	}
 
 	seg := &Segment{

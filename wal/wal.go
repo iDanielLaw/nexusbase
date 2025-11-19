@@ -372,7 +372,7 @@ func (w *WAL) rotateLocked() error {
 		nextIndex = w.segmentIndexes[len(w.segmentIndexes)-1] + 1
 	}
 
-	newSegment, err := CreateSegment(w.dir, nextIndex, w.opts.WriterBufferSize)
+	newSegment, err := CreateSegment(w.dir, nextIndex, w.opts.WriterBufferSize, w.opts.MaxSegmentSize)
 	if err != nil {
 		return err
 	}
@@ -399,6 +399,8 @@ func (w *WAL) rotateLocked() error {
 	return nil
 }
 
+// encodeEntryData is retained for compatibility with older codepaths that may
+// rely on an io.Writer-based encoding. Newer code uses `encodeEntryToSlice`.
 func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
 	if err := binary.Write(w, binary.LittleEndian, entry.EntryType); err != nil {
 		return fmt.Errorf("failed to write entry type: %w", err)

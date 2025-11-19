@@ -1,7 +1,6 @@
 package wal
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -56,16 +55,20 @@ func (w *WAL) commit(records []*commitRecord) {
 	// We encode entries first without holding the WAL lock.
 	var encodedEntries [][]byte
 	var encodedEntryLists [][]core.WALEntry
+	var payloadBufPtrs []*[]byte
 
-	// Helper to start a new payload
-	var currentBuf bytes.Buffer
+	// Helper to start a new payload backed by a pooled []byte
+	var currentBuf []byte
+	var currentBufPtr *[]byte
 	var currentEntries []core.WALEntry
-	// Start payload with batch header
 	startNewPayload := func() {
-		currentBuf.Reset()
-		currentBuf.WriteByte(byte(core.EntryTypePutBatch))
-		// placeholder for count; will overwrite later
-		_ = binary.Write(&currentBuf, binary.LittleEndian, uint32(0))
+		bptr := w.bufPool.Get().(*[]byte)
+		*bptr = (*bptr)[:0]
+		currentBufPtr = bptr
+		currentBuf = (*bptr)[:0]
+		currentBuf = append(currentBuf, byte(core.EntryTypePutBatch))
+		// placeholder for count (4 bytes)
+		currentBuf = append(currentBuf, 0, 0, 0, 0)
 		currentEntries = currentEntries[:0]
 	}
 
@@ -79,7 +82,6 @@ func (w *WAL) commit(records []*commitRecord) {
 		var err error
 		tmp, err = encodeEntryToSlice(&e, tmp)
 		if err != nil {
-			// return buffer and notify error
 			*bptr = (*bptr)[:0]
 			w.bufPool.Put(bptr)
 			for _, rec := range records {
@@ -87,6 +89,7 @@ func (w *WAL) commit(records []*commitRecord) {
 			}
 			return
 		}
+
 		// If adding this entry would exceed MaxSegmentSize for an empty payload and
 		// it's a single entry, return ErrRecordTooLarge.
 		entrySize := int64(len(tmp))
@@ -94,41 +97,37 @@ func (w *WAL) commit(records []*commitRecord) {
 		recordOverhead := int64(8)
 
 		// Compute current payload size including the eventual length+checksum
-		currentPayloadSize := int64(currentBuf.Len()) + entrySize + recordOverhead
+		currentPayloadSize := int64(len(currentBuf)) + entrySize + recordOverhead
 
 		if currentPayloadSize > w.opts.MaxSegmentSize {
 			if len(currentEntries) == 0 {
 				// Single entry alone exceeds MaxSegmentSize -> reject
 				err := fmt.Errorf("%w: record_size=%d max_segment_size=%d", core.ErrRecordTooLarge, currentPayloadSize, w.opts.MaxSegmentSize)
+				// return temporary buffer
+				*bptr = (*bptr)[:0]
+				w.bufPool.Put(bptr)
 				for _, rec := range records {
 					rec.done <- err
 				}
 				return
 			}
 			// finalize current payload
-			// write correct entry count
-			b := currentBuf.Bytes()
-			// overwrite count at offset 1
+			b := currentBuf
 			binary.LittleEndian.PutUint32(b[1:5], uint32(len(currentEntries)))
-			encodedEntries = append(encodedEntries, append([]byte(nil), b...))
+			encodedEntries = append(encodedEntries, b)
 			// copy entries slice
 			copied := make([]core.WALEntry, len(currentEntries))
 			copy(copied, currentEntries)
 			encodedEntryLists = append(encodedEntryLists, copied)
+			// keep pointer for returning to pool after write
+			payloadBufPtrs = append(payloadBufPtrs, currentBufPtr)
 			// start new payload
 			startNewPayload()
 		}
 
 		// append the entry to currentBuf and currentEntries
-		if _, err := currentBuf.Write(tmp); err != nil {
-			*bptr = (*bptr)[:0]
-			w.bufPool.Put(bptr)
-			for _, rec := range records {
-				rec.done <- err
-			}
-			return
-		}
-		// return buffer to pool
+		currentBuf = append(currentBuf, tmp...)
+		// return the temporary buffer to pool
 		*bptr = (*bptr)[:0]
 		w.bufPool.Put(bptr)
 		currentEntries = append(currentEntries, e)
@@ -136,12 +135,13 @@ func (w *WAL) commit(records []*commitRecord) {
 
 	// finalize last payload
 	if len(currentEntries) > 0 {
-		b := currentBuf.Bytes()
+		b := currentBuf
 		binary.LittleEndian.PutUint32(b[1:5], uint32(len(currentEntries)))
-		encodedEntries = append(encodedEntries, append([]byte(nil), b...))
+		encodedEntries = append(encodedEntries, b)
 		copied := make([]core.WALEntry, len(currentEntries))
 		copy(copied, currentEntries)
 		encodedEntryLists = append(encodedEntryLists, copied)
+		payloadBufPtrs = append(payloadBufPtrs, currentBufPtr)
 	}
 
 	// Now write each payload while holding the lock only for the write/sync/rotate
@@ -186,6 +186,11 @@ func (w *WAL) commit(records []*commitRecord) {
 
 		if writeErr != nil {
 			finalErr = writeErr
+			// return payload buffer to pool
+			if payloadBufPtrs[pi] != nil {
+				*payloadBufPtrs[pi] = (*payloadBufPtrs[pi])[:0]
+				w.bufPool.Put(payloadBufPtrs[pi])
+			}
 			break
 		}
 
@@ -199,6 +204,12 @@ func (w *WAL) commit(records []*commitRecord) {
 		totalBytes += newRecordSize
 		totalEntries += len(encodedEntryLists[pi])
 		w.notifyStreamers(encodedEntryLists[pi])
+
+		// return payload buffer to pool
+		if payloadBufPtrs[pi] != nil {
+			*payloadBufPtrs[pi] = (*payloadBufPtrs[pi])[:0]
+			w.bufPool.Put(payloadBufPtrs[pi])
+		}
 	}
 
 	// If everything succeeded and rotation was requested, perform it now.
