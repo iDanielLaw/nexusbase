@@ -35,3 +35,7 @@ func IsUnsupportedError(err error) bool {
 	var unsupportedError *UnsupportedTypeError
 	return errors.As(err, &unsupportedError)
 }
+
+// ErrRecordTooLarge is returned when a WAL record exceeds configured limits.
+// Placed in `core` so other packages can reference the sentinel error.
+var ErrRecordTooLarge = errors.New("wal record size exceeds MaxSegmentSize")
