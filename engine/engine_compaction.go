@@ -140,7 +140,6 @@ func (cm *CompactionManager) runCompactionTask(task *compactionTask) ([]*sstable
 	return newTables, nil
 }
 
-
 // compactIntraL0 performs a compaction of small files within Level 0.
 func (cm *CompactionManager) compactIntraL0(ctx context.Context) error {
 	_, span := cm.tracer.Start(ctx, "CompactionManager.compactIntraL0")
@@ -184,13 +183,13 @@ type CompactionOptions struct {
 	TargetSSTableSize          int64 // Target size for newly created SSTables
 	LevelsTargetSizeMultiplier int   // Multiplier for target size of next level (for LN -> LN+1)
 	CompactionIntervalSeconds  int
-	MaxConcurrentLNCompactions int             // Maximum number of LN->LN+1 compactions to run in parallel
+	MaxConcurrentLNCompactions int // Maximum number of LN->LN+1 compactions to run in parallel
 	// New fields
-	IntraL0CompactionTriggerFiles    int
+	IntraL0CompactionTriggerFiles     int
 	IntraL0CompactionMaxFileSizeBytes int64
 
-	SSTableCompressor          core.Compressor // Changed to use the interface
-	RetentionPeriod            string          // e.g., "30d", "1y". If empty, no retention.
+	SSTableCompressor core.Compressor // Changed to use the interface
+	RetentionPeriod   string          // e.g., "30d", "1y". If empty, no retention.
 	// Add other options as needed
 }
 
@@ -496,8 +495,11 @@ func (cm *CompactionManager) runL0CompactionTask(parentCtx context.Context, comp
 			cm.metrics.CompactionsInProgress.Add(1)
 			defer cm.metrics.CompactionsInProgress.Add(-1)
 		}
-		defer cm.l0CompactionActive.Store(false)
+		// Ensure the L0 active flag is cleared before signaling the WaitGroup.
+		// Defers run in LIFO order, so add Done first, then Store(false) so
+		// Store(false) is executed before Done when the goroutine exits.
 		defer cm.compactionWg.Done()
+		defer cm.l0CompactionActive.Store(false)
 
 		ctx, span := cm.tracer.Start(parentCtx, fmt.Sprintf("CompactionManager.%sWorker", strings.ReplaceAll(compactionType, "->", "To")))
 		defer span.End()

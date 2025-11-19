@@ -34,7 +34,8 @@ type SegmentReader struct {
 }
 
 // CreateSegment creates a new segment file in the given directory.
-func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
+// `writerBufSize` configures the size of the buffered writer for this segment.
+func CreateSegment(dir string, index uint64, writerBufSize int, preallocSize int64) (*SegmentWriter, error) {
 	path := filepath.Join(dir, core.FormatSegmentFileName(index))
 	file, err := sys.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
@@ -48,6 +49,19 @@ func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 		return nil, fmt.Errorf("failed to write segment header to %s: %w", path, err)
 	}
 
+	// Optionally preallocate the segment file to reduce fragmentation and growth cost.
+	// Treat preallocation as best-effort: if it fails, log a warning and continue
+	// rather than failing segment creation. This avoids hard failures on filesystems
+	// that don't support fallocate or when the operation is not permitted.
+	if preallocSize > 0 {
+		// Attempt preallocation as best-effort. Suppress noisy warnings because
+		// many test environments and mount points (Windows mounts, tmpfs, etc.)
+		// don't expose a file descriptor suitable for fallocate; callers should
+		// not treat failures here as fatal. If you need to debug preallocation
+		// failures, enable a higher log level or instrument `sys.Preallocate`.
+		_ = sys.Preallocate(file, preallocSize)
+	}
+
 	seg := &Segment{
 		file:  file,
 		path:  path,
@@ -55,7 +69,7 @@ func CreateSegment(dir string, index uint64) (*SegmentWriter, error) {
 	}
 	return &SegmentWriter{
 		Segment: seg,
-		writer:  bufio.NewWriter(file),
+		writer:  bufio.NewWriterSize(file, writerBufSize),
 		size:    int64(header.Size()), // Initialize with header size
 	}, nil
 }

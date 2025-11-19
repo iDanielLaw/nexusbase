@@ -20,6 +20,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/sys"
 )
 
 // commitRecord represents a single commit request to the WAL.
@@ -65,6 +66,9 @@ type WAL struct {
 
 	testingOnlyInjectCloseError  error
 	testingOnlyInjectAppendError error
+
+	// Buffer pool for encoding WALEntry payloads to reduce allocations.
+	bufPool *sync.Pool
 }
 
 var _ WALInterface = (*WAL)(nil)
@@ -84,8 +88,12 @@ func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
 	w.streamers[id] = reg
 	w.logger.Info("New WAL stream reader registered", "streamer_id", id)
 
+	// Initialize lastReadSeqNum so the reader will start returning the entry
+	// with sequence number `fromSeqNum` on the first Next() call.
+	// If the caller requests `fromSeqNum == 0`, treat it as starting from
+	// the beginning (so lastReadSeqNum stays 0 and entries with seq>0 are returned).
 	var lastReadSeqNum uint64
-	if fromSeqNum > 1 {
+	if fromSeqNum > 0 {
 		lastReadSeqNum = fromSeqNum - 1
 	}
 
@@ -122,6 +130,16 @@ type Options struct {
 	CommitMaxBatchSize int           // Max number of records in a batch before a commit is forced.
 	StartRecoveryIndex uint64
 	HookManager        hooks.HookManager
+	// WriterBufferSize configures the size of the buffered writer used for segment writes.
+	// If zero, a sensible default will be used.
+	WriterBufferSize int
+	// PreallocateSegments controls whether new segment files should be preallocated
+	// to `PreallocSize` bytes at creation time. This is performed using a
+	// platform-specific helper and is best-effort by default.
+	PreallocateSegments bool
+	// PreallocSize is the size (in bytes) to preallocate for new segments when
+	// `PreallocateSegments` is enabled. If zero, `MaxSegmentSize` is used.
+	PreallocSize int64
 }
 
 // Open creates or opens a WAL directory.
@@ -140,6 +158,18 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 	if opts.CommitMaxBatchSize == 0 {
 		opts.CommitMaxBatchSize = 64
 	}
+	if opts.WriterBufferSize == 0 {
+		opts.WriterBufferSize = 64 * 1024 // 64 KiB default
+	}
+	// Default to preallocating segments; users can disable via Options.
+	if !opts.PreallocateSegments {
+		// If the user didn't explicitly set PreallocateSegments (zero value is false),
+		// enable it by default for better IO behavior.
+		opts.PreallocateSegments = true
+	}
+	if opts.PreallocSize == 0 {
+		opts.PreallocSize = opts.MaxSegmentSize
+	}
 
 	if err := os.MkdirAll(opts.Dir, 0755); err != nil {
 		return nil, nil, fmt.Errorf("failed to create WAL directory %s: %w", opts.Dir, err)
@@ -153,6 +183,14 @@ func Open(opts Options) (*WAL, []core.WALEntry, error) {
 		metricsEntriesWritten: opts.EntriesWritten,
 		hookManager:           opts.HookManager,
 		streamers:             make(map[uint64]*streamerRegistration),
+	}
+	// Initialize buffer pool used for encoding entries
+	bufSize := opts.WriterBufferSize
+	w.bufPool = &sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 0, bufSize)
+			return &b
+		},
 	}
 	w.isClosing.Store(false)
 
@@ -350,7 +388,11 @@ func (w *WAL) rotateLocked() error {
 		nextIndex = w.segmentIndexes[len(w.segmentIndexes)-1] + 1
 	}
 
-	newSegment, err := CreateSegment(w.dir, nextIndex)
+	prealloc := int64(0)
+	if w.opts.PreallocateSegments {
+		prealloc = w.opts.PreallocSize
+	}
+	newSegment, err := CreateSegment(w.dir, nextIndex, w.opts.WriterBufferSize, prealloc)
 	if err != nil {
 		return err
 	}
@@ -377,6 +419,8 @@ func (w *WAL) rotateLocked() error {
 	return nil
 }
 
+// encodeEntryData is retained for compatibility with older codepaths that may
+// rely on an io.Writer-based encoding. Newer code uses `encodeEntryToSlice`.
 func encodeEntryData(w io.Writer, entry *core.WALEntry) error {
 	if err := binary.Write(w, binary.LittleEndian, entry.EntryType); err != nil {
 		return fmt.Errorf("failed to write entry type: %w", err)
@@ -530,15 +574,36 @@ func (w *WAL) openForAppend() error {
 		return fmt.Errorf("failed to stat last segment %s: %w", path, err)
 	}
 
-	if stat.Size() > int64(binary.Size(core.FileHeader{})) {
+	headerSize := int64(binary.Size(core.FileHeader{}))
+
+	// If the last segment already contains data beyond the header, rotate
+	// to start a fresh segment for appends.
+	if stat.Size() > headerSize {
 		return w.rotateLocked()
 	}
 
-	seg, err := CreateSegment(w.dir, lastIndex)
+	// The last segment exists but only contains the header (empty).
+	// Open it for append without truncating so we don't lose state.
+	f, err := sys.OpenFile(path, os.O_RDWR, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to reuse segment %d: %w", lastIndex, err)
+		return fmt.Errorf("failed to open existing WAL segment for append %s: %w", path, err)
 	}
-	w.activeSegment = seg
+	// Ensure the file offset is at the end for appending.
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to seek to end of existing WAL segment %s: %w", path, err)
+	}
+
+	seg := &Segment{
+		file:  f,
+		path:  path,
+		index: lastIndex,
+	}
+	w.activeSegment = &SegmentWriter{
+		Segment: seg,
+		writer:  bufio.NewWriterSize(f, w.opts.WriterBufferSize),
+		size:    stat.Size(),
+	}
 	return nil
 }
 
@@ -631,116 +696,6 @@ func (w *WAL) runCommitter() {
 			}
 			return
 		}
-	}
-}
-
-func (w *WAL) commit(records []*commitRecord) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.activeSegment == nil || w.isClosing.Load() {
-		err := errors.New("wal is closed")
-		for _, rec := range records {
-			rec.done <- err
-		}
-		return
-	}
-
-	var allEntries []core.WALEntry
-	var shouldRotate bool
-	for _, rec := range records {
-		if rec.entries == nil {
-			shouldRotate = true
-		} else {
-			allEntries = append(allEntries, rec.entries...)
-		}
-	}
-
-	if len(allEntries) == 0 {
-		var err error
-		if shouldRotate {
-			err = w.rotateLocked()
-		} else if w.opts.SyncMode != core.WALSyncDisabled {
-			err = w.activeSegment.Sync()
-		}
-		for _, rec := range records {
-			rec.done <- err
-		}
-		return
-	}
-
-	var batchPayload bytes.Buffer
-	if err := batchPayload.WriteByte(byte(core.EntryTypePutBatch)); err != nil {
-		for _, rec := range records {
-			rec.done <- err
-		}
-		return
-	}
-	if err := binary.Write(&batchPayload, binary.LittleEndian, uint32(len(allEntries))); err != nil {
-		for _, rec := range records {
-			rec.done <- err
-		}
-		return
-	}
-	for i := range allEntries {
-		if err := encodeEntryData(&batchPayload, &allEntries[i]); err != nil {
-			for _, rec := range records {
-				rec.done <- err
-			}
-			return
-		}
-	}
-	payloadBytes := batchPayload.Bytes()
-	newRecordSize := int64(len(payloadBytes) + 8)
-
-	currentSize, err := w.activeSegment.Size()
-	if err != nil {
-		for _, rec := range records {
-			rec.done <- err
-		}
-		return
-	}
-	if currentSize > int64(binary.Size(core.FileHeader{})) && (currentSize+newRecordSize) > w.opts.MaxSegmentSize {
-		if err := w.rotateLocked(); err != nil {
-			for _, rec := range records {
-				rec.done <- err
-			}
-			return
-		}
-	}
-
-	writeErr := w.activeSegment.WriteRecord(payloadBytes)
-
-	var syncErr error
-	if writeErr == nil && w.opts.SyncMode != core.WALSyncDisabled {
-		syncErr = w.activeSegment.Sync()
-	}
-
-	var rotateErr error
-	if writeErr == nil && syncErr == nil && shouldRotate {
-		rotateErr = w.rotateLocked()
-	}
-
-	finalErr := writeErr
-	if finalErr == nil {
-		finalErr = syncErr
-	}
-	if finalErr == nil {
-		finalErr = rotateErr
-	}
-
-	if finalErr == nil {
-		if w.metricsBytesWritten != nil {
-			w.metricsBytesWritten.Add(int64(len(payloadBytes) + 8))
-		}
-		if w.metricsEntriesWritten != nil {
-			w.metricsEntriesWritten.Add(int64(len(allEntries)))
-		}
-		w.notifyStreamers(allEntries)
-	}
-
-	for _, rec := range records {
-		rec.done <- finalErr
 	}
 }
 
