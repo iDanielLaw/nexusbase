@@ -315,6 +315,9 @@ func newMergingIteratorItem(iter core.IteratorInterface[*core.IteratorNode], ext
 		return nil, fmt.Errorf("newMergingIteratorItem: failed to extract series key: %w", err)
 	}
 
+	if len(keyCopy) < 8 {
+		return nil, fmt.Errorf("newMergingIteratorItem: key too short to contain timestamp: %x", keyCopy)
+	}
 	timestamp, err := decodeTsFunc(keyCopy[len(keyCopy)-8:])
 	if err != nil {
 		return nil, fmt.Errorf("newMergingIteratorItem: failed to decode timestamp: %w", err)

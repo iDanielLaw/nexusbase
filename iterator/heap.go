@@ -18,11 +18,16 @@ func (h minHeap) Less(i, j int) bool {
 	// Compare keys first
 	curA, errA := h[i].At()
 	if errA != nil {
-		panic(fmt.Sprintf("iterator in heap has error: %v", errA))
+		// Underlying iterator returned an error when attempting to inspect its current
+		// element. Treat an errored iterator as "greater" so it won't be chosen
+		// as the minimum. This avoids panicking inside library code during heap
+		// comparisons. The iterator's Error() should be handled by the caller.
+		return false
 	}
 	curB, errB := h[j].At()
 	if errB != nil {
-		panic(fmt.Sprintf("iterator in heap has error: %v", errB))
+		// If B errored but A did not, A should be considered smaller.
+		return true
 	}
 	keyI, _, _, pointIDI := curA.Key, curA.Value, curA.EntryType, curA.SeqNum
 	keyJ, _, _, pointIDJ := curB.Key, curB.Value, curB.EntryType, curB.SeqNum

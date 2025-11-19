@@ -207,6 +207,15 @@ func (it *MultiFieldDownsamplingIterator) Next() bool {
 			}
 
 			// Process and consume the point.
+			if len(key) < 8 {
+				it.err = fmt.Errorf("downsampling: key too short to contain timestamp: %x", key)
+				break
+			}
+			ts, tsErr := core.DecodeTimestamp(key[len(key)-8:])
+			if tsErr != nil {
+				it.err = fmt.Errorf("downsampling: failed to decode timestamp: %w", tsErr)
+				break
+			}
 			seriesKey, _ := core.ExtractSeriesKeyFromInternalKeyWithErr(key)
 			it.processPoint(seriesKey, value)
 			if it.err != nil { // Check for error from processPoint immediately.
