@@ -61,6 +61,24 @@ func (m *mockFile) GC() error {
 	return nil
 }
 
+func (m *mockFile) CreateTemp(dir, pattern string) (*os.File, error) {
+	m.CreateCalled = true
+	// Respect provided dir if given, otherwise use default
+	if dir == "" {
+		return os.CreateTemp(m.dir, pattern)
+	}
+	return os.CreateTemp(dir, pattern)
+}
+
+func (m *mockFile) NewFile(fd uintptr, name string) *os.File {
+	return os.NewFile(fd, name)
+}
+
+func (m *mockFile) OpenInRoot(dir, name string) (*os.File, error) {
+	m.OpenCalled = true
+	return os.OpenFile(filepath.Join(dir, name), os.O_RDWR|os.O_CREATE, 0644)
+}
+
 // TestSetDefaultFileAndDebugMode verifies that handlers use the configured
 // default File implementation and that enabling debug mode returns a wrapper.
 func TestSetDefaultFileAndDebugMode(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -180,6 +181,19 @@ func (wfo *windowsFile) OpenWithRetry(path string, flag int, perm os.FileMode, m
 		return nil, err
 	}
 	return nil, err
+}
+
+func (wfo *windowsFile) CreateTemp(dir, pattern string) (*os.File, error) {
+	return os.CreateTemp(dir, pattern)
+}
+
+func (wfo *windowsFile) NewFile(fd uintptr, name string) *os.File {
+	return os.NewFile(fd, name)
+}
+
+func (wfo *windowsFile) OpenInRoot(dir, name string) (*os.File, error) {
+	// Simple helper to open a file inside `dir` on Windows.
+	return wfo.OpenFile(filepath.Join(dir, name), os.O_RDONLY, 0)
 }
 
 // Delay GC

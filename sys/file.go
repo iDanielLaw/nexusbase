@@ -35,6 +35,10 @@ type File interface {
 	WriteFile(name string, data []byte, perm os.FileMode) error
 
 	GC() error
+	// Convenience helpers
+	CreateTemp(dir, pattern string) (*os.File, error)
+	NewFile(fd uintptr, name string) *os.File
+	OpenInRoot(dir, name string) (*os.File, error)
 }
 
 type FileHandle interface {

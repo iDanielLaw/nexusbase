@@ -32,6 +32,34 @@ func Preallocate(f FileHandle, size int64) error {
 	// file without necessarily changing its logical size.
 	h := windows.Handle(fg.Fd())
 
+	// Try to get a volume/device identifier to cache per-device capability.
+	var dev uint64
+	var bhfi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &bhfi); err == nil {
+		dev = uint64(bhfi.VolumeSerialNumber)
+		if allow, ok := preallocCacheLoad(dev); ok {
+			preallocCacheHit()
+			if !allow {
+				return ErrPreallocNotSupported
+			}
+			// cached allowed: attempt allocation and return based on result
+			type fileAllocInfo struct {
+				AllocationSize int64
+			}
+			info := fileAllocInfo{AllocationSize: int64(size)}
+			if err := windows.SetFileInformationByHandle(h, windows.FileAllocationInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err == nil {
+				return nil
+			} else {
+				if errors.Is(err, windows.ERROR_INVALID_FUNCTION) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED) {
+					return ErrPreallocNotSupported
+				}
+				return fmt.Errorf("windows preallocation failed: %w", err)
+			}
+		}
+		// not cached: record a miss and continue to attempt allocation
+		preallocCacheMiss()
+	}
+
 	// Construct FILE_ALLOCATION_INFO structure (LARGE_INTEGER AllocationSize)
 	type fileAllocInfo struct {
 		AllocationSize int64
@@ -40,6 +68,9 @@ func Preallocate(f FileHandle, size int64) error {
 
 	err := windows.SetFileInformationByHandle(h, windows.FileAllocationInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
 	if err == nil {
+		if dev != 0 {
+			preallocCacheStore(dev, true)
+		}
 		return nil
 	}
 
@@ -47,6 +78,9 @@ func Preallocate(f FileHandle, size int64) error {
 	// noisy warnings for expected filesystems or mounts that don't support this
 	// operation.
 	if errors.Is(err, windows.ERROR_INVALID_FUNCTION) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED) {
+		if dev != 0 {
+			preallocCacheStore(dev, false)
+		}
 		return ErrPreallocNotSupported
 	}
 

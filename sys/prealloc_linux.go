@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -45,9 +44,9 @@ func Preallocate(f FileHandle, size int64) error {
 	var dev uint64
 	if err := unix.Fstat(fd, &stat); err == nil {
 		dev = uint64(stat.Dev)
-		if v, ok := preallocCache.Load(dev); ok {
-			atomic.AddUint64(&preallocCacheHits, 1)
-			if allow, _ := v.(bool); !allow {
+		if allow, ok := preallocCacheLoad(dev); ok {
+			preallocCacheHit()
+			if !allow {
 				return ErrPreallocNotSupported
 			}
 			// allowed: proceed directly to fallocate
@@ -66,7 +65,7 @@ func Preallocate(f FileHandle, size int64) error {
 			return fmt.Errorf("preallocation failed for fd=%d: %w", fd, err)
 		}
 		// not cached: record a miss and fall through to fstatfs and compute allowed status
-		atomic.AddUint64(&preallocCacheMisses, 1)
+		preallocCacheMiss()
 	}
 
 	// Try fallocate with KEEP_SIZE (allocate blocks without changing file size).
@@ -99,14 +98,14 @@ func Preallocate(f FileHandle, size int64) error {
 	if err := unix.Fallocate(fd, unix.FALLOC_FL_KEEP_SIZE, 0, size); err == nil {
 		// cache positive result per device when available
 		if dev != 0 {
-			preallocCache.Store(dev, true)
+			preallocCacheStore(dev, true)
 		}
 		return nil
 	} else {
 		// If fallocate returns a known "not supported"/invalid error, map to sentinel.
 		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTTY) {
 			if dev != 0 {
-				preallocCache.Store(dev, false)
+				preallocCacheStore(dev, false)
 			}
 			return ErrPreallocNotSupported
 		}
@@ -115,13 +114,13 @@ func Preallocate(f FileHandle, size int64) error {
 
 	if err := unix.Fallocate(fd, 0, 0, size); err == nil {
 		if dev != 0 {
-			preallocCache.Store(dev, true)
+			preallocCacheStore(dev, true)
 		}
 		return nil
 	} else {
 		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTTY) {
 			if dev != 0 {
-				preallocCache.Store(dev, false)
+				preallocCacheStore(dev, false)
 			}
 			return ErrPreallocNotSupported
 		}
