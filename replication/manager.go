@@ -114,6 +114,73 @@ func NewManager(cfg config.ReplicationConfig, replicationServer pb.ReplicationSe
 	}, nil
 }
 
+// NewManagerWithListener is like NewManager but uses the provided net.Listener
+// instead of creating one itself. This is useful for tests (e.g. bufconn).
+func NewManagerWithListener(cfg config.ReplicationConfig, replicationServer pb.ReplicationServiceServer, logger *slog.Logger, lis net.Listener) (*Manager, error) {
+	// Prepare server options
+	var serverOpts []grpc.ServerOption
+	tlsEnabled := false
+
+	// Configure TLS if enabled
+	if cfg.TLS.Enabled {
+		tlsConfig, err := loadServerTLSConfig(cfg.TLS)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS config: %w", err)
+		}
+		creds := credentials.NewTLS(tlsConfig)
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+		tlsEnabled = true
+		logger.Info("TLS enabled for replication gRPC server")
+	}
+
+	// Create a new gRPC server instance.
+	grpcServer := grpc.NewServer(serverOpts...)
+
+	// Register the replication service implementation with the gRPC server.
+	pb.RegisterReplicationServiceServer(grpcServer, replicationServer)
+
+	logger.Info("Replication gRPC server listening", "address", lis.Addr().String(), "tls_enabled", tlsEnabled)
+	logger.Info("Replication manager starting", "mode", cfg.Mode)
+
+	followers := make(map[string]*FollowerState)
+	for _, addr := range cfg.Followers {
+		followers[addr] = &FollowerState{Addr: addr, Healthy: false}
+	}
+
+	// Prepare client dial options for health checks
+	var clientDialOpts []grpc.DialOption
+	if tlsEnabled {
+		// For client connections to followers, use TLS
+		tlsConfig, err := loadClientTLSConfig(cfg.TLS)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client TLS config: %w", err)
+		}
+		creds := credentials.NewTLS(tlsConfig)
+		clientDialOpts = append(clientDialOpts, grpc.WithTransportCredentials(creds))
+	} else {
+		// Use insecure credentials only if TLS is not enabled
+		clientDialOpts = append(clientDialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	// Set graceful stop timeout
+	gracefulStopTimeout := time.Duration(cfg.GracefulStopTimeoutSeconds) * time.Second
+	if gracefulStopTimeout == 0 {
+		gracefulStopTimeout = 30 * time.Second // Default to 30 seconds
+	}
+
+	return &Manager{
+		grpcServer:          grpcServer,
+		config:              cfg,
+		logger:              logger.With("component", "replication_manager"),
+		listener:            lis,
+		followers:           followers,
+		stopCh:              make(chan struct{}),
+		gracefulStopTimeout: gracefulStopTimeout,
+		tlsEnabled:          tlsEnabled,
+		clientDialOptions:   clientDialOpts,
+	}, nil
+}
+
 // loadServerTLSConfig loads TLS configuration for the gRPC server
 func loadServerTLSConfig(tlsCfg config.TLSConfig) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile)
@@ -165,25 +232,32 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // monitorFollowers handles retry, reconnect, health check, and lag callback for each follower.
 func (m *Manager) monitorFollowers(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-m.stopCh:
-			m.logger.Info("Replication manager stopping")
-			return
-		case <-ticker.C:
-			for _, f := range m.followers {
-				go m.checkFollowerHealth(f)
+	// Start one worker goroutine per follower to avoid spawning multiple
+	// overlapping health-check goroutines for the same follower.
+	for _, f := range m.followers {
+		go func(f *FollowerState) {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-m.stopCh:
+					return
+				case <-ticker.C:
+					m.checkFollowerHealth(f)
+				}
 			}
-		}
+		}(f)
 	}
+
+	// Block until stop signal so this method remains a blocking call for tests.
+	<-m.stopCh
+	m.logger.Info("Replication manager stopping")
 }
 
 // checkFollowerHealth performs a real health check (gRPC HealthCheck RPC), updates lag, and handles reconnect.
 func (m *Manager) checkFollowerHealth(f *FollowerState) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	// Do not hold the follower mutex while performing network I/O. Only lock
+	// to update the follower state to avoid blocking other callers.
 
 	// Create a context with timeout for the health check
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -192,8 +266,10 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 	// Establish connection to follower using the prepared dial options
 	conn, err := grpc.DialContext(ctx, f.Addr, append(m.clientDialOptions, grpc.WithBlock())...)
 	if err != nil {
+		f.mu.Lock()
 		f.Healthy = false
 		f.RetryCount++
+		f.mu.Unlock()
 		m.logger.Warn("Follower unreachable", "addr", f.Addr, "retries", f.RetryCount, "error", err)
 		return
 	}
@@ -205,39 +281,65 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 	// Call the HealthCheck RPC
 	resp, err := client.HealthCheck(ctx, &pb.HealthCheckRequest{})
 	if err != nil {
+		f.mu.Lock()
 		f.Healthy = false
 		f.RetryCount++
+		f.mu.Unlock()
 		m.logger.Warn("Health check RPC failed", "addr", f.Addr, "retries", f.RetryCount, "error", err)
 		return
 	}
 
-	// Check the health status from the response
+	// Update follower state under lock and compute lag using helper.
+	now := time.Now()
+	f.mu.Lock()
+	prevLastPing := f.LastPing
+	f.LastPing = now
+	f.LastAckSeq = resp.LastAppliedSequence
 	if resp.Status == pb.HealthCheckResponse_HEALTHY {
 		f.Healthy = true
 		f.RetryCount = 0
-		f.LastPing = time.Now()
-		f.LastAckSeq = resp.LastAppliedSequence
-
-		lag := time.Since(f.LastPing)
-		if f.LagCallback != nil {
-			f.LagCallback(lag)
-		}
-
-		m.logger.Info("Follower health check",
-			"addr", f.Addr,
-			"healthy", f.Healthy,
-			"last_seq", f.LastAckSeq,
-			"lag", lag,
-			"message", resp.Message)
 	} else {
 		f.Healthy = false
 		f.RetryCount++
-		m.logger.Warn("Follower reported unhealthy",
-			"addr", f.Addr,
-			"retries", f.RetryCount,
-			"status", resp.Status.String(),
-			"message", resp.Message)
 	}
+	f.mu.Unlock()
+
+	// Compute lag (prefers follower-reported timestamp, falls back to prev ping).
+	lag, lastApplied, negative := computeLag(resp, prevLastPing, now)
+	if negative {
+		m.logger.Warn("Negative replication lag detected (clock skew)", "addr", f.Addr, "last_applied_at", lastApplied)
+	}
+
+	if f.LagCallback != nil && lag > 0 {
+		f.LagCallback(lag)
+	}
+
+	m.logger.Info("Follower health check",
+		"addr", f.Addr,
+		"healthy", f.Healthy,
+		"last_seq", f.LastAckSeq,
+		"lag", lag,
+		"message", resp.Message)
+}
+
+// computeLag computes replication lag from a HealthCheckResponse. It prefers
+// the follower-reported LastAppliedAt timestamp; if absent, it falls back to
+// the interval since prevLastPing. It returns (lag, lastAppliedTime, negativeSkew).
+func computeLag(resp *pb.HealthCheckResponse, prevLastPing, now time.Time) (time.Duration, time.Time, bool) {
+	if resp.LastAppliedAt != nil {
+		lastApplied := resp.LastAppliedAt.AsTime()
+		if !lastApplied.IsZero() {
+			lag := now.Sub(lastApplied)
+			if lag < 0 {
+				return 0, lastApplied, true
+			}
+			return lag, lastApplied, false
+		}
+	}
+	if !prevLastPing.IsZero() {
+		return now.Sub(prevLastPing), time.Time{}, false
+	}
+	return 0, time.Time{}, false
 }
 
 // Stop gracefully shuts down the gRPC server and follower monitoring with timeout.

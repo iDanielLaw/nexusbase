@@ -36,6 +36,8 @@ type Server struct {
 	snapshotMgr snapshot.ManagerInterface
 	snapshotDir string // Base directory where snapshots are stored
 	logger      *slog.Logger
+	// Optional provider to retrieve latest applied sequence number from the engine
+	LatestSeqProvider func() uint64
 }
 
 // NewServer สร้าง instance ใหม่ของ gRPC Replication Server
@@ -366,8 +368,19 @@ func (s *Server) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*
 
 	// For now, we always return HEALTHY from the server side
 	// In a more sophisticated implementation, you could check server health here
-	return &pb.HealthCheckResponse{
+	resp := &pb.HealthCheckResponse{
 		Status:  pb.HealthCheckResponse_HEALTHY,
 		Message: "server is healthy",
-	}, nil
+	}
+
+	// If available, populate the last applied sequence number so followers can compute lag/position.
+	if s.LatestSeqProvider != nil {
+		resp.LastAppliedSequence = s.LatestSeqProvider()
+		// Also provide a timestamp for when this check was serviced so followers
+		// can compute wall-clock lag. This is best-effort; it's set to the local
+		// server time at the moment of the RPC.
+		resp.LastAppliedAt = timestamppb.Now()
+	}
+
+	return resp, nil
 }

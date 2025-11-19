@@ -34,6 +34,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // basicAuthCreds implements credentials.PerRPCCredentials for Basic Auth in tests.
@@ -60,16 +61,23 @@ type e2eOptions struct {
 	WithAuth   bool
 }
 
-func setupE2ETestServer(t *testing.T) (string, string, func()) {
+func setupE2ETestServer(t *testing.T) (func(ctx context.Context, opts ...grpc.DialOption) (*grpc.ClientConn, error), string, func()) {
 	return setupE2ETestServerWithSecure(t, e2eOptions{})
 }
 
-func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, string, func()) {
+// The setup functions now return a dial function that can be used to create
+// a gRPC client connection over an in-memory bufconn listener, the path to
+// any generated cert file (may be empty), and a cleanup function.
+func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (func(ctx context.Context, opts ...grpc.DialOption) (*grpc.ClientConn, error), string, func()) {
 	t.Helper()
 
-	// 1. Find a free port for the gRPC server
-	grpcPort := findFreePort(t)
-	addr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	// Use an in-memory bufconn listener so tests do not require real TCP ports.
+	bufSize := 1024 * 1024
+	bufListener := bufconn.Listen(bufSize)
+	// dialer that uses the bufconn listener
+	bufDialer := func(ctx context.Context, _ string) (net.Conn, error) {
+		return bufListener.Dial()
+	}
 	var certFile, keyFile string
 
 	// 2. Create a temporary directory and configuration
@@ -147,7 +155,7 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 	}
 
 	serverCfg := config.ServerConfig{
-		GRPCPort: grpcPort,
+		GRPCPort: 0,
 		TCPPort:  0,
 		TLS: config.TLSConfig{
 			Enabled: false,
@@ -234,8 +242,8 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 	err = eng.Start()
 	require.NoError(t, err)
 
-	// 4. Create and start the server
-	appServer, err := NewAppServer(eng, appCfg, logger)
+	// 4. Create and start the server using the in-memory bufconn listener
+	appServer, err := NewAppServerWithListeners(eng, appCfg, logger, bufListener, nil)
 	require.NoError(t, err)
 
 	serverErrChan := make(chan error, 1)
@@ -248,10 +256,32 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 		close(serverErrChan)
 	}()
 
-	// Wait for the server to be ready by trying to connect
-	_, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelFunc()
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	// Wait for the server to be ready by dialing the bufconn listener.
+	dialFn := func(ctx context.Context, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+		// Ensure the bufDialer is used for the connection.
+		opts = append(opts, grpc.WithContextDialer(bufDialer))
+		return grpc.DialContext(ctx, "bufnet", opts...)
+	}
+
+	// Try a short connect to verify readiness. Use TLS creds if server is
+	// configured with TLS so the handshake succeeds.
+	ctxDial, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var dialOpts []grpc.DialOption
+	if e2eOpts.WithSecure {
+		caCert, err := os.ReadFile(certFile)
+		if err != nil {
+			require.NoError(t, err, "failed to read test CA cert")
+		}
+		certPool := x509.NewCertPool()
+		require.True(t, certPool.AppendCertsFromPEM(caCert))
+		tlsCreds := credentials.NewTLS(&tls.Config{ServerName: "127.0.0.1", RootCAs: certPool})
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(tlsCreds))
+	} else {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	dialOpts = append(dialOpts, grpc.WithBlock())
+	conn, err := dialFn(ctxDial, dialOpts...)
 	require.NoError(t, err, "Failed to connect to test gRPC server")
 	conn.Close()
 
@@ -260,16 +290,28 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (string, str
 		// Check if the server goroutine exited with an unexpected error
 		err, ok := <-serverErrChan
 		require.True(t, ok || err == nil, "Server exited with an unexpected error: %v", err)
+		// Close the bufconn listener to release resources
+		_ = bufListener.Close()
 	}
 
-	return addr, certFile, cleanup
+	return dialFn, certFile, cleanup
+}
+
+// connectWithDial is a small helper used in tests to dial the bufconn-based
+// server with a short timeout and optional dial options.
+func connectWithDial(dialFn func(ctx context.Context, opts ...grpc.DialOption) (*grpc.ClientConn, error), opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Ensure blocking dial so we wait for readiness
+	opts = append(opts, grpc.WithBlock())
+	return dialFn(ctx, opts...)
 }
 
 func TestE2E_PutAndQuery(t *testing.T) {
 	// Test Case: E2E-001
 	// Description: Write a new Data Point via gRPC `Put` and ensure it can be queried back correctly.
 
-	addr, certFile, cleanup := setupE2ETestServerWithSecure(t, e2eOptions{WithSecure: true})
+	dialFn, certFile, cleanup := setupE2ETestServerWithSecure(t, e2eOptions{WithSecure: true})
 	defer cleanup()
 
 	// --- Client TLS Credentials Setup ---
@@ -284,7 +326,7 @@ func TestE2E_PutAndQuery(t *testing.T) {
 
 	// --- Client Setup ---
 	// Use the created TLS credentials instead of insecure ones.
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(tlsCreds))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(tlsCreds))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -344,11 +386,11 @@ func TestE2E_PutBatchAndQuery(t *testing.T) {
 	// Test Case: E2E-002
 	// Description: Write a batch of data points via gRPC `PutBatch` and ensure each can be queried back correctly.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -409,11 +451,11 @@ func TestE2E_QueryWithTagFilter(t *testing.T) {
 	// Description: Query raw data in a given time range, filtered by tags.
 	// Expected Result: Receive correct data according to the filter conditions and sorted from old to new.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -504,11 +546,11 @@ func TestE2E_DownsamplingQuery(t *testing.T) {
 	// Description: Query data with downsampling and aggregation specs.
 	// Expected Result: Receive data grouped into time windows with correct aggregated values.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -607,11 +649,11 @@ func TestE2E_QueryWithEmptyWindows(t *testing.T) {
 	// Description: Query with `emit_empty_windows` set to true.
 	// Expected Result: Receive windows for time ranges that contain no data.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -695,11 +737,11 @@ func TestE2E_DeleteSeries(t *testing.T) {
 	// Description: Delete an entire series using DeleteSeries.
 	// Expected Result: Querying the deleted series should yield no results, while other series remain unaffected.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -779,11 +821,11 @@ func TestE2E_DeleteByTimeRange(t *testing.T) {
 	// Description: Delete data within a specific time range.
 	// Expected Result: Data within the range is deleted, data outside the range remains.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -859,11 +901,11 @@ func TestE2E_DeleteAtPointInTime(t *testing.T) {
 	// Description: Delete a single data point at a specific timestamp, simulating `REMOVE ... AT ...`.
 	// Expected Result: The specific data point is deleted, while others in the same series remain.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -926,11 +968,11 @@ func TestE2E_GetSeriesByTags(t *testing.T) {
 	// Description: GetSeriesByTags by using Metric and Tags.
 	// Expected Result: Shows a list of all Series Keys that match the criteria.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -978,11 +1020,11 @@ func TestE2E_Subscribe(t *testing.T) {
 	// Description: Subscribe to track a specific Metric.
 	// Expected Result: Client receives real-time DataPointUpdate when a Put or Delete occurs.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -1042,14 +1084,14 @@ func TestE2E_SecurityPermissionDenied(t *testing.T) {
 	// Description: Call an API requiring writer permission with a user having only reader permission.
 	// Expected Result: Receive gRPC status PermissionDenied.
 
-	addr, _, cleanup := setupE2ETestServerWithSecure(t, e2eOptions{
+	dialFn, _, cleanup := setupE2ETestServerWithSecure(t, e2eOptions{
 		WithAuth: true,
 	})
 	defer cleanup()
 
 	// --- Client Setup with Reader User ---
 	readerCreds := basicAuthCreds{username: "reader_user", password: "password123"}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithPerRPCCredentials(readerCreds))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithPerRPCCredentials(readerCreds))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -1070,11 +1112,11 @@ func TestE2E_Validation(t *testing.T) {
 	// Description: Put data with an invalid Metric or Tag Key.
 	// Expected Result: Receive gRPC status InvalidArgument.
 
-	addr, _, cleanup := setupE2ETestServer(t)
+	dialFn, _, cleanup := setupE2ETestServer(t)
 	defer cleanup()
 
 	// --- Client Setup ---
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := connectWithDial(dialFn, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := tsdb.NewTSDBServiceClient(conn)
@@ -1194,7 +1236,7 @@ func TestReplication_HealthCheckIntegration(t *testing.T) {
 	eng, err := engine.NewStorageEngine(engine.StorageEngineOptions{DataDir: cfg.Engine.DataDir})
 	assert.NoError(t, err)
 
-	appServer, err := NewAppServer(eng, cfg, logger)
+	appServer, err := NewAppServerWithListeners(eng, cfg, logger, nil, nil)
 	assert.NoError(t, err)
 
 	go func() {

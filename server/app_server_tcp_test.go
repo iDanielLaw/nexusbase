@@ -15,6 +15,7 @@ import (
 	api "github.com/INLOpen/nexusbase/api/nbql"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/internal/testutil"
 	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
@@ -28,6 +29,10 @@ type testTCPServer struct {
 	mockEngine    *MockStorageEngine
 	serverErrChan chan error
 }
+
+// testInMemListener is set when tests replace the TCP listener with an in-memory listener.
+// testInMemListener is set when tests replace the TCP listener with an in-memory listener.
+var testInMemListener *testutil.InMemoryListener
 
 // close stops the server and asserts mock expectations.
 func (s *testTCPServer) close(t *testing.T) {
@@ -60,7 +65,9 @@ func setupTCPServerTest(t *testing.T) *testTCPServer {
 	// Expect the Close call during cleanup
 	mockEngine.On("Close").Return(nil).Once()
 
-	appServer, err := NewAppServer(mockEngine, cfg, testLogger)
+	lis := testutil.NewInMemoryListener()
+	testInMemListener = lis
+	appServer, err := NewAppServerWithListeners(mockEngine, cfg, testLogger, nil, lis)
 	require.NoError(t, err)
 
 	serverErrChan := make(chan error, 1)
@@ -73,10 +80,10 @@ func setupTCPServerTest(t *testing.T) *testTCPServer {
 		close(serverErrChan)
 	}()
 
-	// Wait for server to be ready
+	// Wait for server to be ready by dialing the in-memory listener
 	var conn net.Conn
 	for i := 0; i < 10; i++ {
-		conn, err = net.Dial("tcp", appServer.tcpLis.Addr().String())
+		conn, err = lis.Dial()
 		if err == nil {
 			conn.Close()
 			break
@@ -102,6 +109,13 @@ type nbqlTestClient struct {
 func newNBQLTestClient(t *testing.T, addr string) *nbqlTestClient {
 	t.Helper()
 	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		// If dialing TCP fails and we have an in-memory listener matching the
+		// address, try using the in-memory Dial helper.
+		if testInMemListener != nil && addr == testInMemListener.Addr().String() {
+			conn, err = testInMemListener.Dial()
+		}
+	}
 	require.NoError(t, err)
 	return &nbqlTestClient{
 		conn:   conn,

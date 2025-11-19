@@ -4,30 +4,27 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/credentials/insecure"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/INLOpen/nexusbase/internal/testutil"
 )
 
 const testBufSize = 1024 * 1024
 
 func startTestGRPCServer(t *testing.T) (string, *grpc.Server, *bufconn.Listener, func()) {
 	t.Helper()
-	lis := bufconn.Listen(testBufSize)
+	lis := testutil.NewBufconnListener(testBufSize)
 	s := grpc.NewServer()
 	go func() { _ = s.Serve(lis) }()
 	cleanup := func() { s.Stop(); lis.Close() }
 	return lis.Addr().String(), s, lis, cleanup
-}
-
-func bufDialer(lis *bufconn.Listener) func(context.Context, string) (net.Conn, error) {
-	return func(ctx context.Context, addr string) (net.Conn, error) {
-		return lis.Dial()
-	}
 }
 
 func TestCheckFollowerHealth_Healthy(t *testing.T) {
@@ -36,7 +33,9 @@ func TestCheckFollowerHealth_Healthy(t *testing.T) {
 
 	f := &FollowerState{Addr: "bufconn"}
 
-	conn, err := grpc.Dial("bufconn", grpc.WithContextDialer(bufDialer(lis)), grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(2*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, "bufconn", append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())...)
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
@@ -101,7 +100,9 @@ func TestManager_ReplicationReconnect(t *testing.T) {
 	}
 
 	// First health check: dial bufconn directly
-	conn, err := grpc.Dial(addr, grpc.WithContextDialer(bufDialer(lis)), grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(2*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, addr, append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())...)
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
@@ -128,7 +129,9 @@ func TestManager_ReplicationReconnect(t *testing.T) {
 	addr2, _, lis2, cleanup2 := startTestGRPCServer(t)
 	defer cleanup2()
 	f.Addr = addr2
-	conn2, err := grpc.Dial(addr2, grpc.WithContextDialer(bufDialer(lis2)), grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(2*time.Second))
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	conn2, err := grpc.DialContext(ctx2, addr2, append(testutil.BufconnDialOptions(lis2), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())...)
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
