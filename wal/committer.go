@@ -1,0 +1,210 @@
+package wal
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+
+	"github.com/INLOpen/nexusbase/core"
+)
+
+// commit processes a batch of commitRecords. It's been extracted into its
+// own file to reduce the size of wal.go and make the committer logic easier
+// to reason about.
+func (w *WAL) commit(records []*commitRecord) {
+	// Fast path: if WAL is closing, notify waiters and return.
+	if w.isClosing.Load() {
+		err := errors.New("wal is closed")
+		for _, rec := range records {
+			rec.done <- err
+		}
+		return
+	}
+
+	// Aggregate entries and detect control requests (rotate/sync).
+	var allEntries []core.WALEntry
+	var shouldRotate bool
+	for _, rec := range records {
+		if rec.entries == nil {
+			shouldRotate = true
+		} else {
+			allEntries = append(allEntries, rec.entries...)
+		}
+	}
+
+	// Handle the no-entries case (rotate or sync) with a short lock.
+	if len(allEntries) == 0 {
+		var err error
+		w.mu.Lock()
+		if shouldRotate {
+			err = w.rotateLocked()
+		} else if w.opts.SyncMode != core.WALSyncDisabled {
+			if w.activeSegment != nil {
+				err = w.activeSegment.Sync()
+			}
+		}
+		w.mu.Unlock()
+
+		for _, rec := range records {
+			rec.done <- err
+		}
+		return
+	}
+
+	// Build encoded entries payloads (may split into multiple payloads if too large).
+	// We encode entries first without holding the WAL lock.
+	var encodedEntries [][]byte
+	var encodedEntryLists [][]core.WALEntry
+
+	// Helper to start a new payload
+	var currentBuf bytes.Buffer
+	var currentEntries []core.WALEntry
+	// Start payload with batch header
+	startNewPayload := func() {
+		currentBuf.Reset()
+		currentBuf.WriteByte(byte(core.EntryTypePutBatch))
+		// placeholder for count; will overwrite later
+		_ = binary.Write(&currentBuf, binary.LittleEndian, uint32(0))
+		currentEntries = currentEntries[:0]
+	}
+
+	startNewPayload()
+
+	for i := range allEntries {
+		e := allEntries[i]
+		// encode this single entry into a temporary buffer to measure size
+		var tmp bytes.Buffer
+		if err := encodeEntryData(&tmp, &e); err != nil {
+			err := err
+			for _, rec := range records {
+				rec.done <- err
+			}
+			return
+		}
+		// If adding this entry would exceed MaxSegmentSize for an empty payload and
+		// it's a single entry, return ErrRecordTooLarge.
+		entrySize := int64(tmp.Len())
+		// estimated record overhead (length + checksum)
+		recordOverhead := int64(8)
+
+		// Compute current payload size including the eventual length+checksum
+		currentPayloadSize := int64(currentBuf.Len()) + entrySize + recordOverhead
+
+		if currentPayloadSize > w.opts.MaxSegmentSize {
+			if len(currentEntries) == 0 {
+				// Single entry alone exceeds MaxSegmentSize -> reject
+				err := fmt.Errorf("%w: record_size=%d max_segment_size=%d", core.ErrRecordTooLarge, currentPayloadSize, w.opts.MaxSegmentSize)
+				for _, rec := range records {
+					rec.done <- err
+				}
+				return
+			}
+			// finalize current payload
+			// write correct entry count
+			b := currentBuf.Bytes()
+			// overwrite count at offset 1
+			binary.LittleEndian.PutUint32(b[1:5], uint32(len(currentEntries)))
+			encodedEntries = append(encodedEntries, append([]byte(nil), b...))
+			// copy entries slice
+			copied := make([]core.WALEntry, len(currentEntries))
+			copy(copied, currentEntries)
+			encodedEntryLists = append(encodedEntryLists, copied)
+			// start new payload
+			startNewPayload()
+		}
+
+		// append the entry to currentBuf and currentEntries
+		if _, err := currentBuf.Write(tmp.Bytes()); err != nil {
+			for _, rec := range records {
+				rec.done <- err
+			}
+			return
+		}
+		currentEntries = append(currentEntries, e)
+	}
+
+	// finalize last payload
+	if len(currentEntries) > 0 {
+		b := currentBuf.Bytes()
+		binary.LittleEndian.PutUint32(b[1:5], uint32(len(currentEntries)))
+		encodedEntries = append(encodedEntries, append([]byte(nil), b...))
+		copied := make([]core.WALEntry, len(currentEntries))
+		copy(copied, currentEntries)
+		encodedEntryLists = append(encodedEntryLists, copied)
+	}
+
+	// Now write each payload while holding the lock only for the write/sync/rotate
+	var finalErr error
+	var totalBytes int64
+	var totalEntries int
+
+	for pi, payload := range encodedEntries {
+		payloadBytes := payload
+		newRecordSize := int64(len(payloadBytes) + 8)
+
+		w.mu.Lock()
+		if w.activeSegment == nil || w.isClosing.Load() {
+			w.mu.Unlock()
+			finalErr = errors.New("wal is closed")
+			break
+		}
+
+		currentSize, err := w.activeSegment.Size()
+		if err != nil {
+			w.mu.Unlock()
+			finalErr = err
+			break
+		}
+		headerSize := int64(binary.Size(core.FileHeader{}))
+		if (currentSize+newRecordSize) > w.opts.MaxSegmentSize && currentSize > headerSize {
+			if err := w.rotateLocked(); err != nil {
+				w.mu.Unlock()
+				finalErr = err
+				break
+			}
+		}
+
+		// perform the write and optional sync while holding the lock to preserve ordering
+		writeErr := w.activeSegment.WriteRecord(payloadBytes)
+		if writeErr == nil && w.opts.SyncMode != core.WALSyncDisabled {
+			writeErr = w.activeSegment.Sync()
+		}
+
+		// If this payload requested rotation (only at end), will perform after loop
+		w.mu.Unlock()
+
+		if writeErr != nil {
+			finalErr = writeErr
+			break
+		}
+
+		// Update metrics and notify streamers
+		if w.metricsBytesWritten != nil {
+			w.metricsBytesWritten.Add(newRecordSize)
+		}
+		if w.metricsEntriesWritten != nil {
+			w.metricsEntriesWritten.Add(int64(len(encodedEntryLists[pi])))
+		}
+		totalBytes += newRecordSize
+		totalEntries += len(encodedEntryLists[pi])
+		w.notifyStreamers(encodedEntryLists[pi])
+	}
+
+	// If everything succeeded and rotation was requested, perform it now.
+	if finalErr == nil && shouldRotate {
+		w.mu.Lock()
+		if err := w.rotateLocked(); err != nil {
+			finalErr = err
+		}
+		w.mu.Unlock()
+	}
+
+	// Notify all original waiters of the final result (same error for everyone)
+	for _, rec := range records {
+		rec.done <- finalErr
+	}
+	// update metrics (silence unused vars if not used elsewhere)
+	_ = totalBytes
+	_ = totalEntries
+}
