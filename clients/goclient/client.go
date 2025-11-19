@@ -133,7 +133,7 @@ func (c *Client) DeleteSeries(ctx context.Context, metric string, tags map[strin
 
 // CreateSnapshot
 func (c *Client) CreateSnapshot(ctx context.Context, SnapshotDir string) error {
-	req :=&pb.CreateSnapshotRequest{
+	req := &pb.CreateSnapshotRequest{
 		SnapshotDir: SnapshotDir,
 	}
 	_, err := c.client.CreateSnapshot(ctx, req)

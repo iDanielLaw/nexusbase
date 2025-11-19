@@ -27,7 +27,7 @@ import (
 // SSTableWriter is responsible for building a new SSTable file.
 type SSTableWriter struct {
 	filePath string
-	file     sys.FileInterface
+	file     sys.FileHandle
 	offset   int64 // Current write offset in the file
 
 	// Data structures to build during writing

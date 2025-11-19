@@ -29,7 +29,7 @@ type testEntry struct {
 	PointID   uint64 // Added for testing with sequence numbers
 }
 
-// mockFile is a mock implementation of sys.FileInterface for testing I/O errors.
+// mockFile is a mock implementation of sys.FileHandle for testing I/O errors.
 type mockFile struct {
 	name            string
 	writeShouldFail bool
@@ -80,7 +80,7 @@ func (m *mockFilter) Bytes() []byte {
 	return nil
 }
 
-// Implement other methods of sys.FileInterface to satisfy the interface
+// Implement other methods of sys.FileHandle to satisfy the interface
 func (m *mockFile) Read(p []byte) (n int, err error)               { return m.buffer.Read(p) }
 func (m *mockFile) Seek(offset int64, whence int) (int64, error)   { return 0, nil }
 func (m *mockFile) Stat() (os.FileInfo, error)                     { return nil, nil }
@@ -623,7 +623,7 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 
 		// Mock sys.Create to always return an error.
 		mockErr := errors.New("simulated create error")
-		sys.Create = func(name string) (sys.FileInterface, error) {
+		sys.Create = func(name string) (sys.FileHandle, error) {
 			return nil, mockErr
 		}
 
@@ -656,7 +656,7 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 
 		// 2. Mock sys.Create to return our mock file
 		originalCreate := sys.Create
-		sys.Create = func(name string) (sys.FileInterface, error) {
+		sys.Create = func(name string) (sys.FileHandle, error) {
 			// The first write is the header, let it succeed.
 			mockF.writeShouldFail = false
 			return mockF, nil
@@ -691,7 +691,7 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 		mockF := &mockFile{name: "write_error.tmp"}
 
 		originalCreate := sys.Create
-		sys.Create = func(name string) (sys.FileInterface, error) { return mockF, nil }
+		sys.Create = func(name string) (sys.FileHandle, error) { return mockF, nil }
 		defer func() { sys.Create = originalCreate }()
 
 		var removedPath string
@@ -741,7 +741,7 @@ func TestSSTableWriter_ErrorHandling(t *testing.T) {
 
 		// 2. Mock sys.Create and sys.Remove
 		originalCreate := sys.Create
-		sys.Create = func(name string) (sys.FileInterface, error) { return mockF, nil }
+		sys.Create = func(name string) (sys.FileHandle, error) { return mockF, nil }
 		defer func() { sys.Create = originalCreate }()
 
 		var removedPath string
@@ -865,7 +865,7 @@ func TestSSTableWriter_flushCurrentBlock_WriteFailures(t *testing.T) {
 
 		// Mock sys.Create to return our controllable mock file.
 		originalCreate := sys.Create
-		sys.Create = func(name string) (sys.FileInterface, error) {
+		sys.Create = func(name string) (sys.FileHandle, error) {
 			// The writeFunc allows us to control behavior for each Write call.
 			mockF.writeFunc = func(p []byte) (n int, err error) {
 				writeCounter++

@@ -16,7 +16,7 @@ import (
 // Preallocate attempts to allocate space for the given file without changing
 // the visible file size using fallocate where available. On filesystems that
 // don't support KEEP_SIZE, it will attempt a best-effort allocation.
-func Preallocate(f FileInterface, size int64) error {
+func Preallocate(f FileHandle, size int64) error {
 	if size <= 0 {
 		return nil
 	}

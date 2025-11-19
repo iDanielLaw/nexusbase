@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 )
 
-var _ FileInterface = (*DebugFile)(nil)
+var _ FileHandle = (*DebugFile)(nil)
 var nextID atomic.Uint64
 
 var listFD *sync.Map = new(sync.Map)
@@ -20,15 +20,15 @@ type DebugFile struct {
 	logger *slog.Logger
 }
 
-func DCreate(sysFile File, name string) (FileInterface, error) {
+func DCreate(sysFile File, name string) (FileHandle, error) {
 	return DOpenFile(sysFile, name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 }
 
-func DOpen(sysFile File, name string) (FileInterface, error) {
+func DOpen(sysFile File, name string) (FileHandle, error) {
 	return DOpenFile(sysFile, name, os.O_RDONLY, 0)
 }
 
-func DOpenFile(sysFile File, name string, flag int, perm os.FileMode) (FileInterface, error) {
+func DOpenFile(sysFile File, name string, flag int, perm os.FileMode) (FileHandle, error) {
 	// Assume a default logger if none is provided, or you could pass it in.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})).With("component", "DebugFile")
 

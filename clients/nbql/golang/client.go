@@ -302,7 +302,7 @@ func (c *Client) Query(ctx context.Context, query string, params ...interface{})
 		switch cmdType {
 		case protocol.CommandQueryResultPart:
 			resp, err := protocol.DecodeQueryResponse(bytes.NewReader(packet))
-			
+
 			if err != nil {
 				return nil, fmt.Errorf("failed to decode query result part: %w", err)
 			}
@@ -365,7 +365,7 @@ func (c *Client) Push(ctx context.Context, metric string, tags map[string]string
 
 	// Read response
 	cmdType, respPayload, err := protocol.ReadFrame(c.reader)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to read push response: %w", err)
 	}

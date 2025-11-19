@@ -22,7 +22,7 @@ import (
 
 // SeriesIDStore manages the mapping between series keys and integer IDs.
 type SeriesIDStore struct {
-	logFile sys.FileInterface
+	logFile sys.FileHandle
 	nextID  atomic.Uint64
 	logger  *slog.Logger
 	mu      sync.RWMutex // protects maps and file writes

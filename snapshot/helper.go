@@ -52,11 +52,11 @@ func (h *helperSnapshot) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(name)
 }
 
-func (h *helperSnapshot) Open(name string) (sys.FileInterface, error) {
+func (h *helperSnapshot) Open(name string) (sys.FileHandle, error) {
 	return sys.Open(name)
 }
 
-func (h *helperSnapshot) Create(name string) (sys.FileInterface, error) {
+func (h *helperSnapshot) Create(name string) (sys.FileHandle, error) {
 	// Ensure the parent directory exists before creating the file. This is crucial
 	// for robustness, as os.Create will fail on some OSes (like Windows) if the
 	// parent directory does not exist.

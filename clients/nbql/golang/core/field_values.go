@@ -45,12 +45,12 @@ func (fv FieldValues) ToMap() map[string]interface{} {
 
 // MarshalBinary serializes the FieldValues map into a byte slice.
 // The format is:
-// 1. Number of fields (uint16)
-// 2. For each field:
-//    a. Length of key (uint16)
-//    b. Key (string)
-//    c. Value type (byte)
-//    d. Value data (variable size)
+//  1. Number of fields (uint16)
+//  2. For each field:
+//     a. Length of key (uint16)
+//     b. Key (string)
+//     c. Value type (byte)
+//     d. Value data (variable size)
 func (fv FieldValues) MarshalBinary() ([]byte, error) {
 	if fv == nil {
 		return nil, nil

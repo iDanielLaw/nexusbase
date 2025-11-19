@@ -134,7 +134,7 @@ type storageEngine struct {
 	sstDir           string
 	dlqDir           string
 	snapshotsBaseDir string
-	seriesLogFile    sys.FileInterface
+	seriesLogFile    sys.FileHandle
 	seriesLogMu      sync.Mutex
 	activeSeries     map[string]struct{}
 	stringStore      indexer.StringStoreInterface

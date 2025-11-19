@@ -16,7 +16,7 @@ import (
 // file. This is best-effort: if the call fails (unsupported filesystem or
 // insufficient privileges), we return an error and callers should treat this
 // as non-fatal.
-func Preallocate(f FileInterface, size int64) error {
+func Preallocate(f FileHandle, size int64) error {
 	if size <= 0 {
 		return nil
 	}

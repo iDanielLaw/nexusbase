@@ -270,7 +270,7 @@ type mockSnapshotHelper struct {
 	InterceptReadFile                    func(filename string) ([]byte, error)
 	InterceptMkdirTemp                   func(dir, pattern string) (string, error)
 	InterceptMkdirAll                    func(path string, perm os.FileMode) error
-	InterceptOpen                        func(name string) (sys.FileInterface, error)
+	InterceptOpen                        func(name string) (sys.FileHandle, error)
 	InterceptStat                        func(name string) (os.FileInfo, error)
 	InterceptCopyFile                    func(src, dst string) error
 	InterceptReadManifestBinary          func(r io.Reader) (*core.SnapshotManifest, error)
@@ -315,7 +315,7 @@ func (ms *mockSnapshotHelper) RemoveAll(path string) error {
 	return ms.helperSnapshot.RemoveAll(path)
 }
 
-func (ms *mockSnapshotHelper) Create(name string) (sys.FileInterface, error) {
+func (ms *mockSnapshotHelper) Create(name string) (sys.FileHandle, error) {
 	if ms.InterceptCreate != nil {
 		return ms.InterceptCreate(name)
 	}
@@ -350,7 +350,7 @@ func (ms *mockSnapshotHelper) MkdirTemp(dir, pattern string) (string, error) {
 	return ms.helperSnapshot.MkdirTemp(dir, pattern)
 }
 
-func (ms *mockSnapshotHelper) Open(name string) (sys.FileInterface, error) {
+func (ms *mockSnapshotHelper) Open(name string) (sys.FileHandle, error) {
 	if ms.InterceptOpen != nil {
 		return ms.InterceptOpen(name)
 	}
@@ -1884,7 +1884,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		defer os.Remove(manifestPath)
 
 		expectedErr := fmt.Errorf("simulated open error")
-		helper.InterceptOpen = func(name string) (sys.FileInterface, error) {
+		helper.InterceptOpen = func(name string) (sys.FileHandle, error) {
 			if name == manifestPath {
 				return nil, expectedErr
 			}

@@ -29,7 +29,7 @@ import (
 // SSTable represents a Sorted String Table file.
 // It holds metadata and provides methods to access its data.
 type SSTable struct {
-	file     sys.FileInterface
+	file     sys.FileHandle
 	mu       sync.RWMutex // Protects access to the file handle and other internal state
 	filePath string
 	id       uint64 // Unique identifier for the SSTable

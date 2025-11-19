@@ -5,21 +5,21 @@ import (
 	"os"
 )
 
-var _ FileInterface = (*RealFile)(nil)
+var _ FileHandle = (*RealFile)(nil)
 
 type RealFile struct {
 	f *os.File
 }
 
-func RCreate(sysFile File, name string) (FileInterface, error) {
+func RCreate(sysFile File, name string) (FileHandle, error) {
 	return ROpenFile(sysFile, name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 }
 
-func ROpen(sysFile File, name string) (FileInterface, error) {
+func ROpen(sysFile File, name string) (FileHandle, error) {
 	return ROpenFile(sysFile, name, os.O_RDONLY, 0)
 }
 
-func ROpenFile(sysFile File, name string, flag int, perm os.FileMode) (FileInterface, error) {
+func ROpenFile(sysFile File, name string, flag int, perm os.FileMode) (FileHandle, error) {
 	f, err := sysFile.OpenFile(name, flag, perm)
 	if err != nil {
 		return nil, err

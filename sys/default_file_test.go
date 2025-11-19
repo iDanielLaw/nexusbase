@@ -92,7 +92,7 @@ func TestSetDefaultFileAndDebugMode(t *testing.T) {
 	if !mf.CreateCalled && !mf.OpenFileCalled {
 		t.Fatalf("expected mock Create/OpenFile to be called, none were")
 	}
-	// Write some data using the returned FileInterface
+	// Write some data using the returned FileHandle
 	data := []byte("testing123")
 	_, err = fi.Write(data)
 	if err != nil {
@@ -128,7 +128,7 @@ func TestSetDefaultFileAndDebugMode(t *testing.T) {
 		t.Fatalf("expected mock GCCalled to be true")
 	}
 
-	// Now enable debug mode and ensure Create returns a non-nil FileInterface
+	// Now enable debug mode and ensure Create returns a non-nil FileHandle
 	SetDebugMode(true)
 	dbgPath := filepath.Join(tempDir, "dbg.txt")
 	df, err := Create(dbgPath)

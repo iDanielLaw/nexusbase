@@ -400,7 +400,7 @@ func TestClient_Query(t *testing.T) {
 		defer client.Close()
 
 		// Act
-		queryTemplate := "QUERY ? TAGGED (host=?)" // 2 placeholders
+		queryTemplate := "QUERY ? TAGGED (host=?)"                                // 2 placeholders
 		_, err = client.Query(context.Background(), queryTemplate, "test.metric") // 1 param
 
 		// Assert

@@ -181,7 +181,7 @@ func DecodeQueryResponse(r io.Reader) (QueryResponse, error) {
 	if err := binary.Read(r, binary.BigEndian, &resp.Flags); err != nil {
 		return resp, fmt.Errorf("failed to read flags: %w", err)
 	}
-	
+
 	var err error
 	resp.NextCursor, err = readStringWithLength(r)
 	if err != nil {
@@ -207,7 +207,7 @@ func DecodeQueryResponse(r io.Reader) (QueryResponse, error) {
 			return resp, err
 		}
 
-		if resp.Flags & PointItemFlagIsAggregated != 0 {
+		if resp.Flags&PointItemFlagIsAggregated != 0 {
 			resp.Results[i].AggregatedValues, err = readFloat64Map(r)
 			if err != nil {
 				return resp, err

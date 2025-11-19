@@ -67,9 +67,9 @@ type QueryResultLine struct {
 }
 
 type QueryResponse struct {
-	Status  ResponseStatus
-	Flags   PointItemFlag
-	Results []QueryResultLine
+	Status     ResponseStatus
+	Flags      PointItemFlag
+	Results    []QueryResultLine
 	NextCursor string
 }
 

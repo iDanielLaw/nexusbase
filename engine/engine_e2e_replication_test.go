@@ -140,7 +140,9 @@ func TestReplication_E2E_PutPutBatchRemove(t *testing.T) {
 		Fields:         fieldsPut,
 		Timestamp:      1234568000,
 	}
-	if applyEntry, ok := leader.(interface{ ApplyEntry(context.Context, *proto.WALEntry) error }); ok {
+	if applyEntry, ok := leader.(interface {
+		ApplyEntry(context.Context, *proto.WALEntry) error
+	}); ok {
 		err = applyEntry.ApplyEntry(context.Background(), putEntry)
 		assert.NoError(t, err)
 	}
@@ -171,7 +173,9 @@ func TestReplication_E2E_PutPutBatchRemove(t *testing.T) {
 			Timestamp:      1234568002,
 		},
 	}
-	if applyBatch, ok := leader.(interface{ ApplyBatch(context.Context, []*proto.WALEntry) error }); ok {
+	if applyBatch, ok := leader.(interface {
+		ApplyBatch(context.Context, []*proto.WALEntry) error
+	}); ok {
 		err = applyBatch.ApplyBatch(context.Background(), batchEntries)
 		assert.NoError(t, err)
 	}
@@ -188,7 +192,9 @@ func TestReplication_E2E_PutPutBatchRemove(t *testing.T) {
 		Metric:         "disk",
 		Tags:           map[string]string{"host": "e2e"},
 	}
-	if applyEntry, ok := leader.(interface{ ApplyEntry(context.Context, *proto.WALEntry) error }); ok {
+	if applyEntry, ok := leader.(interface {
+		ApplyEntry(context.Context, *proto.WALEntry) error
+	}); ok {
 		err = applyEntry.ApplyEntry(context.Background(), removeEntry)
 		assert.NoError(t, err)
 	}
@@ -225,7 +231,9 @@ func TestReplication_E2E_DeleteRange(t *testing.T) {
 		StartTime:      1234568000,
 		EndTime:        1234569000,
 	}
-	if applyEntry, ok := leader.(interface{ ApplyEntry(context.Context, *proto.WALEntry) error }); ok {
+	if applyEntry, ok := leader.(interface {
+		ApplyEntry(context.Context, *proto.WALEntry) error
+	}); ok {
 		err = applyEntry.ApplyEntry(context.Background(), deleteRangeEntry)
 		assert.NoError(t, err)
 	}

@@ -26,7 +26,7 @@ type File interface {
 	GC() error
 }
 
-type FileInterface interface {
+type FileHandle interface {
 	io.ReadWriteCloser
 	io.ReaderAt
 	io.WriterAt
@@ -46,9 +46,9 @@ type SafeRemoveOptions interface {
 	GetIntervalRetry() time.Duration
 }
 
-type CreateHandler func(name string) (FileInterface, error)
-type OpenHandler func(name string) (FileInterface, error)
-type OpenFileHandler func(name string, flag int, perm os.FileMode) (FileInterface, error)
+type CreateHandler func(name string) (FileHandle, error)
+type OpenHandler func(name string) (FileHandle, error)
+type OpenFileHandler func(name string, flag int, perm os.FileMode) (FileHandle, error)
 type WriteFileHandler func(name string, data []byte, perm os.FileMode) error
 type GCFileHandler func() error
 type RemoveHandler func(name string) error
@@ -69,7 +69,7 @@ func SetDebugMode(mode bool) {
 	debugMode.Store(mode)
 }
 
-var Create CreateHandler = (func(name string) (FileInterface, error) {
+var Create CreateHandler = (func(name string) (FileHandle, error) {
 	p := defaultFile.Load()
 	if p == nil {
 		return nil, os.ErrInvalid
@@ -82,7 +82,7 @@ var Create CreateHandler = (func(name string) (FileInterface, error) {
 	return RCreate(file, name)
 })
 
-var Open OpenHandler = (func(name string) (FileInterface, error) {
+var Open OpenHandler = (func(name string) (FileHandle, error) {
 	p := defaultFile.Load()
 	if p == nil {
 		return nil, os.ErrInvalid
@@ -94,7 +94,7 @@ var Open OpenHandler = (func(name string) (FileInterface, error) {
 	return ROpen(file, name)
 })
 
-var OpenFile OpenFileHandler = (func(name string, flag int, perm os.FileMode) (FileInterface, error) {
+var OpenFile OpenFileHandler = (func(name string, flag int, perm os.FileMode) (FileHandle, error) {
 	p := defaultFile.Load()
 	if p == nil {
 		return nil, os.ErrInvalid
