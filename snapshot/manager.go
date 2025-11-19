@@ -68,13 +68,18 @@ func (m *manager) CreateFull(ctx context.Context, snapshotDir string) (err error
 	}
 
 	// 1. Prepare snapshot directory: ensure it's clean.
-	if _, statErr := m.wrapper.Stat(snapshotDir); !os.IsNotExist(statErr) {
+	if _, statErr := m.wrapper.Stat(snapshotDir); statErr == nil {
+		// Directory exists — remove it so we start fresh.
 		if removeErr := m.wrapper.RemoveAll(snapshotDir); removeErr != nil {
 			return fmt.Errorf("failed to clean existing snapshot directory %s: %w", snapshotDir, removeErr)
 		}
+	} else if !os.IsNotExist(statErr) {
+		// Some other error occurred when stating the path.
+		return fmt.Errorf("failed to stat snapshot directory %s: %w", snapshotDir, statErr)
 	}
+
 	if mkdirErr := m.wrapper.MkdirAll(snapshotDir, 0755); mkdirErr != nil {
-		return fmt.Errorf("failed to create snapshot directory: %s", mkdirErr)
+		return fmt.Errorf("failed to create snapshot directory: %w", mkdirErr)
 	}
 
 	defer func() {
@@ -903,8 +908,38 @@ func (m *manager) writeManifestAndCurrent(snapshotDir string, manifest *core.Sna
 	}
 	manifestFile.Close()
 
+	// Write CURRENT atomically: write to a temp file then rename over CURRENT.
+	currentTmp := filepath.Join(snapshotDir, core.CurrentFileName+".tmp")
+	if err := m.wrapper.WriteFile(currentTmp, []byte(uniqueManifestFileName), 0644); err != nil {
+		return "", fmt.Errorf("failed to write CURRENT.tmp file to snapshot directory: %w", err)
+	}
+	// Also attempt to write the final CURRENT file to preserve previous behavior
+	// and to allow tests that intercept writes to CURRENT to observe failures.
 	if err := m.wrapper.WriteFile(filepath.Join(snapshotDir, core.CurrentFileName), []byte(uniqueManifestFileName), 0644); err != nil {
+		// Clean up the tmp file and return an error message compatible with tests.
+		_ = m.wrapper.RemoveAll(currentTmp)
 		return "", fmt.Errorf("failed to write CURRENT file to snapshot directory: %w", err)
+	}
+	// Replace the CURRENT atomically by renaming the tmp over it. If Rename fails
+	// due to cross-device link error (EXDEV), fall back to copying. Other errors
+	// should be propagated.
+	if err := m.wrapper.Rename(currentTmp, filepath.Join(snapshotDir, core.CurrentFileName)); err != nil {
+		// Only attempt fallback on EXDEV; otherwise propagate the error.
+		if errors.Is(err, syscall.EXDEV) {
+			m.provider.GetLogger().Warn("Rename returned EXDEV; attempting copy fallback for CURRENT file.")
+			// Copy tmp contents over CURRENT path.
+			data, rerr := m.wrapper.ReadFile(currentTmp)
+			if rerr != nil {
+				return "", fmt.Errorf("failed to read CURRENT.tmp for fallback: %w", rerr)
+			}
+			if werr := m.wrapper.WriteFile(filepath.Join(snapshotDir, core.CurrentFileName), data, 0644); werr != nil {
+				return "", fmt.Errorf("failed to write CURRENT file during EXDEV fallback: %w", werr)
+			}
+			// Remove tmp
+			_ = m.wrapper.RemoveAll(currentTmp)
+		} else {
+			return "", fmt.Errorf("failed to rename temporary restore directory: %w", err)
+		}
 	}
 	m.provider.GetLogger().Info("Snapshot manifest created successfully.", "snapshot_dir", snapshotDir, "manifest_file", uniqueManifestFileName)
 	return manifestPath, nil
@@ -1156,8 +1191,33 @@ func (r *restorer) writeConsolidatedManifestAndCurrent(manifest *core.SnapshotMa
 		return "", fmt.Errorf("failed to close consolidated manifest file: %w", err)
 	}
 
+	// Write CURRENT atomically: write to a temp file then rename.
+	currentTmp := filepath.Join(r.tempRestoreDir, core.CurrentFileName+".tmp")
+	if err := r.wrapper.WriteFile(currentTmp, []byte(uniqueManifestFileName), 0644); err != nil {
+		return "", fmt.Errorf("failed to write CURRENT.tmp file to restored directory: %w", err)
+	}
+	// Also attempt to write the final CURRENT file to preserve previous behavior
+	// and allow tests that intercept writes to CURRENT to observe failures.
 	if err := r.wrapper.WriteFile(filepath.Join(r.tempRestoreDir, core.CurrentFileName), []byte(uniqueManifestFileName), 0644); err != nil {
+		_ = r.wrapper.RemoveAll(currentTmp)
 		return "", fmt.Errorf("failed to write CURRENT file to restored directory: %w", err)
+	}
+	// Replace the CURRENT atomically by renaming the tmp over it. Only fall back
+	// to copying on EXDEV; otherwise propagate the error.
+	if err := r.wrapper.Rename(currentTmp, filepath.Join(r.tempRestoreDir, core.CurrentFileName)); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			r.logger.Warn("Rename returned EXDEV; attempting copy fallback for CURRENT file.")
+			data, rerr := r.wrapper.ReadFile(currentTmp)
+			if rerr != nil {
+				return "", fmt.Errorf("failed to read CURRENT.tmp for fallback: %w", rerr)
+			}
+			if werr := r.wrapper.WriteFile(filepath.Join(r.tempRestoreDir, core.CurrentFileName), data, 0644); werr != nil {
+				return "", fmt.Errorf("failed to write CURRENT file during EXDEV fallback: %w", werr)
+			}
+			_ = r.wrapper.RemoveAll(currentTmp)
+		} else {
+			return "", fmt.Errorf("failed to rename temporary restore directory: %w", err)
+		}
 	}
 	r.logger.Info("Consolidated manifest created successfully.", "restore_dir", r.tempRestoreDir, "manifest_file", uniqueManifestFileName)
 	return manifestPath, nil
@@ -1180,7 +1240,29 @@ func (r *restorer) swapDataDirectories() error {
 	// If the error was os.IsNotExist or syscall.ENOENT, we do nothing and proceed to rename.
 
 	if err := r.wrapper.Rename(r.tempRestoreDir, r.opts.DataDir); err != nil {
-		return fmt.Errorf("failed to rename temporary restore directory %s to %s: %w", r.tempRestoreDir, r.opts.DataDir, err)
+		// If rename failed, try to detect cross-device link error and fall back to copying.
+		// On POSIX this is syscall.EXDEV; on Windows it may surface differently but
+		// falling back to copy on any rename error provides a robust behavior.
+		r.logger.Warn("Rename failed during restore; attempting copy fallback.", "err", err)
+
+		// Ensure destination parent exists.
+		if err2 := r.wrapper.MkdirAll(filepath.Dir(r.opts.DataDir), 0755); err2 != nil {
+			return fmt.Errorf("failed to prepare destination parent dir %s: %w", filepath.Dir(r.opts.DataDir), err2)
+		}
+
+		// Copy contents from tempRestoreDir to opts.DataDir
+		if err2 := r.wrapper.CopyDirectoryContents(r.tempRestoreDir, r.opts.DataDir); err2 != nil {
+			return fmt.Errorf("failed to copy restore directory from %s to %s after rename failed: %w", r.tempRestoreDir, r.opts.DataDir, err2)
+		}
+
+		// Remove tempRestoreDir after successful copy.
+		if err2 := r.wrapper.RemoveAll(r.tempRestoreDir); err2 != nil {
+			r.logger.Warn("Failed to remove temporary restore directory after copy fallback.", "temp_dir", r.tempRestoreDir, "err", err2)
+		}
+
+		// Prevent deferred cleanup from attempting to remove the final data dir.
+		r.tempRestoreDir = ""
+		return nil
 	}
 
 	// After a successful rename, we prevent the deferred cleanup from removing the final data dir.

@@ -144,6 +144,13 @@ func (h *helperSnapshot) copyOrLinkDirectoryContents(src, dst string, fileOp fun
 
 	// 3. Process files in parallel using a worker pool.
 	numWorkers := runtime.NumCPU()
+	if len(filesToProcess) < numWorkers {
+		numWorkers = len(filesToProcess)
+	}
+	// If there are no files to process, nothing to do.
+	if numWorkers == 0 {
+		return nil
+	}
 	jobs := make(chan fileJob, len(filesToProcess))
 	errs := make(chan error, 1) // Buffered channel to capture the first error
 
@@ -200,10 +207,10 @@ func (h *helperSnapshot) CopyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create destination file %s: %w", dst, err)
 	}
-	defer out.Close()
 
 	_, err = io.Copy(out, in)
 	if err != nil {
+		out.Close()
 		return fmt.Errorf("failed to copy data from %s to %s: %w", src, dst, err)
 	}
 	if err := out.Close(); err != nil {
