@@ -289,7 +289,9 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 		return
 	}
 
-	// Update follower state under lock and compute lag based on previous timestamp.
+	// Update follower state under lock and compute lag based on follower-reported
+	// last-applied timestamp if available. Fall back to previous successful ping
+	// interval only if the follower did not report a timestamp.
 	now := time.Now()
 	var lag time.Duration
 	f.mu.Lock()
@@ -303,9 +305,22 @@ func (m *Manager) checkFollowerHealth(f *FollowerState) {
 		f.Healthy = false
 		f.RetryCount++
 	}
-	// compute lag as interval since previous successful ping if available
-	if !prevLastPing.IsZero() {
-		lag = now.Sub(prevLastPing)
+	// Prefer using the follower-reported last_applied_at timestamp when present.
+	if resp.LastAppliedAt != nil {
+		lastApplied := resp.LastAppliedAt.AsTime()
+		if !lastApplied.IsZero() {
+			lag = now.Sub(lastApplied)
+			if lag < 0 {
+				// Negative lag indicates clock skew; treat as zero and log warning.
+				lag = 0
+				m.logger.Warn("Negative replication lag detected (clock skew)", "addr", f.Addr, "last_applied_at", lastApplied)
+			}
+		}
+	} else {
+		// Fallback: compute lag as interval since previous successful ping (crude health indicator).
+		if !prevLastPing.IsZero() {
+			lag = now.Sub(prevLastPing)
+		}
 	}
 	f.mu.Unlock()
 

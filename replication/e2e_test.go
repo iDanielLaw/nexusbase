@@ -110,7 +110,9 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	connCtx, connCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer connCancel()
 	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
-		return lis.DialContext(ctx)
+		// bufconn.Listener only provides Dial(); ignore the context parameter
+		// because bufconn.Dial() does not accept a context.
+		return lis.Dial()
 	}
 	conn, err := grpc.DialContext(connCtx, leaderAddr, grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	require.NoError(t, err, "could not connect to leader gRPC server in test setup")

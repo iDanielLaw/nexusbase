@@ -23,17 +23,19 @@ import (
 
 // AppServer manages all network-facing servers (gRPC, TCP, etc.).
 type AppServer struct {
-	grpcLis     net.Listener
-	tcpLis      net.Listener
-	queryServer *HTTPServer
-	grpcServer  *GRPCServer
-	tcpServer   *TCP2Server
-	putWorker   *WorkerPool
-	batchWorker *WorkerPool
-	cfg         *config.Config
-	logger      *slog.Logger
-	engine      engine.StorageEngineInterface
-	cancel      context.CancelFunc
+	grpcLis      net.Listener
+	tcpLis       net.Listener
+	grpcLisOwned bool
+	tcpLisOwned  bool
+	queryServer  *HTTPServer
+	grpcServer   *GRPCServer
+	tcpServer    *TCP2Server
+	putWorker    *WorkerPool
+	batchWorker  *WorkerPool
+	cfg          *config.Config
+	logger       *slog.Logger
+	engine       engine.StorageEngineInterface
+	cancel       context.CancelFunc
 
 	// Replication components
 	replicationManager *replication.Manager
@@ -77,12 +79,14 @@ func NewAppServerWithListeners(eng engine.StorageEngineInterface, cfg *config.Co
 	// gRPC: prefer provided listener, otherwise create if port configured > 0
 	if grpcLis != nil || cfg.Server.GRPCPort > 0 {
 		var err error
+		createdGrpcLis := false
 		if grpcLis == nil {
 			grpcAddr := fmt.Sprintf(":%d", cfg.Server.GRPCPort)
 			grpcLis, err = net.Listen("tcp", grpcAddr)
 			if err != nil {
 				return nil, fmt.Errorf("failed to listen on gRPC port %s: %w", grpcAddr, err)
 			}
+			createdGrpcLis = true
 			logger.Info("gRPC server will listen on", "address", grpcLis.Addr().String())
 		} else {
 			logger.Info("gRPC server will use provided listener", "address", grpcLis.Addr().String())
@@ -90,13 +94,14 @@ func NewAppServerWithListeners(eng engine.StorageEngineInterface, cfg *config.Co
 
 		grpcSrv, err := NewGRPCServer(eng, putWorkerPool, batchWorkerPool, &cfg.Server, authenticator, logger)
 		if err != nil {
-			if cfg.Server.GRPCPort > 0 && grpcLis != nil {
+			if createdGrpcLis && grpcLis != nil {
 				grpcLis.Close()
 			}
 			return nil, fmt.Errorf("failed to create gRPC server: %w", err)
 		}
 		appSrv.grpcServer = grpcSrv
 		appSrv.grpcLis = grpcLis
+		appSrv.grpcLisOwned = createdGrpcLis
 	} else {
 		logger.Info("gRPC server is disabled (port is 0 or not configured).")
 	}
@@ -106,15 +111,18 @@ func NewAppServerWithListeners(eng engine.StorageEngineInterface, cfg *config.Co
 	// TCP: prefer provided listener, otherwise create if port configured > 0
 	if tcpLis != nil || cfg.Server.TCPPort > 0 {
 		var err error
+		createdTcpLis := false
 		if tcpLis == nil {
 			tcpAddr := fmt.Sprintf(":%d", cfg.Server.TCPPort)
 			tcpLis, err = net.Listen("tcp", tcpAddr)
 			if err != nil {
-				if appSrv.grpcLis != nil {
+				// only close grpcLis if we created it here
+				if appSrv.grpcLis != nil && appSrv.grpcLisOwned {
 					appSrv.grpcLis.Close()
 				}
 				return nil, fmt.Errorf("failed to create TCP server: %w", err)
 			}
+			createdTcpLis = true
 		} else {
 			// if a tcp listener was provided, log it
 			logger.Info("TCP server will use provided listener", "address", tcpLis.Addr().String())
@@ -123,6 +131,7 @@ func NewAppServerWithListeners(eng engine.StorageEngineInterface, cfg *config.Co
 		tcpServer := NewTCP2Server(executor, authenticator, cfg.Security.Enabled, logger)
 		appSrv.tcpServer = tcpServer
 		appSrv.tcpLis = tcpLis
+		appSrv.tcpLisOwned = createdTcpLis
 	}
 
 	if cfg.QueryServer.Enabled {
