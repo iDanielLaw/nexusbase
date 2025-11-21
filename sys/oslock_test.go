@@ -2,6 +2,7 @@ package sys
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,6 +15,10 @@ func TestAcquireOSFileLock_Exclusive(t *testing.T) {
 	// First acquire with a reasonable timeout
 	rel1, err := AcquireOSFileLock(lockPath, 500*time.Millisecond)
 	if err != nil {
+		// If the platform doesn't support OS-level locks, skip the test.
+		if strings.Contains(err.Error(), "not supported") || strings.Contains(err.Error(), "not implemented") {
+			t.Skip("OS file locking not supported on this platform")
+		}
 		t.Fatalf("failed to acquire initial OS lock: %v", err)
 	}
 	// Second acquisition should fail quickly (use small timeout)

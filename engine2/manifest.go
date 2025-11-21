@@ -213,21 +213,41 @@ func SaveManifest(path string, m SSTableManifest) error {
 	if _, statErr := sys.Stat(path); statErr == nil {
 		// remove any stale bak first
 		_ = sys.Remove(bak)
-		if err := sys.Rename(path, bak); err != nil {
-			// attempt to cleanup tmp and return error
+		// retry rename with backoff to handle transient filesystem issues
+		var renameErr error
+		for attempt := 0; attempt < 5; attempt++ {
+			renameErr = sys.Rename(path, bak)
+			if renameErr == nil {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+		}
+		if renameErr != nil {
 			_ = sys.Remove(tmp)
-			return err
+			return renameErr
 		}
 	}
 
-	// move tmp into final path
-	if err := sys.Rename(tmp, path); err != nil {
+	// move tmp into final path with retries
+	var moveErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		moveErr = sys.Rename(tmp, path)
+		if moveErr == nil {
+			break
+		}
+		// On transient failures, try to restore bak and retry
+		if _, sErr := sys.Stat(bak); sErr == nil {
+			_ = sys.Rename(bak, path)
+		}
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+	}
+	if moveErr != nil {
 		// try to restore bak if present
 		if _, sErr := sys.Stat(bak); sErr == nil {
 			_ = sys.Rename(bak, path)
 		}
 		_ = sys.Remove(tmp)
-		return err
+		return moveErr
 	}
 
 	// Success: remove backup if present

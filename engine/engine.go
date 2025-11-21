@@ -654,6 +654,35 @@ func (e *storageEngine) initializeMetrics() {
 	if e.metrics.PreallocUnsupported != nil {
 		e.metrics.PreallocUnsupported.Set(int64(sys.PreallocUnsupportedCount()))
 	}
+
+	// If metrics are not published globally, spawn a background updater that
+	// periodically refreshes the preallocation counters so non-global expvar
+	// collectors see near-real-time values. The updater listens on the engine
+	// shutdown channel and is synchronized with the engine WaitGroup.
+	if !e.metrics.PublishedGlobally {
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if e.metrics.PreallocSuccesses != nil {
+						e.metrics.PreallocSuccesses.Set(int64(sys.PreallocSuccessCount()))
+					}
+					if e.metrics.PreallocFailures != nil {
+						e.metrics.PreallocFailures.Set(int64(sys.PreallocFailureCount()))
+					}
+					if e.metrics.PreallocUnsupported != nil {
+						e.metrics.PreallocUnsupported.Set(int64(sys.PreallocUnsupportedCount()))
+					}
+				case <-e.shutdownChan:
+					return
+				}
+			}
+		}()
+	}
 	e.metrics.mutableMemtableSizeFunc = func() interface{} {
 		e.mu.RLock()
 		defer e.mu.RUnlock()
