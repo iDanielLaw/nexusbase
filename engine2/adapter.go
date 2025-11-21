@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"sync/atomic"
+	"time"
 
 	// strconv and strings were used in previous implementation; keep none now
 
+	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
@@ -14,6 +18,7 @@ import (
 	pb "github.com/INLOpen/nexusbase/replication/proto"
 	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 )
@@ -26,14 +31,34 @@ var _ engine.StorageEngineInterface = (*Engine2Adapter)(nil)
 // and will be incrementally implemented as core features are added.
 type Engine2Adapter struct {
 	*Engine2
+	// simple monotonic sstable id allocator
+	nextSSTableID uint64
+	// simple in-memory string store for ID mapping
+	stringStore *inMemoryStringStore
+	// manifest manager for discovered SSTables
+	manifestMgr *ManifestManager
 }
 
 // NewEngine2Adapter wraps an existing Engine2.
 func NewEngine2Adapter(e *Engine2) *Engine2Adapter {
-	return &Engine2Adapter{Engine2: e}
+	a := &Engine2Adapter{
+		Engine2:       e,
+		nextSSTableID: uint64(time.Now().UnixNano()),
+		stringStore:   newInMemoryStringStore(),
+	}
+	// initialize manifest manager (best-effort)
+	if e != nil {
+		manifestPath := filepath.Join(e.GetDataRoot(), "sstables", "manifest.json")
+		if mgr, err := NewManifestManager(manifestPath); err == nil {
+			a.manifestMgr = mgr
+		}
+	}
+	return a
 }
 
-func (a *Engine2Adapter) GetNextSSTableID() uint64 { return 0 }
+func (a *Engine2Adapter) GetNextSSTableID() uint64 {
+	return atomic.AddUint64(&a.nextSSTableID, 1)
+}
 
 // Data Manipulation
 func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
@@ -135,6 +160,119 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 	if a.mem == nil {
 		return fmt.Errorf("engine2 not initialized")
 	}
+
+	// Create sstable directory
+	sstDir := filepath.Join(a.dataRoot, "sstables")
+
+	// Gather entries from memtable into an in-memory slice (so we can estimate keys)
+	type encEntry struct {
+		key       []byte
+		val       []byte
+		entryType core.EntryType
+	}
+	var entries []encEntry
+	a.mem.mu.RLock()
+	for metric, tagMap := range a.mem.data {
+		for tagKey, tsMap := range tagMap {
+			tags := parseTagsFromKey(tagKey)
+			// convert metric and tags to IDs using the string store
+			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			// build encoded tag pairs
+			var pairs []core.EncodedSeriesTagPair
+			for k, v := range tags {
+				kid, _ := a.stringStore.GetOrCreateID(k)
+				vid, _ := a.stringStore.GetOrCreateID(v)
+				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
+			}
+			// sort by KeyID for canonical ordering
+			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
+
+			for ts, fv := range tsMap {
+				var e encEntry
+				e.key = core.EncodeTSDBKey(metricID, pairs, ts)
+				if fv == nil || len(fv) == 0 {
+					e.entryType = core.EntryTypeDelete
+					e.val = nil
+				} else {
+					vb, encErr := fv.Encode()
+					if encErr != nil {
+						a.mem.mu.RUnlock()
+						return fmt.Errorf("failed to encode FieldValues during flush preparation: %w", encErr)
+					}
+					e.entryType = core.EntryTypePutEvent
+					e.val = vb
+				}
+				entries = append(entries, e)
+			}
+		}
+	}
+	a.mem.mu.RUnlock()
+
+	if len(entries) == 0 {
+		// Nothing to flush
+		return nil
+	}
+
+	id := a.GetNextSSTableID()
+	estimatedKeys := uint64(len(entries))
+
+	writerOpts := core.SSTableWriterOptions{
+		DataDir:                      sstDir,
+		ID:                           id,
+		EstimatedKeys:                estimatedKeys,
+		BloomFilterFalsePositiveRate: 0.01,
+		BlockSize:                    32 * 1024,
+		Compressor:                   &compressors.NoCompressionCompressor{},
+		Logger:                       nil,
+	}
+
+	writer, err := sstable.NewSSTableWriter(writerOpts)
+	if err != nil {
+		return fmt.Errorf("failed to create sstable writer: %w", err)
+	}
+
+	// Write all entries
+	for _, e := range entries {
+		if addErr := writer.Add(e.key, e.val, e.entryType, 0); addErr != nil {
+			writer.Abort()
+			return fmt.Errorf("failed to add entry to sstable: %w", addErr)
+		}
+	}
+
+	if err := writer.Finish(); err != nil {
+		writer.Abort()
+		return fmt.Errorf("failed to finish sstable writer: %w", err)
+	}
+
+	// Validate by loading the SSTable
+	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: id}
+	_, loadErr := sstable.LoadSSTable(loadOpts)
+	if loadErr != nil {
+		// remove corrupted file
+		_ = sys.Remove(writer.FilePath())
+		return fmt.Errorf("failed to load newly created sstable %s: %w", writer.FilePath(), loadErr)
+	}
+
+	// Append manifest entry
+	manifestPath := filepath.Join(sstDir, "manifest.json")
+	entry := SSTableManifestEntry{
+		ID:        id,
+		FilePath:  writer.FilePath(),
+		KeyCount:  uint64(len(entries)),
+		CreatedAt: time.Now().UTC(),
+	}
+	// Persist manifest entry and update in-memory manager if available.
+	if a.manifestMgr != nil {
+		if err := a.manifestMgr.AddEntry(entry); err != nil {
+			return fmt.Errorf("failed to persist manifest entry: %w", err)
+		}
+	} else {
+		if err := AppendManifestEntry(manifestPath, entry); err != nil {
+			return fmt.Errorf("failed to append sstable manifest: %w", err)
+		}
+	}
+
+	// Success — clear memtable now
 	a.mem.Flush()
 	return nil
 }
@@ -163,7 +301,23 @@ func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 }
 
 func (a *Engine2Adapter) CleanupEngine() {}
-func (a *Engine2Adapter) Start() error   { return nil }
+func (a *Engine2Adapter) Start() error {
+	// Ensure manifest manager is present and loaded.
+	if a.manifestMgr == nil && a.Engine2 != nil {
+		manifestPath := filepath.Join(a.Engine2.GetDataRoot(), "sstables", "manifest.json")
+		if mgr, err := NewManifestManager(manifestPath); err == nil {
+			a.manifestMgr = mgr
+		} else {
+			return err
+		}
+	}
+	if a.manifestMgr != nil {
+		if err := a.manifestMgr.Reload(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func (a *Engine2Adapter) Close() error {
 	if a.wal != nil {
 		if err := a.wal.Close(); err != nil {
@@ -187,7 +341,15 @@ func (a *Engine2Adapter) GetDataDir() string                            { return
 func (a *Engine2Adapter) GetWALPath() string                            { return filepath.Join(a.dataRoot, "wal") }
 func (a *Engine2Adapter) GetClock() clock.Clock                         { return clock.SystemClockDefault }
 func (a *Engine2Adapter) GetWAL() wal.WALInterface                      { return nil }
-func (a *Engine2Adapter) GetStringStore() indexer.StringStoreInterface  { return nil }
+func (a *Engine2Adapter) GetStringStore() indexer.StringStoreInterface  { return a.stringStore }
 func (a *Engine2Adapter) GetSnapshotManager() snapshot.ManagerInterface { return nil }
 
 func (a *Engine2Adapter) GetSequenceNumber() uint64 { return 0 }
+
+// GetKnownSSTables returns the manifest entries currently known by the engine2 adapter.
+func (a *Engine2Adapter) GetKnownSSTables() ([]SSTableManifestEntry, error) {
+	if a.manifestMgr == nil {
+		return nil, nil
+	}
+	return a.manifestMgr.ListEntries(), nil
+}

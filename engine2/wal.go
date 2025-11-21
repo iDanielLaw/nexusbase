@@ -11,22 +11,23 @@ import (
 	"sync"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/sys"
 )
 
 // WAL is a very small append-only write-ahead log for engine2.
 type WAL struct {
 	mu   sync.Mutex
-	f    *os.File
+	f    sys.FileHandle
 	path string
 }
 
 // NewWAL opens or creates the wal file at path.
 func NewWAL(path string) (*WAL, error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := sys.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create wal dir: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	f, err := sys.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open wal file: %w", err)
 	}
@@ -80,7 +81,7 @@ func (w *WAL) Replay(fn func(*core.DataPoint) error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// open file for read
-	rf, err := os.Open(w.path)
+	rf, err := sys.Open(w.path)
 	if err != nil {
 		return fmt.Errorf("failed to open wal for replay: %w", err)
 	}

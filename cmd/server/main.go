@@ -20,6 +20,7 @@ import (
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/hooks/listeners"
 	"github.com/INLOpen/nexusbase/levels"
+	"github.com/INLOpen/nexusbase/sys"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -204,6 +205,11 @@ func main() {
 	selfMonitoringInterval := config.ParseDuration(cfg.SelfMonitoring.Interval, 5*time.Second, logger)
 	indexFlushInterval := config.ParseDuration(cfg.Engine.Index.FlushInterval, 60*time.Second, logger)
 	indexCompactionInterval := config.ParseDuration(cfg.Engine.Index.CompactionCheckInterval, 20*time.Second, logger)
+
+	// Manifest lock TTL controls how long an external lockfile is considered valid
+	// before this process may attempt to break it (useful when other process crashed).
+	manifestLockTTL := config.ParseDuration(cfg.Engine.ManifestLockTTL, 30*time.Second, logger)
+	sys.SetDefaultLockStaleTTL(manifestLockTTL)
 
 	// Parse CompactionFallbackStrategy
 	var fallbackStrategy levels.CompactionFallbackStrategy

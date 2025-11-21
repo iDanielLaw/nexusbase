@@ -157,6 +157,34 @@ var WriteFile WriteFileHandler = (func(name string, data []byte, perm os.FileMod
 	return fw.f.WriteFile(name, data, perm)
 })
 
+type ReadFileHandler func(name string) ([]byte, error)
+
+var ReadFile ReadFileHandler = (func(name string) ([]byte, error) {
+	p := defaultFile.Load()
+	if p == nil {
+		return nil, os.ErrInvalid
+	}
+	fw, ok := p.(fileWrapper)
+	if !ok || fw.f == nil {
+		return nil, os.ErrInvalid
+	}
+	f, err := fw.f.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+})
+
 var Remove RemoveHandler = (func(name string) error {
 	return os.Remove(name)
 })
+
+// MkdirAll creates a directory and parents, delegating to os.MkdirAll by default.
+func MkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }
+
+// Rename moves a file or directory from old to new path.
+func Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
+
+// Stat returns file info for the given path.
+func Stat(path string) (os.FileInfo, error) { return os.Stat(path) }

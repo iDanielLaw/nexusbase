@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/sys"
 )
 
 var (
@@ -33,7 +34,7 @@ func NewEngine2(dataRoot string) (*Engine2, error) {
 	if dataRoot == "" {
 		return nil, fmt.Errorf("dataRoot must be specified")
 	}
-	if err := os.MkdirAll(dataRoot, 0755); err != nil {
+	if err := sys.MkdirAll(dataRoot, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data root: %w", err)
 	}
 	// initialize wal and memtable

@@ -82,6 +82,7 @@ type EngineConfig struct {
 	RetentionPeriod      string           `yaml:"retention_period"`
 	MetadataSyncInterval string           `yaml:"metadata_sync_interval"`
 	CheckpointInterval   string           `yaml:"checkpoint_interval"` // Added for completeness
+	ManifestLockTTL      string           `yaml:"manifest_lock_ttl"`
 	Memtable             MemtableConfig   `yaml:"memtable"`
 	SSTable              SSTableConfig    `yaml:"sstable"`
 	Cache                CacheConfig      `yaml:"cache"`
@@ -215,6 +216,7 @@ func Load(r io.Reader) (*Config, error) {
 				IntraL0TriggerFileCount: 8,               // Default to triggering with 8 small files
 				IntraL0MaxFileSizeBytes: 2 * 1024 * 1024, // Default to 2MB for "small" files
 			},
+			ManifestLockTTL: "30s",
 			WAL: WALConfig{
 				SyncMode:            "interval",
 				BatchSize:           1,

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/INLOpen/nexusbase/sys"
 )
 
 // DatabaseMetadata is the compact per-database metadata persisted to disk.
@@ -30,13 +32,13 @@ func SaveMetadataAtomic(path string, meta *DatabaseMetadata) error {
 	}
 
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, buf.Bytes(), 0644); err != nil {
+	if err := sys.WriteFile(tmpPath, buf.Bytes(), 0644); err != nil {
 		return fmt.Errorf("failed to write temp metadata file: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
 		// best effort cleanup
-		_ = os.Remove(tmpPath)
+		_ = sys.Remove(tmpPath)
 		return fmt.Errorf("failed to atomically rename metadata file: %w", err)
 	}
 	return nil
@@ -44,7 +46,7 @@ func SaveMetadataAtomic(path string, meta *DatabaseMetadata) error {
 
 // LoadMetadata loads metadata from path.
 func LoadMetadata(path string) (*DatabaseMetadata, error) {
-	data, err := os.ReadFile(path)
+	data, err := sys.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
