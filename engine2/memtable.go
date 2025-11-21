@@ -8,6 +8,69 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 )
 
+// size-bucketed pools for temporary timestamp slices used when building tsList
+var (
+	// bucket sizes in increasing order
+	tsBuckets = []int{16, 64, 256, 1024, 4096, 16384, 65536}
+	tsPools   = make([]sync.Pool, len(tsBuckets))
+)
+
+func init() {
+	for i, b := range tsBuckets {
+		cap := b
+		// return pointer to slice to reduce allocations (satisfy analyzer)
+		tsPools[i] = sync.Pool{New: func() any {
+			s := make([]int64, 0, cap)
+			return &s
+		}}
+	}
+}
+
+// getTsSlice returns a slice with capacity at least need. The bool return
+// indicates whether the slice came from a pool (and should be returned later).
+func getTsSlice(need int) ([]int64, bool) {
+	for i, b := range tsBuckets {
+		if need <= b {
+			v := tsPools[i].Get()
+			if v == nil {
+				s := make([]int64, 0, b)
+				return s[:0], true
+			}
+			p := v.(*[]int64)
+			s := *p
+			return s[:0], true
+		}
+	}
+	// need larger than largest bucket: try last pool but ensure capacity
+	last := len(tsPools) - 1
+	v := tsPools[last].Get()
+	if v == nil {
+		s := make([]int64, 0, need)
+		return s[:0], true
+	}
+	p := v.(*[]int64)
+	s := *p
+	if cap(s) < need {
+		s = make([]int64, 0, need)
+	}
+	return s[:0], true
+}
+
+func putTsSlice(s []int64) {
+	capv := cap(s)
+	s = s[:0]
+	for i, b := range tsBuckets {
+		if capv <= b {
+			ss := s
+			tsPools[i].Put(&ss)
+			return
+		}
+	}
+	// larger than last bucket: put into last pool
+	ss := s
+	tsPools[len(tsPools)-1].Put(&ss)
+}
+
 // Memtable is a simple in-memory store keyed by metric|sortedtags|timestamp
 type Memtable struct {
 	mu sync.RWMutex
@@ -224,8 +287,15 @@ func (m *Memtable) Query(params core.QueryParams) []*core.QueryResultItem {
 			tsList = metricIndex[tagKey]
 		}
 		// if index is not present for this tagKey, build it from tagIdx keys
+		builtFromPool := false
 		if len(tsList) == 0 {
-			tsList = make([]int64, 0, len(tagIdx))
+			// try to get a slice from size-bucketed pools
+			s, _ := getTsSlice(len(tagIdx))
+			if cap(s) < len(tagIdx) {
+				s = make([]int64, 0, len(tagIdx))
+			}
+			tsList = s
+			builtFromPool = true
 			for ts := range tagIdx {
 				if ts == -1 {
 					continue
@@ -254,6 +324,10 @@ func (m *Memtable) Query(params core.QueryParams) []*core.QueryResultItem {
 				}
 				out = append(out, &core.QueryResultItem{Metric: params.Metric, Tags: tags, Timestamp: ts, Fields: fv})
 			}
+		}
+		if builtFromPool {
+			// return the slice to the appropriate pool for reuse
+			putTsSlice(tsList)
 		}
 	}
 	return out
