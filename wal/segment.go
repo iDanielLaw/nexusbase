@@ -54,11 +54,11 @@ func CreateSegment(dir string, index uint64, writerBufSize int, preallocSize int
 	// rather than failing segment creation. This avoids hard failures on filesystems
 	// that don't support fallocate or when the operation is not permitted.
 	if preallocSize > 0 {
-		// Attempt preallocation as best-effort. Suppress noisy warnings because
-		// many test environments and mount points (Windows mounts, tmpfs, etc.)
-		// don't expose a file descriptor suitable for fallocate; callers should
-		// not treat failures here as fatal. If you need to debug preallocation
-		// failures, enable a higher log level or instrument `sys.Preallocate`.
+		// Attempt preallocation using platform-specific helper (best-effort).
+		// `sys.Preallocate` should use fallocate/OS-specific APIs that do not
+		// modify the visible file contents; avoid using `Truncate` because it
+		// will fill the file with zero bytes which WAL readers interpret as
+		// valid (empty) records.
 		_ = sys.Preallocate(file, preallocSize)
 	}
 
@@ -147,6 +147,8 @@ func (sr *SegmentReader) ReadRecord() ([]byte, error) {
 	if err := binary.Read(sr.reader, binary.LittleEndian, &length); err != nil {
 		return nil, err // Could be io.EOF for clean end
 	}
+
+	// (debug prints removed)
 
 	// A sanity check to prevent allocating huge amounts of memory for a corrupt record.
 	// This limit can be adjusted based on expected maximum record size.

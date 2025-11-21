@@ -152,6 +152,7 @@ func (w *WAL) commit(records []*commitRecord) {
 	for pi, payload := range encodedEntries {
 		payloadBytes := payload
 		newRecordSize := int64(len(payloadBytes) + 8)
+		// (debug prints removed)
 
 		w.mu.Lock()
 		if w.activeSegment == nil || w.isClosing.Load() {
