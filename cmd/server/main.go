@@ -279,6 +279,7 @@ func main() {
 		Logger:                            logger,
 		ReplicationMode:                   cfg.Replication.Mode,             // Pass replication mode
 		LeaderAddress:                     cfg.SelfMonitoring.LeaderAddress, // Use self-monitoring leader address
+		EnableSSTablePreallocate:          cfg.Engine.SSTable.Preallocate,
 	}
 
 	// Create the storage engine instance first.

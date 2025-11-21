@@ -36,6 +36,7 @@ type SSTableConfig struct {
 	BlockSizeBytes    int64   `yaml:"block_size_bytes"`
 	Compression       string  `yaml:"compression"`
 	BloomFilterFPRate float64 `yaml:"bloom_filter_fp_rate"`
+	Preallocate       bool    `yaml:"preallocate"`
 }
 
 // CacheConfig holds cache-specific configurations.
@@ -199,6 +200,7 @@ func Load(r io.Reader) (*Config, error) {
 				BlockSizeBytes:    8 * 1024, // 8 KiB
 				Compression:       "snappy",
 				BloomFilterFPRate: 0.01,
+				Preallocate:       true,
 			},
 			Cache: CacheConfig{
 				BlockCacheCapacity: 1024,

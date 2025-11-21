@@ -21,6 +21,7 @@ func Preallocate(f FileHandle, size int64) error {
 	}
 	fg, ok := f.(interface{ Fd() uintptr })
 	if !ok {
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 	fd := int(fg.Fd())
@@ -34,6 +35,7 @@ func Preallocate(f FileHandle, size int64) error {
 	// support the fallocate syscall in a way we can use. Treat as non-fatal.
 	if path := f.Name(); path != "" {
 		if strings.HasPrefix(path, "/mnt/") {
+			preallocUnsupportedInc()
 			return ErrPreallocNotSupported
 		}
 	}
@@ -47,21 +49,27 @@ func Preallocate(f FileHandle, size int64) error {
 		if allow, ok := preallocCacheLoad(dev); ok {
 			preallocCacheHit()
 			if !allow {
+				preallocUnsupportedInc()
 				return ErrPreallocNotSupported
 			}
 			// allowed: proceed directly to fallocate
 			if err := unix.Fallocate(fd, unix.FALLOC_FL_KEEP_SIZE, 0, size); err == nil {
+				preallocSuccessInc()
 				return nil
 			}
 			if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTTY) {
+				preallocUnsupportedInc()
 				return ErrPreallocNotSupported
 			}
 			if err := unix.Fallocate(fd, 0, 0, size); err == nil {
+				preallocSuccessInc()
 				return nil
 			}
 			if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTTY) {
+				preallocUnsupportedInc()
 				return ErrPreallocNotSupported
 			}
+			preallocFailureInc()
 			return fmt.Errorf("preallocation failed for fd=%d: %w", fd, err)
 		}
 		// not cached: record a miss and fall through to fstatfs and compute allowed status
@@ -74,6 +82,7 @@ func Preallocate(f FileHandle, size int64) error {
 	// filesystem. If it's unknown or network/virtual, skip preallocation.
 	var st unix.Statfs_t
 	if err := unix.Fstatfs(fd, &st); err != nil {
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 
@@ -92,6 +101,7 @@ func Preallocate(f FileHandle, size int64) error {
 		0x42465331: // BFS (BeOS FS) - unlikely but harmless to include
 		// allowed (local filesystems)
 	default:
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 
@@ -100,6 +110,7 @@ func Preallocate(f FileHandle, size int64) error {
 		if dev != 0 {
 			preallocCacheStore(dev, true)
 		}
+		preallocSuccessInc()
 		return nil
 	} else {
 		// If fallocate returns a known "not supported"/invalid error, map to sentinel.
@@ -107,6 +118,7 @@ func Preallocate(f FileHandle, size int64) error {
 			if dev != 0 {
 				preallocCacheStore(dev, false)
 			}
+			preallocUnsupportedInc()
 			return ErrPreallocNotSupported
 		}
 		// Otherwise try a plain fallocate which may change file size.
@@ -116,14 +128,17 @@ func Preallocate(f FileHandle, size int64) error {
 		if dev != 0 {
 			preallocCacheStore(dev, true)
 		}
+		preallocSuccessInc()
 		return nil
 	} else {
 		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTTY) {
 			if dev != 0 {
 				preallocCacheStore(dev, false)
 			}
+			preallocUnsupportedInc()
 			return ErrPreallocNotSupported
 		}
+		preallocFailureInc()
 		return fmt.Errorf("preallocation failed for fd=%d: %w", fd, err)
 	}
 }

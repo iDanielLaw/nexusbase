@@ -1,5 +1,5 @@
-//go:build !unix && !windows
-// +build !unix,!windows
+//go:build !linux && !windows
+// +build !linux,!windows
 
 package sys
 

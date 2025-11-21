@@ -22,6 +22,7 @@ func Preallocate(f FileHandle, size int64) error {
 
 	fg, ok := f.(interface{ Fd() uintptr })
 	if !ok {
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 	fd := int(fg.Fd())
@@ -34,6 +35,7 @@ func Preallocate(f FileHandle, size int64) error {
 		if allow, ok := preallocCacheLoad(dev); ok {
 			preallocCacheHit()
 			if !allow {
+				preallocUnsupportedInc()
 				return ErrPreallocNotSupported
 			}
 			// cached allowed: attempt allocation below
@@ -56,6 +58,7 @@ func Preallocate(f FileHandle, size int64) error {
 		if dev != 0 {
 			preallocCacheStore(dev, true)
 		}
+		preallocSuccessInc()
 		return nil
 	}
 
@@ -66,6 +69,7 @@ func Preallocate(f FileHandle, size int64) error {
 		if dev != 0 {
 			preallocCacheStore(dev, true)
 		}
+		preallocSuccessInc()
 		return nil
 	}
 
@@ -74,14 +78,17 @@ func Preallocate(f FileHandle, size int64) error {
 		if dev != 0 {
 			preallocCacheStore(dev, false)
 		}
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 	if errno2 == unix.ENOTSUP || errno2 == unix.EINVAL || errno2 == unix.ENOSYS {
 		if dev != 0 {
 			preallocCacheStore(dev, false)
 		}
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 
+	preallocFailureInc()
 	return errors.New(fmt.Sprintf("darwin preallocation failed: err1=%v err2=%v", errno, errno2))
 }

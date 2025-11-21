@@ -24,6 +24,7 @@ func Preallocate(f FileHandle, size int64) error {
 	// The underlying FileInterface should expose Fd()
 	fg, ok := f.(interface{ Fd() uintptr })
 	if !ok {
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 
@@ -40,6 +41,7 @@ func Preallocate(f FileHandle, size int64) error {
 		if allow, ok := preallocCacheLoad(dev); ok {
 			preallocCacheHit()
 			if !allow {
+				preallocUnsupportedInc()
 				return ErrPreallocNotSupported
 			}
 			// cached allowed: attempt allocation and return based on result
@@ -48,11 +50,14 @@ func Preallocate(f FileHandle, size int64) error {
 			}
 			info := fileAllocInfo{AllocationSize: int64(size)}
 			if err := windows.SetFileInformationByHandle(h, windows.FileAllocationInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err == nil {
+				preallocSuccessInc()
 				return nil
 			} else {
 				if errors.Is(err, windows.ERROR_INVALID_FUNCTION) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED) {
+					preallocUnsupportedInc()
 					return ErrPreallocNotSupported
 				}
+				preallocFailureInc()
 				return fmt.Errorf("windows preallocation failed: %w", err)
 			}
 		}
@@ -71,6 +76,7 @@ func Preallocate(f FileHandle, size int64) error {
 		if dev != 0 {
 			preallocCacheStore(dev, true)
 		}
+		preallocSuccessInc()
 		return nil
 	}
 
@@ -81,8 +87,10 @@ func Preallocate(f FileHandle, size int64) error {
 		if dev != 0 {
 			preallocCacheStore(dev, false)
 		}
+		preallocUnsupportedInc()
 		return ErrPreallocNotSupported
 	}
 
+	preallocFailureInc()
 	return fmt.Errorf("windows preallocation failed: %w", err)
 }

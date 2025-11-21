@@ -87,6 +87,12 @@ type StorageEngineOptions struct {
 	Logger                         *slog.Logger
 	Clock                          clock.Clock
 
+	// EnableSSTablePreallocate controls whether the engine will attempt to
+	// preallocate space for new SSTable segment files. This setting is
+	// provided by configuration and can be used to disable preallocation
+	// on platforms or deployments where it's undesirable.
+	EnableSSTablePreallocate bool
+
 	SelfMonitoringEnabled      bool
 	SelfMonitoringPrefix       string
 	SelfMonitoringIntervalMs   int
@@ -584,6 +590,18 @@ func (e *storageEngine) initializeMetrics() {
 			_, _, _, s := core.BufferPool.GetMetrics()
 			return s
 		})
+
+		// Publish preallocation counters from the sys package so operators can
+		// observe how often preallocation succeeds, fails, or is unsupported.
+		publishExpvarFunc("engine_prealloc_successes_total", func() interface{} {
+			return int64(sys.PreallocSuccessCount())
+		})
+		publishExpvarFunc("engine_prealloc_failures_total", func() interface{} {
+			return int64(sys.PreallocFailureCount())
+		})
+		publishExpvarFunc("engine_prealloc_unsupported_total", func() interface{} {
+			return int64(sys.PreallocUnsupportedCount())
+		})
 		publishExpvarFunc("engine_memtable_key_pool_hits_total", func() any {
 			h, _, _ := memtable.KeyPool.GetMetrics()
 			return h
@@ -614,6 +632,27 @@ func (e *storageEngine) initializeMetrics() {
 		e.activeSeriesMu.RLock()
 		defer e.activeSeriesMu.RUnlock()
 		return len(e.activeSeries)
+	}
+
+	// Expose whether SSTable preallocation is enabled via metrics (1 = enabled, 0 = disabled)
+	if e.metrics.PreallocateEnabled != nil {
+		if e.opts.EnableSSTablePreallocate {
+			e.metrics.PreallocateEnabled.Set(1)
+		} else {
+			e.metrics.PreallocateEnabled.Set(0)
+		}
+	}
+
+	// Populate the preallocation counters initially so non-global metric
+	// collectors still have baseline values.
+	if e.metrics.PreallocSuccesses != nil {
+		e.metrics.PreallocSuccesses.Set(int64(sys.PreallocSuccessCount()))
+	}
+	if e.metrics.PreallocFailures != nil {
+		e.metrics.PreallocFailures.Set(int64(sys.PreallocFailureCount()))
+	}
+	if e.metrics.PreallocUnsupported != nil {
+		e.metrics.PreallocUnsupported.Set(int64(sys.PreallocUnsupportedCount()))
 	}
 	e.metrics.mutableMemtableSizeFunc = func() interface{} {
 		e.mu.RLock()
