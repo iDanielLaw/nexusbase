@@ -27,6 +27,7 @@ func TestManifestManagerStartupLoadsExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManifestManager failed: %v", err)
 	}
+	defer mgr.Close()
 
 	got := mgr.ListEntries()
 	if len(got) != len(entries) {
@@ -47,6 +48,7 @@ func TestManifestManagerConcurrentAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManifestManager failed: %v", err)
 	}
+	defer mgr.Close()
 
 	var wg sync.WaitGroup
 	var errOnce atomic.Uint32
