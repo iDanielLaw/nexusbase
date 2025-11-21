@@ -271,6 +271,46 @@ func (m *MockQueryResultIterator) At() (*core.QueryResultItem, error) {
 	return m.items[m.index], nil
 }
 
+// AtValue returns a value-copy of the current item. This mirrors the
+// behavior of real iterators that offer AtValue() for callers who need
+// stable copies independent of iterator internal buffers.
+func (m *MockQueryResultIterator) AtValue() (core.QueryResultItem, error) {
+	if m.index < 0 || m.index >= len(m.items) {
+		panic("MockQueryResultIterator: AtValue() called out of bounds")
+	}
+	src := m.items[m.index]
+	out := core.QueryResultItem{
+		Metric:          src.Metric,
+		Timestamp:       src.Timestamp,
+		IsAggregated:    src.IsAggregated,
+		WindowStartTime: src.WindowStartTime,
+		WindowEndTime:   src.WindowEndTime,
+		IsEvent:         src.IsEvent,
+	}
+	if src.Tags != nil {
+		tags := make(map[string]string, len(src.Tags))
+		for k, v := range src.Tags {
+			tags[k] = v
+		}
+		out.Tags = tags
+	}
+	if src.Fields != nil {
+		fv := make(core.FieldValues, len(src.Fields))
+		for k, v := range src.Fields {
+			fv[k] = v
+		}
+		out.Fields = fv
+	}
+	if src.AggregatedValues != nil {
+		av := make(map[string]float64, len(src.AggregatedValues))
+		for k, v := range src.AggregatedValues {
+			av[k] = v
+		}
+		out.AggregatedValues = av
+	}
+	return out, nil
+}
+
 func (m *MockQueryResultIterator) Error() error {
 	return m.err
 }
