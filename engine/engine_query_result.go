@@ -175,3 +175,47 @@ func (it *QueryResultIterator) At() (*core.QueryResultItem, error) {
 	}
 	return result, nil
 }
+
+// AtValue returns a value-copy of the current QueryResultItem. It calls
+// At() to decode into a pooled item, shallow-copies maps and fields into
+// a new value, returns the pooled item to the pool via Put(), and returns
+// the safe copy to the caller.
+func (it *QueryResultIterator) AtValue() (core.QueryResultItem, error) {
+	pooled, err := it.At()
+	if err != nil {
+		return core.QueryResultItem{}, err
+	}
+	// shallow copy struct fields
+	out := core.QueryResultItem{
+		Metric:          pooled.Metric,
+		Timestamp:       pooled.Timestamp,
+		IsAggregated:    pooled.IsAggregated,
+		WindowStartTime: pooled.WindowStartTime,
+		WindowEndTime:   pooled.WindowEndTime,
+		IsEvent:         pooled.IsEvent,
+	}
+	if pooled.Tags != nil {
+		tags := make(map[string]string, len(pooled.Tags))
+		for k, v := range pooled.Tags {
+			tags[k] = v
+		}
+		out.Tags = tags
+	}
+	if pooled.Fields != nil {
+		fv := make(core.FieldValues, len(pooled.Fields))
+		for k, v := range pooled.Fields {
+			fv[k] = v
+		}
+		out.Fields = fv
+	}
+	if pooled.AggregatedValues != nil {
+		av := make(map[string]float64, len(pooled.AggregatedValues))
+		for k, v := range pooled.AggregatedValues {
+			av[k] = v
+		}
+		out.AggregatedValues = av
+	}
+	// return pooled item to pool
+	it.Put(pooled)
+	return out, nil
+}

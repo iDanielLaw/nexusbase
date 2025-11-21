@@ -115,7 +115,7 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 	if a.mem == nil {
 		return nil, fmt.Errorf("engine2 not initialized")
 	}
-	return newStreamingMemQueryIterator(a.mem, params), nil
+	return getPooledIterator(a.mem, params), nil
 }
 func (a *Engine2Adapter) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
 	return nil, fmt.Errorf("GetSeriesByTags not implemented in engine2 adapter")

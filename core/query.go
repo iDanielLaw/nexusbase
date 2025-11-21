@@ -54,11 +54,21 @@ type QueryResultItem struct {
 	AggregatedValues map[string]float64
 }
 
-// QueryResultIteratorInterface defines the iterator for query results.
-type QueryResultIteratorInterface interface {
+// QueryIterator defines the iterator surface for query results. It is
+// non-breaking to add methods here if callers adopt the narrower
+// `QueryIterator` type; implementations should provide `AtValue()` which
+// returns a safe value copy of the current item.
+type QueryIterator interface {
 	IteratorPoolInterface[*QueryResultItem]
-	UnderlyingAt() (*IteratorNode, error) // Expose raw data for cursor creation
+	// AtValue returns a value-copy of the current QueryResultItem which is
+	// safe to retain after advancing the iterator.
+	AtValue() (QueryResultItem, error)
+	UnderlyingAt() (*IteratorNode, error)
 }
+
+// QueryResultIteratorInterface is the original name kept for compatibility
+// and now aliases the richer `QueryIterator`.
+type QueryResultIteratorInterface = QueryIterator
 
 func (it *QueryResultItem) TypeNode() string {
 	return "QUERYITERATOR"

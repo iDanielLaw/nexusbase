@@ -2,6 +2,7 @@ package engine2
 
 import (
 	"sort"
+	"sync"
 
 	"github.com/INLOpen/nexusbase/core"
 )
@@ -73,6 +74,70 @@ func newStreamingMemQueryIterator(m *Memtable, params core.QueryParams) *memQuer
 	return it
 }
 
+// iterator pool
+var memIterPool sync.Pool
+
+func init() {
+	memIterPool = sync.Pool{New: func() any { return &memQueryIterator{} }}
+}
+
+// getPooledIterator obtains an iterator from the pool and initializes it.
+func getPooledIterator(m *Memtable, params core.QueryParams) *memQueryIterator {
+	it := memIterPool.Get().(*memQueryIterator)
+	// reset fields
+	it.params = params
+	it.metric = params.Metric
+	it.metricIdx = nil
+	it.metricIndex = nil
+	it.tagKeys = it.tagKeys[:0]
+	it.tagPos = 0
+	it.tsList = nil
+	it.tsPos = 0
+	it.builtFromP = false
+	it.curr = core.QueryResultItem{}
+	it.err = nil
+
+	// snapshot under lock similar to constructor
+	m.mu.RLock()
+	it.metricIdx, _ = m.data[params.Metric]
+	if m.index != nil {
+		if mi, ok := m.index[params.Metric]; ok {
+			it.metricIndex = mi
+		}
+	}
+	for tagKey, tagIdx := range it.metricIdx {
+		if _, hasSeriesTomb := tagIdx[-1]; hasSeriesTomb {
+			continue
+		}
+		tags := parseTagsFromKey(tagKey)
+		match := true
+		for qk, qv := range params.Tags {
+			if tv, ok := tags[qk]; !ok || tv != qv {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		it.tagKeys = append(it.tagKeys, tagKey)
+	}
+	m.mu.RUnlock()
+
+	return it
+}
+
+func releasePooledIterator(it *memQueryIterator) {
+	// clear references to avoid memory leaks
+	it.metricIdx = nil
+	it.metricIndex = nil
+	it.tagKeys = nil
+	it.tsList = nil
+	it.curr = core.QueryResultItem{}
+	it.err = nil
+	memIterPool.Put(it)
+}
+
 func (it *memQueryIterator) Next() bool {
 	// loop until we find a valid item or exhaust tagKeys
 	for {
@@ -135,6 +200,50 @@ func (it *memQueryIterator) At() (*core.QueryResultItem, error) {
 	return &it.curr, nil
 }
 
+// AtValue returns a value copy of the current QueryResultItem. This is
+// safe for callers that need to retain the result beyond the lifetime of
+// the iterator's current buffer (i.e. they don't want the reused pointer
+// from At()). Maps inside the result are shallow-copied.
+func (it *memQueryIterator) AtValue() (core.QueryResultItem, error) {
+	if it.err != nil {
+		return core.QueryResultItem{}, it.err
+	}
+	// shallow copy of the struct
+	out := core.QueryResultItem{
+		Metric:          it.curr.Metric,
+		Timestamp:       it.curr.Timestamp,
+		IsAggregated:    it.curr.IsAggregated,
+		WindowStartTime: it.curr.WindowStartTime,
+		WindowEndTime:   it.curr.WindowEndTime,
+		IsEvent:         it.curr.IsEvent,
+	}
+	// copy Tags map
+	if it.curr.Tags != nil {
+		tags := make(map[string]string, len(it.curr.Tags))
+		for k, v := range it.curr.Tags {
+			tags[k] = v
+		}
+		out.Tags = tags
+	}
+	// copy Fields (FieldValues is a map[string]PointValue)
+	if it.curr.Fields != nil {
+		fv := make(core.FieldValues, len(it.curr.Fields))
+		for k, v := range it.curr.Fields {
+			fv[k] = v
+		}
+		out.Fields = fv
+	}
+	// copy AggregatedValues
+	if it.curr.AggregatedValues != nil {
+		av := make(map[string]float64, len(it.curr.AggregatedValues))
+		for k, v := range it.curr.AggregatedValues {
+			av[k] = v
+		}
+		out.AggregatedValues = av
+	}
+	return out, nil
+}
+
 func (it *memQueryIterator) Error() error { return it.err }
 
 func (it *memQueryIterator) Close() error {
@@ -143,6 +252,8 @@ func (it *memQueryIterator) Close() error {
 		putTsSlice(it.tsList)
 		it.tsList = nil
 	}
+	// return iterator to pool for reuse
+	releasePooledIterator(it)
 	return nil
 }
 
