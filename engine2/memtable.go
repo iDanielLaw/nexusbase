@@ -72,6 +72,23 @@ func putTsSlice(s []int64) {
 }
 
 // Memtable is a simple in-memory store keyed by metric|sortedtags|timestamp
+// Memtable is a simple in-memory store keyed by metric|sortedtags|timestamp
+//
+// Snapshot semantics and copy-on-write expectations:
+//   - Consumers (iterators) snapshot the memtable by taking references to
+//     the `data` and `index` maps under `RLock` and then release the lock.
+//     After the lock is released readers may still hold references to inner
+//     maps and to the timestamp `[]int64` slices stored in `index`.
+//   - To avoid unsafe concurrent access and subtle races, writers must not
+//     mutate the underlying arrays or slices in place. Instead, on any
+//     modification (insert/remove) writers should allocate new slices or
+//     maps and assign them into the parent map (copy-on-write). This keeps
+//     previously taken snapshots valid for readers while allowing writers to
+//     update state safely.
+//
+// The implementation relies on this pattern: readers see a consistent
+// snapshot without holding locks during iteration; writers allocate fresh
+// slices when changing per-tag timestamp lists.
 type Memtable struct {
 	mu sync.RWMutex
 	// nested index: metric -> tagsKey -> timestamp -> FieldValues (nil means tombstone)
@@ -154,10 +171,13 @@ func (m *Memtable) Put(dp *core.DataPoint) {
 	if i < len(tsList) && tsList[i] == dp.Timestamp {
 		// already present
 	} else {
-		tsList = append(tsList, 0)
-		copy(tsList[i+1:], tsList[i:])
-		tsList[i] = dp.Timestamp
-		metricIndex[tkey] = tsList
+		// create a new slice and copy elements to avoid mutating any shared
+		// underlying array that may be referenced by readers (snapshot).
+		newList := make([]int64, len(tsList)+1)
+		copy(newList, tsList[:i])
+		newList[i] = dp.Timestamp
+		copy(newList[i+1:], tsList[i:])
+		metricIndex[tkey] = newList
 	}
 }
 
@@ -183,8 +203,12 @@ func (m *Memtable) Delete(metric string, tags map[string]string, ts int64) {
 		if tsList, ok := metricIndex[tkey]; ok {
 			i := sort.Search(len(tsList), func(i int) bool { return tsList[i] >= ts })
 			if i < len(tsList) && tsList[i] == ts {
-				tsList = append(tsList[:i], tsList[i+1:]...)
-				metricIndex[tkey] = tsList
+				// build a new slice without the removed element to avoid
+				// mutating an underlying array that readers may hold.
+				newList := make([]int64, 0, len(tsList)-1)
+				newList = append(newList, tsList[:i]...)
+				newList = append(newList, tsList[i+1:]...)
+				metricIndex[tkey] = newList
 			}
 		}
 	}
