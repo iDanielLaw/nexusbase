@@ -1,6 +1,7 @@
 package engine2
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,17 @@ type ManifestManager struct {
 	mu           sync.RWMutex
 	entries      []SSTableManifestEntry
 	manifestPath string
+	// background queue for serializing manifest writes to disk. Entries are
+	// sent to the queue and processed by a single worker goroutine which
+	// performs persistence and updates the in-memory view.
+	queue       chan queuedEntry
+	shutdownCh  chan struct{}
+	workerClose sync.WaitGroup
+}
+
+type queuedEntry struct {
+	e    SSTableManifestEntry
+	resp chan error
 }
 
 // NewManifestManager constructs a manager for the given manifest path and loads
@@ -23,6 +35,11 @@ func NewManifestManager(manifestPath string) (*ManifestManager, error) {
 	if err := m.loadFromDisk(); err != nil {
 		return nil, err
 	}
+	// initialize background queue and worker
+	m.queue = make(chan queuedEntry, 1024)
+	m.shutdownCh = make(chan struct{})
+	m.workerClose.Add(1)
+	go m.manifestWriter()
 	return m, nil
 }
 
@@ -51,30 +68,62 @@ func (m *ManifestManager) Reload() error {
 
 // AddEntry persists the new entry and updates the in-memory state.
 func (m *ManifestManager) AddEntry(e SSTableManifestEntry) error {
-	// Persist by reading latest on-disk manifest, appending, saving, and
-	// finally updating in-memory state. This reduces chances of overwriting
-	// concurrent external updates and ensures in-memory state reflects
-	// successfully persisted data.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Load latest on-disk manifest
-	diskManifest, err := LoadManifest(m.manifestPath)
-	if err != nil {
-		return err
+	// Enqueue the entry and wait for the background writer to persist it.
+	qe := queuedEntry{e: e, resp: make(chan error, 1)}
+	select {
+	case m.queue <- qe:
+		// submitted
+	case <-m.shutdownCh:
+		return fmt.Errorf("manifest manager shutting down")
 	}
-	newEntries := make([]SSTableManifestEntry, 0, len(diskManifest.Entries)+1)
-	newEntries = append(newEntries, diskManifest.Entries...)
-	newEntries = append(newEntries, e)
+	// wait for result
+	return <-qe.resp
+}
 
-	// Persist the new manifest first
-	if err := SaveManifest(m.manifestPath, SSTableManifest{Entries: newEntries}); err != nil {
-		return err
+// Close stops the background writer and waits for outstanding work to finish.
+func (m *ManifestManager) Close() {
+	// Idempotent close
+	select {
+	case <-m.shutdownCh:
+		return
+	default:
 	}
+	close(m.shutdownCh)
+	// drain queue to avoid blocking producer callers (should be none in tests)
+	// wait for worker to finish
+	m.workerClose.Wait()
+}
 
-	// Update in-memory view to match persisted manifest
-	m.entries = newEntries
-	return nil
+// manifestWriter runs as a single background goroutine processing queued entries.
+func (m *ManifestManager) manifestWriter() {
+	defer m.workerClose.Done()
+	for {
+		select {
+		case qe := <-m.queue:
+			// Perform read-modify-write persist for this single entry.
+			// Load latest manifest from disk to merge any external changes.
+			diskManifest, err := LoadManifest(m.manifestPath)
+			if err != nil {
+				qe.resp <- err
+				continue
+			}
+			newEntries := make([]SSTableManifestEntry, 0, len(diskManifest.Entries)+1)
+			newEntries = append(newEntries, diskManifest.Entries...)
+			newEntries = append(newEntries, qe.e)
+			// Persist
+			if err := SaveManifest(m.manifestPath, SSTableManifest{Entries: newEntries}); err != nil {
+				qe.resp <- err
+				continue
+			}
+			// Update in-memory view under lock
+			m.mu.Lock()
+			m.entries = newEntries
+			m.mu.Unlock()
+			qe.resp <- nil
+		case <-m.shutdownCh:
+			return
+		}
+	}
 }
 
 // ListEntries returns a copy of current manifest entries.
