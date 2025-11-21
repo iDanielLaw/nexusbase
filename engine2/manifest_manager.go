@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // ManifestManager maintains an in-memory view of the SSTable manifest and
@@ -97,29 +98,56 @@ func (m *ManifestManager) Close() {
 // manifestWriter runs as a single background goroutine processing queued entries.
 func (m *ManifestManager) manifestWriter() {
 	defer m.workerClose.Done()
+	const maxBatch = 128
+	const batchWait = 2 * time.Millisecond
+
 	for {
 		select {
-		case qe := <-m.queue:
-			// Perform read-modify-write persist for this single entry.
-			// Load latest manifest from disk to merge any external changes.
+		case first := <-m.queue:
+			// Start a batch with the first entry
+			batch := []queuedEntry{first}
+			// Collect additional entries up to maxBatch or until timeout
+		collectLoop:
+			for len(batch) < maxBatch {
+				select {
+				case more := <-m.queue:
+					batch = append(batch, more)
+				case <-time.After(batchWait):
+					// small wait window to collect more writers
+					break collectLoop
+				case <-m.shutdownCh:
+					// stop collecting further entries
+					break collectLoop
+				}
+			}
+
+			// Perform read-modify-write persist for the entire batch.
 			diskManifest, err := LoadManifest(m.manifestPath)
 			if err != nil {
-				qe.resp <- err
+				for _, be := range batch {
+					be.resp <- err
+				}
 				continue
 			}
-			newEntries := make([]SSTableManifestEntry, 0, len(diskManifest.Entries)+1)
+			newEntries := make([]SSTableManifestEntry, 0, len(diskManifest.Entries)+len(batch))
 			newEntries = append(newEntries, diskManifest.Entries...)
-			newEntries = append(newEntries, qe.e)
-			// Persist
+			for _, be := range batch {
+				newEntries = append(newEntries, be.e)
+			}
+			// Persist once for the batch
 			if err := SaveManifest(m.manifestPath, SSTableManifest{Entries: newEntries}); err != nil {
-				qe.resp <- err
+				for _, be := range batch {
+					be.resp <- err
+				}
 				continue
 			}
 			// Update in-memory view under lock
 			m.mu.Lock()
 			m.entries = newEntries
 			m.mu.Unlock()
-			qe.resp <- nil
+			for _, be := range batch {
+				be.resp <- nil
+			}
 		case <-m.shutdownCh:
 			return
 		}
