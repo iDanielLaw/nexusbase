@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/INLOpen/nexusbase/core"
 )
 
 var (
@@ -22,6 +24,8 @@ var (
 type Engine2 struct {
 	dataRoot string
 	mu       sync.Mutex
+	wal      *WAL
+	mem      *Memtable
 }
 
 // NewEngine2 constructs a new Engine2 rooted at dataRoot.
@@ -32,7 +36,23 @@ func NewEngine2(dataRoot string) (*Engine2, error) {
 	if err := os.MkdirAll(dataRoot, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data root: %w", err)
 	}
-	return &Engine2{dataRoot: dataRoot}, nil
+	// initialize wal and memtable
+	walPath := filepath.Join(dataRoot, "wal", "engine.wal")
+	w, err := NewWAL(walPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create WAL: %w", err)
+	}
+	m := NewMemtable()
+
+	// replay WAL into memtable
+	if err := w.Replay(func(dp *core.DataPoint) error {
+		m.Put(dp)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to replay WAL: %w", err)
+	}
+
+	return &Engine2{dataRoot: dataRoot, wal: w, mem: m}, nil
 }
 
 func (e *Engine2) GetDataRoot() string { return e.dataRoot }
