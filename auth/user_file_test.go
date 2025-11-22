@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/INLOpen/nexusbase/sys"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -65,7 +66,7 @@ func TestUserFile_ReadWrite(t *testing.T) {
 			}
 
 			// Clean up for next test case
-			os.Remove(userFilePath)
+			sys.Remove(userFilePath)
 		})
 	}
 }

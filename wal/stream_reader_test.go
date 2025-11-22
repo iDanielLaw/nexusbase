@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/INLOpen/nexusbase/sys"
+
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -354,7 +356,7 @@ func TestStreamReader_OpenSegmentError(t *testing.T) {
 	// Corrupt the setup AFTER the reader has been created:
 	// Replace the first segment file with a directory.
 	segment1Path := filepath.Join(tempDir, core.FormatSegmentFileName(1))
-	require.NoError(t, os.Remove(segment1Path))
+	require.NoError(t, sys.Remove(segment1Path))
 	require.NoError(t, os.Mkdir(segment1Path, 0755))
 
 	// Act: Call Next(), which should trigger openNextAvailableSegmentLocked and fail.

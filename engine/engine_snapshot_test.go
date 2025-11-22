@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -200,7 +201,7 @@ func TestEngine_RestoreFromSnapshot_ErrorHandling(t *testing.T) {
 		defer cleanup()
 
 		// Delete the CURRENT file
-		require.NoError(t, os.Remove(filepath.Join(snapshotPath, "CURRENT")))
+		require.NoError(t, sys.Remove(filepath.Join(snapshotPath, "CURRENT")))
 
 		err := destEngine.RestoreFromSnapshot(ctx, snapshotPath, true)
 		require.Error(t, err)

@@ -279,7 +279,7 @@ func (e *storageEngine) Start() error {
 		return fmt.Errorf("data directory %s is not writable: %w", e.opts.DataDir, testErr)
 	} else {
 		_ = testFile.Close()
-		_ = os.Remove(testFilePath)
+		_ = sys.Remove(testFilePath)
 	}
 
 	e.initializeMetrics()

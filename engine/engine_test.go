@@ -16,6 +16,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -515,7 +516,7 @@ func TestStorageEngine_VerifyDataConsistency(t *testing.T) {
 		}
 		for _, file := range files {
 			if !file.IsDir() {
-				if err := os.Remove(filepath.Join(engineDir, file.Name())); err != nil {
+				if err := sys.Remove(filepath.Join(engineDir, file.Name())); err != nil {
 					t.Fatalf("Failed to remove auxiliary file %s: %v", file.Name(), err)
 				}
 			}
@@ -558,7 +559,7 @@ func TestStorageEngine_Recovery_FallbackScan(t *testing.T) {
 		// To properly test the fallback recovery path (`scanDataDirAndLoadToL0`), we must
 		// remove the CURRENT file. This makes the primary recovery path (from MANIFEST)
 		// fail with os.ErrNotExist, which correctly triggers the fallback logic.
-		require.NoError(t, os.Remove(filepath.Join(dataDir, core.CurrentFileName)))
+		require.NoError(t, sys.Remove(filepath.Join(dataDir, core.CurrentFileName)))
 	}
 
 	// --- Phase 2: Create a new engine, which should load the state via fallback scan ---

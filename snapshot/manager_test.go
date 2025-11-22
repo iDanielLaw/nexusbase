@@ -677,7 +677,7 @@ func TestManager_CreateFull_SSTableCopyError(t *testing.T) {
 	// 2. Simulate the error condition
 	// Remove the source SSTable file *after* it's been registered with the
 	// levels manager but *before* the snapshot process tries to copy it.
-	require.NoError(t, os.Remove(sst1.FilePath()))
+	require.NoError(t, sys.Remove(sst1.FilePath()))
 
 	// 3. Execution
 	manager := NewManager(provider)
