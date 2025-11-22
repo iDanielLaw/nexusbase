@@ -40,6 +40,8 @@ type Engine2Adapter struct {
 	manifestMgr *ManifestManager
 	// optional hook manager passed from hosting engine/server
 	hookManager hooks.HookManager
+	// leader WAL (from wal package) exposed to replication/snapshot subsystems
+	leaderWal wal.WALInterface
 }
 
 // NewEngine2Adapter wraps an existing Engine2.
@@ -83,6 +85,12 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 		return fmt.Errorf("wal append failed: %w", err)
 	}
 	a.mem.Put(&point)
+	// Also append a core.WALEntry to leader WAL so replication can stream it.
+	if a.leaderWal != nil {
+		if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
+			_ = a.leaderWal.Append(*entry)
+		}
+	}
 	return nil
 }
 func (a *Engine2Adapter) PutBatch(ctx context.Context, points []core.DataPoint) error {
@@ -95,6 +103,11 @@ func (a *Engine2Adapter) PutBatch(ctx context.Context, points []core.DataPoint) 
 			return fmt.Errorf("wal append failed: %w", err)
 		}
 		a.mem.Put(&p)
+		if a.leaderWal != nil {
+			if entry, encErr := a.encodeDataPointToWALEntry(&p); encErr == nil {
+				_ = a.leaderWal.Append(*entry)
+			}
+		}
 	}
 	return nil
 }
@@ -120,6 +133,14 @@ func (a *Engine2Adapter) Delete(ctx context.Context, metric string, tags map[str
 		return fmt.Errorf("wal append failed: %w", err)
 	}
 	a.mem.Delete(metric, tags, timestamp)
+	if a.leaderWal != nil {
+		// build delete WALEntry
+		if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
+			// mark as delete event
+			entry.EntryType = core.EntryTypeDelete
+			_ = a.leaderWal.Append(*entry)
+		}
+	}
 	return nil
 }
 func (a *Engine2Adapter) DeleteSeries(ctx context.Context, metric string, tags map[string]string) error {
@@ -132,6 +153,12 @@ func (a *Engine2Adapter) DeleteSeries(ctx context.Context, metric string, tags m
 		return fmt.Errorf("wal append failed: %w", err)
 	}
 	a.mem.DeleteSeries(metric, tags)
+	if a.leaderWal != nil {
+		if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
+			entry.EntryType = core.EntryTypeDelete
+			_ = a.leaderWal.Append(*entry)
+		}
+	}
 	return nil
 }
 func (a *Engine2Adapter) DeletesByTimeRange(ctx context.Context, metric string, tags map[string]string, startTime, endTime int64) error {
@@ -145,6 +172,12 @@ func (a *Engine2Adapter) DeletesByTimeRange(ctx context.Context, metric string, 
 			return fmt.Errorf("wal append failed: %w", err)
 		}
 		a.mem.Delete(metric, tags, ts)
+		if a.leaderWal != nil {
+			if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
+				entry.EntryType = core.EntryTypeDelete
+				_ = a.leaderWal.Append(*entry)
+			}
+		}
 	}
 	return nil
 }
@@ -330,6 +363,14 @@ func (a *Engine2Adapter) Start() error {
 			return err
 		}
 	}
+	// Create/open leader WAL (wal package) for replication/snapshot features
+	if a.leaderWal == nil && a.Engine2 != nil {
+		lw, err := openLeaderWAL(a.Engine2.GetDataRoot())
+		if err != nil {
+			return err
+		}
+		a.leaderWal = lw
+	}
 	return nil
 }
 func (a *Engine2Adapter) Close() error {
@@ -347,6 +388,10 @@ func (a *Engine2Adapter) Close() error {
 	if a.manifestMgr != nil {
 		a.manifestMgr.Close()
 	}
+	// close leader WAL if present
+	if a.leaderWal != nil {
+		_ = a.leaderWal.Close()
+	}
 	// drop memtable reference
 	a.mem = nil
 	return nil
@@ -363,11 +408,42 @@ func (a *Engine2Adapter) GetDLQDir() string                             { return
 func (a *Engine2Adapter) GetDataDir() string                            { return a.dataRoot }
 func (a *Engine2Adapter) GetWALPath() string                            { return filepath.Join(a.dataRoot, "wal") }
 func (a *Engine2Adapter) GetClock() clock.Clock                         { return clock.SystemClockDefault }
-func (a *Engine2Adapter) GetWAL() wal.WALInterface                      { return nil }
+func (a *Engine2Adapter) GetWAL() wal.WALInterface                      { return a.leaderWal }
 func (a *Engine2Adapter) GetStringStore() indexer.StringStoreInterface  { return a.stringStore }
 func (a *Engine2Adapter) GetSnapshotManager() snapshot.ManagerInterface { return nil }
 
 func (a *Engine2Adapter) GetSequenceNumber() uint64 { return 0 }
+
+// encodeDataPointToWALEntry converts an engine2 DataPoint into a core.WALEntry
+// suitable for appending to the repo WAL (used by replication). It uses the
+// adapter's `stringStore` to map metric and tag strings to numeric IDs.
+func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WALEntry, error) {
+	if a.stringStore == nil {
+		return nil, fmt.Errorf("string store not initialized")
+	}
+	// metric id
+	metricID, _ := a.stringStore.GetOrCreateID(dp.Metric)
+	// build encoded tag pairs
+	var pairs []core.EncodedSeriesTagPair
+	for k, v := range dp.Tags {
+		kid, _ := a.stringStore.GetOrCreateID(k)
+		vid, _ := a.stringStore.GetOrCreateID(v)
+		pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
+	}
+	// sort by KeyID for canonical ordering
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
+
+	key := core.EncodeTSDBKey(metricID, pairs, dp.Timestamp)
+
+	if dp.Fields == nil || len(dp.Fields) == 0 {
+		return &core.WALEntry{EntryType: core.EntryTypeDelete, Key: key, Value: nil}, nil
+	}
+	vb, err := dp.Fields.Encode()
+	if err != nil {
+		return nil, err
+	}
+	return &core.WALEntry{EntryType: core.EntryTypePutEvent, Key: key, Value: vb}, nil
+}
 
 // GetKnownSSTables returns the manifest entries currently known by the engine2 adapter.
 func (a *Engine2Adapter) GetKnownSSTables() ([]SSTableManifestEntry, error) {
