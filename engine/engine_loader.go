@@ -2,8 +2,10 @@ package engine
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -151,9 +153,16 @@ func (sl *StateLoader) loadStateFromDisk() (bool, error) {
 			return false, fmt.Errorf("failed to read deleted_series file %s: %w", deletedSeriesFile, readErr)
 		}
 		var ds map[string]uint64
-		if unmarshalErr := json.Unmarshal(data, &ds); unmarshalErr != nil {
-			sl.logger.Error("Failed to unmarshal deleted_series file from manifest.", "file", deletedSeriesFile, "error", unmarshalErr)
-			return false, fmt.Errorf("failed to unmarshal deleted_series file %s: %w", deletedSeriesFile, unmarshalErr)
+		// Try gob (binary) decode first, then fall back to JSON for backward compatibility
+		var decodeErr error
+		decodeErr = gob.NewDecoder(bytes.NewReader(data)).Decode(&ds)
+		if decodeErr != nil {
+			// Attempt JSON fallback
+			decodeErr = json.Unmarshal(data, &ds)
+		}
+		if decodeErr != nil {
+			sl.logger.Error("Failed to decode deleted_series file from manifest.", "file", deletedSeriesFile, "error", decodeErr)
+			return false, fmt.Errorf("failed to decode deleted_series file %s: %w", deletedSeriesFile, decodeErr)
 		}
 		sl.engine.deletedSeriesMu.Lock()
 		sl.engine.deletedSeries = ds
@@ -169,9 +178,16 @@ func (sl *StateLoader) loadStateFromDisk() (bool, error) {
 			return false, fmt.Errorf("failed to read range_tombstones file %s: %w", rangeTombstonesFile, readErr)
 		}
 		var rt map[string][]core.RangeTombstone
-		if unmarshalErr := json.Unmarshal(data, &rt); unmarshalErr != nil {
-			sl.logger.Error("Failed to unmarshal range_tombstones file from manifest.", "file", rangeTombstonesFile, "error", unmarshalErr)
-			return false, fmt.Errorf("failed to unmarshal range_tombstones file %s: %w", rangeTombstonesFile, unmarshalErr)
+		// Try gob (binary) decode first, then fall back to JSON for backward compatibility
+		var decodeErr error
+		decodeErr = gob.NewDecoder(bytes.NewReader(data)).Decode(&rt)
+		if decodeErr != nil {
+			// Attempt JSON fallback
+			decodeErr = json.Unmarshal(data, &rt)
+		}
+		if decodeErr != nil {
+			sl.logger.Error("Failed to decode range_tombstones file from manifest.", "file", rangeTombstonesFile, "error", decodeErr)
+			return false, fmt.Errorf("failed to decode range_tombstones file %s: %w", rangeTombstonesFile, decodeErr)
 		}
 		sl.engine.rangeTombstonesMu.Lock()
 		sl.engine.rangeTombstones = rt

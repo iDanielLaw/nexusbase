@@ -442,8 +442,8 @@ func (e *storageEngine) wipeDataDirectory() error {
 		filepath.Join(e.opts.DataDir, "string_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series.log"),
-		filepath.Join(e.opts.DataDir, "deleted_series.json"),
-		filepath.Join(e.opts.DataDir, "range_tombstones.json"),
+		filepath.Join(e.opts.DataDir, "deleted_series.bin"),
+		filepath.Join(e.opts.DataDir, "range_tombstones.bin"),
 		filepath.Join(e.opts.DataDir, "tag_index"),
 	}
 

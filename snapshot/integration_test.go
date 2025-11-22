@@ -347,8 +347,8 @@ func TestSnapshot_E2E_CreateAndRestore(t *testing.T) {
 	assert.FileExists(t, filepath.Join(snapshotDir, "sst", "2.sst"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "wal", "00000001.wal"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "index", core.IndexManifestFileName))
-	assert.FileExists(t, filepath.Join(snapshotDir, "deleted_series.json"))
-	assert.FileExists(t, filepath.Join(snapshotDir, "range_tombstones.json"))
+	assert.FileExists(t, filepath.Join(snapshotDir, "deleted_series.bin"))
+	assert.FileExists(t, filepath.Join(snapshotDir, "range_tombstones.bin"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "string_mapping.log"))
 	assert.FileExists(t, filepath.Join(snapshotDir, "series_mapping.log"))
 

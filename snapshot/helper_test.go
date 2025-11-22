@@ -2,7 +2,7 @@ package snapshot
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/gob"
 	"io"
 	"log/slog"
 	"os"
@@ -159,7 +159,7 @@ func TestHelperSnapshot_CopyDirectoryContents(t *testing.T) {
 
 func TestHelperSnapshot_SaveJSON(t *testing.T) {
 	h, tempDir := setupHelperTest(t)
-	filePath := filepath.Join(tempDir, "test.json")
+	filePath := filepath.Join(tempDir, "test.bin")
 	data := struct {
 		Name string `json:"name"`
 		Age  int    `json:"age"`
@@ -175,7 +175,8 @@ func TestHelperSnapshot_SaveJSON(t *testing.T) {
 		Name string `json:"name"`
 		Age  int    `json:"age"`
 	}
-	err = json.Unmarshal(readBytes, &decodedData)
+	// SaveJSON now writes gob-encoded binary data. Decode via gob first.
+	err = gob.NewDecoder(bytes.NewReader(readBytes)).Decode(&decodedData)
 	require.NoError(t, err)
 	assert.Equal(t, data, decodedData)
 }

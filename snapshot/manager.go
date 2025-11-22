@@ -616,7 +616,7 @@ func (c *auxiliaryCopier) saveJSONState() error {
 	rangeTombstonesToSave := c.m.provider.GetRangeTombstones()
 
 	if len(deletedSeriesToSave) > 0 {
-		c.manifest.DeletedSeriesFile = "deleted_series.json"
+		c.manifest.DeletedSeriesFile = "deleted_series.bin"
 		destPath := filepath.Join(c.snapshotDir, c.manifest.DeletedSeriesFile)
 		if err := c.m.wrapper.SaveJSON(deletedSeriesToSave, destPath); err != nil {
 			return fmt.Errorf("failed to save deleted_series for snapshot: %w", err)
@@ -624,7 +624,7 @@ func (c *auxiliaryCopier) saveJSONState() error {
 	}
 
 	if len(rangeTombstonesToSave) > 0 {
-		c.manifest.RangeTombstonesFile = "range_tombstones.json"
+		c.manifest.RangeTombstonesFile = "range_tombstones.bin"
 		destPath := filepath.Join(c.snapshotDir, c.manifest.RangeTombstonesFile)
 		if err := c.m.wrapper.SaveJSON(rangeTombstonesToSave, destPath); err != nil {
 			return fmt.Errorf("failed to save range_tombstones for snapshot: %w", err)
