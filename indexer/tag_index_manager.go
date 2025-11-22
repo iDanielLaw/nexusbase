@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -342,7 +341,7 @@ func (tim *TagIndexManager) Query(tags map[string]string) (*roaring64.Bitmap, er
 // by merging results from the memtables and all SSTable levels.
 func (tim *TagIndexManager) getBitmapForTag(tagKeyID, tagValueID uint64) (*roaring64.Bitmap, error) {
 	mergedBitmap := roaring64.New()
-	indexKey := encodeTagIndexKey(tagKeyID, tagValueID)
+	indexKey := EncodeTagIndexKey(tagKeyID, tagValueID)
 
 	// 1. Check memtables (mutable and immutable)
 	tim.mu.RLock()
@@ -769,7 +768,7 @@ func (tim *TagIndexManager) flushIndexMemtableToSSTable(memToFlush *IndexMemtabl
 
 		for _, tagValueID := range sortedTagValueIDs {
 			bitmap := tagValueMap[tagValueID]
-			key := encodeTagIndexKey(tagKeyID, tagValueID)
+			key := EncodeTagIndexKey(tagKeyID, tagValueID)
 			value, err := bitmap.ToBytes()
 			if err != nil {
 				writer.Abort()
@@ -869,13 +868,6 @@ func (tim *TagIndexManager) createNewIndexWriter() (core.SSTableWriterInterface,
 		return nil, 0, fmt.Errorf("failed to create index SSTable writer: %w", err)
 	}
 	return writer, fileID, nil
-}
-
-func encodeTagIndexKey(keyID, valueID uint64) []byte {
-	buf := make([]byte, 16)
-	binary.BigEndian.PutUint64(buf[0:8], keyID)
-	binary.BigEndian.PutUint64(buf[8:16], valueID)
-	return buf
 }
 
 // persistIndexManifest saves the current state of the index's levels manager to disk.

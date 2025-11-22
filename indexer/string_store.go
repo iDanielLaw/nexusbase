@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -203,6 +204,30 @@ func (s *StringStore) GetID(str string) (uint64, bool) {
 	defer s.mu.RUnlock()
 	id, ok := s.stringToID[str]
 	return id, ok
+}
+
+// Symbols returns a copy of all stored symbols in insertion order.
+func (s *StringStore) Symbols() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.idToString))
+	// idToString is a map; to return in id order, collect ids and sort them
+	ids := make([]uint64, 0, len(s.idToString))
+	for id := range s.idToString {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		out = append(out, s.idToString[id])
+	}
+	return out
+}
+
+// ExportSortedSymbols returns a lexicographically sorted copy of all stored symbols.
+func (s *StringStore) ExportSortedSymbols() []string {
+	syms := s.Symbols()
+	sort.Strings(syms)
+	return syms
 }
 
 // addEntry persists a new string mapping to the log file.
