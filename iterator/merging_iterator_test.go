@@ -38,7 +38,7 @@ func TestMergingIterator_TombstoneHandling(t *testing.T) {
 	})
 
 	rangeDeleter := rangeDeletedChecker(map[string][]timeRange{
-		string(core.EncodeSeriesKeyWithString("range.deleted.series", nil)): []timeRange{{start: 100, end: 201, maxSeq: 1000}}, // Deletes if ts in [100, 201) and seqNum <= 1000
+		string(core.EncodeSeriesKeyWithString("range.deleted.series", nil)): {{start: 100, end: 201, maxSeq: 1000}}, // Deletes if ts in [100, 201) and seqNum <= 1000
 	})
 	mergeParams := MergingIteratorParams{
 		Iters:                []core.IteratorInterface[*core.IteratorNode]{iter1, iter2, iter3},
