@@ -1,6 +1,6 @@
+name: "Go Building & Testing"
 permissions:
   contents: read
-name: "Go Building & Testing"
 
 on:
   push:

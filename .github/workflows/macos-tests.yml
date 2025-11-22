@@ -1,5 +1,6 @@
-name: macOS Tests (Experimental)
-
+name: "macOS Tests (Experimental)"
+permissions:
+  contents: read
 on:
   push:
     branches: [ main ]
