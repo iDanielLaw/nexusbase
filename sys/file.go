@@ -1,6 +1,7 @@
 package sys
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"sync/atomic"
@@ -177,14 +178,37 @@ var ReadFile ReadFileHandler = (func(name string) ([]byte, error) {
 })
 
 var Remove RemoveHandler = (func(name string) error {
-	return os.Remove(name)
+	// Retry a few times for transient file lock errors (common on Windows/macOS).
+	const maxAttempts = 5
+	const retryInterval = 100 * time.Millisecond
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		lastErr = os.Remove(name)
+		if lastErr == nil || os.IsNotExist(lastErr) {
+			return nil
+		}
+		time.Sleep(retryInterval)
+	}
+	return fmt.Errorf("failed to remove file %s after %d attempts: %w", name, maxAttempts, lastErr)
 })
 
 // MkdirAll creates a directory and parents, delegating to os.MkdirAll by default.
 func MkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }
 
 // Rename moves a file or directory from old to new path.
-func Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
+func Rename(oldpath, newpath string) error {
+	const maxAttempts = 5
+	const retryInterval = 100 * time.Millisecond
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		lastErr = os.Rename(oldpath, newpath)
+		if lastErr == nil {
+			return nil
+		}
+		time.Sleep(retryInterval)
+	}
+	return fmt.Errorf("failed to rename %s -> %s after %d attempts: %w", oldpath, newpath, maxAttempts, lastErr)
+}
 
 // Stat returns file info for the given path.
 func Stat(path string) (os.FileInfo, error) { return os.Stat(path) }

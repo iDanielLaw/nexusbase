@@ -19,6 +19,7 @@ import (
 	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexuscore/types"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/RoaringBitmap/roaring/roaring64"
@@ -480,7 +481,7 @@ func (tim *TagIndexManager) compactIndexLevelNToLevelNPlus1(levelN int) error {
 	if err := tim.levelsManager.ApplyCompactionResults(levelN, levelN+1, newTables, inputTables); err != nil {
 		// Cleanup new files if apply fails
 		for _, sst := range newTables {
-			os.Remove(sst.FilePath())
+			sys.Remove(sst.FilePath())
 		}
 		return fmt.Errorf("failed to apply index compaction results for L%d->L%d: %w", levelN, levelN+1, err)
 	}
@@ -495,7 +496,7 @@ func (tim *TagIndexManager) compactIndexLevelNToLevelNPlus1(levelN int) error {
 	// Cleanup old files
 	for _, oldTable := range inputTables {
 		oldTable.Close()
-		if err := os.Remove(oldTable.FilePath()); err != nil {
+		if err := sys.Remove(oldTable.FilePath()); err != nil {
 			tim.logger.Error("Failed to remove old index sstable after LN compaction", "path", oldTable.FilePath(), "error", err)
 		}
 	}
@@ -529,7 +530,7 @@ func (tim *TagIndexManager) compactIndexL0ToL1() error {
 	if err := tim.levelsManager.ApplyCompactionResults(0, 1, newSSTs, l0Tables); err != nil {
 		// If applying results fails, we need to clean up the newly created files.
 		for _, sst := range newSSTs {
-			os.Remove(sst.FilePath())
+			sys.Remove(sst.FilePath())
 		}
 		return fmt.Errorf("failed to apply index compaction results: %w", err)
 	}
@@ -544,7 +545,7 @@ func (tim *TagIndexManager) compactIndexL0ToL1() error {
 	// Cleanup old L0 files.
 	for _, oldTable := range l0Tables {
 		oldTable.Close()
-		if err := os.Remove(oldTable.FilePath()); err != nil {
+		if err := sys.Remove(oldTable.FilePath()); err != nil {
 			tim.logger.Error("Failed to remove old index L0 sstable", "path", oldTable.FilePath(), "error", err)
 		}
 	}
@@ -619,7 +620,7 @@ func (tim *TagIndexManager) mergeIndexSSTables(tables []*sstable.SSTable, delete
 	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: fileID, Tracer: tim.tracer, Logger: tim.logger}
 	newSST, err := sstable.LoadSSTable(loadOpts)
 	if err != nil {
-		os.Remove(writer.FilePath())
+		sys.Remove(writer.FilePath())
 		return nil, fmt.Errorf("failed to load newly created index sstable %s: %w", writer.FilePath(), err)
 	}
 	newSSTs = append(newSSTs, newSST)
@@ -915,18 +916,18 @@ func (tim *TagIndexManager) persistIndexManifestLocked() error {
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
+
 	if err := encoder.Encode(manifest); err != nil {
 		file.Close()
-		os.Remove(tempPath)
+		sys.Remove(tempPath)
 		return fmt.Errorf("failed to encode index manifest: %w", err)
 	}
-
 	if err := file.Close(); err != nil {
-		os.Remove(tempPath)
+		sys.Remove(tempPath)
 		return fmt.Errorf("failed to close temporary index manifest file: %w", err)
 	}
 
-	if err := os.Rename(tempPath, tim.manifestPath); err != nil {
+	if err := sys.Rename(tempPath, tim.manifestPath); err != nil {
 		return fmt.Errorf("failed to rename temporary index manifest to final path: %w", err)
 	}
 

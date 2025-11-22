@@ -45,7 +45,7 @@ func (h *helperSnapshot) Rename(oldpath, newpath string) error {
 	if err := h.MkdirAll(filepath.Dir(newpath), 0755); err != nil {
 		return fmt.Errorf("failed to create parent directory for newpath %s: %w", newpath, err)
 	}
-	return os.Rename(oldpath, newpath)
+	return sys.Rename(oldpath, newpath)
 }
 
 func (h *helperSnapshot) Stat(name string) (os.FileInfo, error) {

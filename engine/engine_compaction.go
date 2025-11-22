@@ -20,6 +20,7 @@ import (
 	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexuscore/types"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -698,7 +699,7 @@ func (cm *CompactionManager) quarantineSSTables(ctx context.Context, tables []*s
 		table.Close() // Close the file handle before moving.
 		destPath := filepath.Join(dlqDir, filepath.Base(table.FilePath()))
 		cm.logger.Info("Moving corrupted SSTable to quarantine.", "from", table.FilePath(), "to", destPath)
-		if err := os.Rename(table.FilePath(), destPath); err != nil {
+		if err := sys.Rename(table.FilePath(), destPath); err != nil {
 			cm.logger.Error("Failed to move SSTable to quarantine directory.", "path", table.FilePath(), "error", err)
 		}
 	}
@@ -990,7 +991,7 @@ func (cm *CompactionManager) mergeMultipleSSTables(ctx context.Context, tables [
 			if closeErr := tbl.Close(); closeErr != nil {
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to close intermediate sstable %d on error path: %w", tbl.ID(), closeErr))
 			}
-			if removeErr := os.Remove(tbl.FilePath()); removeErr != nil {
+			if removeErr := sys.Remove(tbl.FilePath()); removeErr != nil {
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to remove intermediate sstable %s on error path: %w", tbl.FilePath(), removeErr))
 			}
 		}

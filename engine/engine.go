@@ -865,7 +865,7 @@ func getTableIDs(tables []*sstable.SSTable) []uint64 {
 
 type realFileRemover struct{}
 
-func (r *realFileRemover) Remove(name string) error { return os.Remove(name) }
+func (r *realFileRemover) Remove(name string) error { return sys.Remove(name) }
 
 func (e *storageEngine) closeWAL() error {
 	if e.wal == nil {
