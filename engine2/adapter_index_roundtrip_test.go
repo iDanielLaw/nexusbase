@@ -1,10 +1,7 @@
 package engine2
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -161,39 +158,9 @@ func TestAdapterFlushWritesReadableIndex(t *testing.T) {
 			if err != nil {
 				t.Fatalf("readChunkPayloadAt(%d): %v", cm.DataRef, err)
 			}
-			// scan payload for timestamp records and compute min/max
-			r := bytes.NewReader(payload)
-			var pMin int64
-			var pMax int64
-			first := true
-			for r.Len() > 0 {
-				var tsb [8]byte
-				if _, err := io.ReadFull(r, tsb[:]); err != nil {
-					t.Fatalf("reading ts from chunk payload: %v", err)
-				}
-				ts := int64(binary.BigEndian.Uint64(tsb[:]))
-				l, err := binary.ReadUvarint(r)
-				if err != nil {
-					t.Fatalf("reading uvarint in chunk payload: %v", err)
-				}
-				if _, err := r.Seek(int64(l), io.SeekCurrent); err != nil {
-					t.Fatalf("seek payload in chunk: %v", err)
-				}
-				if first {
-					pMin = ts
-					pMax = ts
-					first = false
-				} else {
-					if ts < pMin {
-						pMin = ts
-					}
-					if ts > pMax {
-						pMax = ts
-					}
-				}
-			}
-			if first {
-				t.Fatalf("chunk at %d contained no samples", cm.DataRef)
+			pMin, pMax, err := payloadTimestampRange(payload)
+			if err != nil {
+				t.Fatalf("payloadTimestampRange: %v", err)
 			}
 			if pMin != cm.Mint || pMax != cm.Maxt {
 				t.Fatalf("chunk timestamp range mismatch: got [%d,%d] want [%d,%d]", pMin, pMax, cm.Mint, cm.Maxt)

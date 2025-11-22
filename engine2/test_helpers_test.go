@@ -1,6 +1,8 @@
 package engine2
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -88,5 +90,72 @@ func binaryReadLE(r io.Reader, dst *uint32) error {
 		return err
 	}
 	*dst = uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+	return nil
+}
+
+// payloadTimestampRange scans a chunk payload (our internal record format)
+// and returns the observed min and max timestamps.
+func payloadTimestampRange(payload []byte) (int64, int64, error) {
+	if len(payload) == 0 {
+		return 0, 0, errors.New("empty payload")
+	}
+	r := bytes.NewReader(payload)
+	var pMin, pMax int64
+	first := true
+	for r.Len() > 0 {
+		var tsb [8]byte
+		if _, err := io.ReadFull(r, tsb[:]); err != nil {
+			return 0, 0, err
+		}
+		ts := int64(binary.BigEndian.Uint64(tsb[:]))
+		l, err := binary.ReadUvarint(r)
+		if err != nil {
+			return 0, 0, err
+		}
+		if _, err := r.Seek(int64(l), io.SeekCurrent); err != nil {
+			return 0, 0, err
+		}
+		if first {
+			pMin = ts
+			pMax = ts
+			first = false
+		} else {
+			if ts < pMin {
+				pMin = ts
+			}
+			if ts > pMax {
+				pMax = ts
+			}
+		}
+	}
+	if first {
+		return 0, 0, errors.New("no samples in payload")
+	}
+	return pMin, pMax, nil
+}
+
+// findSeriesByLabels searches the provided series entries using the symbol
+// table and returns the first SeriesEntry matching all expected labels (map).
+func findSeriesByLabels(series []index.SeriesEntry, syms []string, expected map[string]string) *index.SeriesEntry {
+	for _, se := range series {
+		labels := make(map[string]string)
+		for _, p := range se.LabelPairs {
+			if int(p[0]) >= len(syms) || int(p[1]) >= len(syms) {
+				continue
+			}
+			labels[syms[int(p[0])]] = syms[int(p[1])]
+		}
+		ok := true
+		for k, v := range expected {
+			if labels[k] != v {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			tmp := se
+			return &tmp
+		}
+	}
 	return nil
 }
