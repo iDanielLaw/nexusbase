@@ -17,6 +17,7 @@ jobs:
       with:
           fetch-depth: 0
           submodules: true
+
     - name: "Check for .go file changes"
       id: check_changes
       run: |
@@ -27,6 +28,7 @@ jobs:
             echo "No changes in .go files. Skipping..."
             echo "go_changes_detected=false" >> "$GITHUB_OUTPUT"
           fi
+
     - name: Set up Go
       if: steps.check_changes.outputs.go_changes_detected == 'true'
       uses: actions/setup-go@v4
