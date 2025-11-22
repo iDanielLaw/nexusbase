@@ -67,6 +67,24 @@ func Test_ListWALFiles_And_RequireWALPresent(t *testing.T) {
 		t.Fatalf("expected 1 wal file, got %d", len(files))
 	}
 
+	// add a nested directory with another wal file to ensure recursive behavior
+	nested := filepath.Join(walDir, "wal_segments")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("mkdir nested wal dir: %v", err)
+	}
+	nestedFile := filepath.Join(nested, "00000001.wal")
+	if err := os.WriteFile(nestedFile, []byte("seg"), 0644); err != nil {
+		t.Fatalf("write nested wal file: %v", err)
+	}
+
+	files, err = ListWALFiles(tmp)
+	if err != nil {
+		t.Fatalf("ListWALFiles failed after nested write: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 wal files after adding nested file, got %d", len(files))
+	}
+
 	// RequireWALPresent should pass now
 	t.Run("nonEmptyWalShouldPass", func(t *testing.T) {
 		RequireWALPresent(t, tmp)

@@ -42,15 +42,28 @@ func RequireWALPresent(t *testing.T, dataDir string) {
 // Returns an error if the wal directory does not exist or cannot be read.
 func ListWALFiles(dataDir string) ([]string, error) {
 	walDir := filepath.Join(dataDir, "wal")
-	entries, err := os.ReadDir(walDir)
-	if err != nil {
+	// Ensure the wal directory exists
+	if _, err := os.Stat(walDir); err != nil {
 		return nil, err
 	}
+
 	var files []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			files = append(files, filepath.Join(walDir, e.Name()))
+	// Walk recursively and collect files that look like WAL segments.
+	// We filter by `.wal` extension to avoid picking up unrelated files.
+	err := filepath.WalkDir(walDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(d.Name()), ".wal") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return files, nil
 }
