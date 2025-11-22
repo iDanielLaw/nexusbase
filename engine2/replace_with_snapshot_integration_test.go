@@ -4,11 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/internal/testutil"
 )
 
 // TestReplaceWithSnapshot_E2E verifies that creating a full snapshot and then
@@ -78,32 +77,21 @@ func TestReplaceWithSnapshot_E2E(t *testing.T) {
 		t.Logf("restored sstable: %s", filepath.Join(sstDir, e.Name()))
 	}
 
-	// WAL presence: configurable via ENGINE2_WAL_STRICT env var.
-	// If ENGINE2_WAL_STRICT is set to true/1, require wal/ to exist and be non-empty.
-	// Otherwise be permissive and only log contents if present.
-	walStrict := false
-	if v := strings.TrimSpace(os.Getenv("ENGINE2_WAL_STRICT")); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			walStrict = b
-		}
-	}
-
-	walDir := filepath.Join(leaderDir, "wal")
-	walEntries, walErr := os.ReadDir(walDir)
-	if walErr != nil {
-		if walStrict {
-			t.Fatalf("expected wal directory after restore, stat error: %v", walErr)
-		}
-		t.Logf("wal directory not present after restore (permissive): %v", walErr)
+	// WAL presence: configurable via internal test helper
+	if testutil.WALStrictEnabled() {
+		testutil.RequireWALPresent(t, leaderDir)
 	} else {
-		if len(walEntries) == 0 {
-			if walStrict {
-				t.Fatalf("expected wal files in %s after restore (strict)", walDir)
+		// permissive: log WAL contents if present
+		walDir := filepath.Join(leaderDir, "wal")
+		if walEntries, err := os.ReadDir(walDir); err == nil {
+			if len(walEntries) == 0 {
+				t.Logf("wal directory exists but is empty: %s", walDir)
 			}
-			t.Logf("wal directory exists but is empty: %s", walDir)
-		}
-		for _, e := range walEntries {
-			t.Logf("restored wal file: %s", filepath.Join(walDir, e.Name()))
+			for _, e := range walEntries {
+				t.Logf("restored wal file: %s", filepath.Join(walDir, e.Name()))
+			}
+		} else {
+			t.Logf("wal directory not present after restore (permissive): %v", err)
 		}
 	}
 
