@@ -95,3 +95,22 @@ git push origin your-branch-name
 ---
 
 ขอขอบคุณทุกท่านอีกครั้งที่ให้ความสนใจและสนับสนุนโครงการนี้!
+
+## CI / Debugging notes
+
+If you're running integration tests that validate snapshot restores for `engine2`, you can control whether the tests require an on-disk WAL directory to be present after restore using the `ENGINE2_WAL_STRICT` environment variable.
+
+- **Default (permissive):** tests will not fail if `wal/` is missing; they will only log its presence.
+- **Strict mode:** set `ENGINE2_WAL_STRICT=true` to make the tests fail when `wal/` is absent or empty. This is useful in CI when you want to enforce that WALs are copied into snapshots and restored correctly.
+
+Examples (PowerShell):
+```powershell
+$env:ENGINE2_WAL_STRICT = 'true'
+go test ./engine2 -run TestReplaceWithSnapshot_E2E -v
+```
+
+Examples (bash):
+```bash
+export ENGINE2_WAL_STRICT=true
+go test ./engine2 -run TestReplaceWithSnapshot_E2E -v
+```
