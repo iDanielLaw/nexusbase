@@ -36,7 +36,7 @@ func SaveMetadataAtomic(path string, meta *DatabaseMetadata) error {
 		return fmt.Errorf("failed to write temp metadata file: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := sys.Rename(tmpPath, path); err != nil {
 		// best effort cleanup
 		_ = sys.Remove(tmpPath)
 		return fmt.Errorf("failed to atomically rename metadata file: %w", err)

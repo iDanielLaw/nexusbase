@@ -40,6 +40,12 @@ func NewLevelsManager(
 	tombstoneWeight float64,
 	overlapWeight float64,
 ) (*LevelsManager, error) {
+	// Provide a sensible default for maxLevels to avoid callers passing 0
+	// (zero value) and causing panics when accessing level 0.
+	if maxLevels <= 0 {
+		maxLevels = 7
+	}
+
 	lm := &LevelsManager{
 		levels:           make([]*LevelState, maxLevels),
 		maxLevels:        maxLevels,

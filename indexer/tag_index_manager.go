@@ -797,7 +797,7 @@ func (tim *TagIndexManager) flushIndexMemtableToSSTable(memToFlush *IndexMemtabl
 	}
 	newSST, err := sstable.LoadSSTable(loadOpts)
 	if err != nil {
-		os.Remove(writer.FilePath()) // Best effort cleanup
+		sys.Remove(writer.FilePath()) // Best effort cleanup
 		return nil, fmt.Errorf("failed to load newly created index SSTable %s: %w", writer.FilePath(), err)
 	}
 	tim.logger.Info("Successfully flushed and loaded index SSTable.", "path", writer.FilePath(), "id", fileID)

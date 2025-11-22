@@ -22,6 +22,7 @@ import (
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
@@ -112,7 +113,7 @@ func newTestE2EProvider(t *testing.T, dataDir string) *testE2EProvider {
 		t.Logf("Moving restored tag index data from %s to %s", indexSnapshotPath, indexDataPath)
 		// Clean up any old index data dir first, just in case.
 		require.NoError(t, os.RemoveAll(indexDataPath))
-		require.NoError(t, os.Rename(indexSnapshotPath, indexDataPath))
+		require.NoError(t, sys.Rename(indexSnapshotPath, indexDataPath))
 	}
 
 	walOpts := wal.Options{

@@ -44,7 +44,7 @@ func Write(dir string, cp core.Checkpoint) error {
 
 	// 5. Atomically rename the temporary file to the final name.
 	finalPath := filepath.Join(dir, core.CheckpointFileName)
-	if err := os.Rename(tempPath, finalPath); err != nil {
+	if err := sys.Rename(tempPath, finalPath); err != nil {
 		return fmt.Errorf("failed to rename temp checkpoint file to final name: %w", err)
 	}
 

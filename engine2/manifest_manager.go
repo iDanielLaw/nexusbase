@@ -134,10 +134,20 @@ func (m *ManifestManager) manifestWriter() {
 			for _, be := range batch {
 				newEntries = append(newEntries, be.e)
 			}
-			// Persist once for the batch
-			if err := SaveManifest(m.manifestPath, SSTableManifest{Entries: newEntries}); err != nil {
+			// Persist once for the batch with a few retries for transient failures
+			var persistErr error
+			const persistAttempts = 3
+			for attempt := 1; attempt <= persistAttempts; attempt++ {
+				persistErr = SaveManifest(m.manifestPath, SSTableManifest{Entries: newEntries})
+				if persistErr == nil {
+					break
+				}
+				// small backoff
+				time.Sleep(time.Duration(attempt) * 20 * time.Millisecond)
+			}
+			if persistErr != nil {
 				for _, be := range batch {
-					be.resp <- err
+					be.resp <- persistErr
 				}
 				continue
 			}

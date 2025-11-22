@@ -83,6 +83,10 @@ func (w *WAL) Replay(fn func(*core.DataPoint) error) error {
 	// open file for read
 	rf, err := sys.Open(w.path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// No WAL present; nothing to replay.
+			return nil
+		}
 		return fmt.Errorf("failed to open wal for replay: %w", err)
 	}
 	defer rf.Close()

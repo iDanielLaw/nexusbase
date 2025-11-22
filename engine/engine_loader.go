@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/INLOpen/nexusbase/sys"
+
 	"github.com/INLOpen/nexusbase/checkpoint"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
@@ -270,7 +272,7 @@ func (sl *StateLoader) scanDataDirAndLoadToL0() error {
 			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".tmp") {
 				tmpFilePath := filepath.Join(sl.engine.sstDir, entry.Name())
 				sl.logger.Info("Removing orphaned .tmp file.", "path", tmpFilePath)
-				if errRemove := os.Remove(tmpFilePath); errRemove != nil {
+				if errRemove := sys.Remove(tmpFilePath); errRemove != nil {
 					sl.logger.Warn("Failed to remove orphaned .tmp file.", "path", tmpFilePath, "error", errRemove)
 				}
 			}

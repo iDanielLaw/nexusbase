@@ -816,7 +816,7 @@ func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 			return fmt.Errorf("failed to create temp dir to preserve snapshot: %w", err)
 		}
 		moved := filepath.Join(tmp, filepath.Base(absSnapDir))
-		if err := os.Rename(absSnapDir, moved); err != nil {
+		if err := sys.Rename(absSnapDir, moved); err != nil {
 			// If rename fails (cross-device), attempt copy fallback by copying files.
 			if cpErr := copyDir(absSnapDir, moved); cpErr != nil {
 				return fmt.Errorf("failed to preserve snapshot before restore: rename err=%v copy err=%v", err, cpErr)
@@ -865,7 +865,7 @@ func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 					src := filepath.Join(srcSst, e.Name())
 					dst := filepath.Join(dstSstables, e.Name())
 					// try rename first, fall back to copyDir for robustness
-					if err := os.Rename(src, dst); err != nil {
+					if err := sys.Rename(src, dst); err != nil {
 						_ = copyDir(src, dst)
 						_ = os.RemoveAll(src)
 					}

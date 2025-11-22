@@ -154,56 +154,56 @@ func SaveManifest(path string, m SSTableManifest) error {
 	// write header
 	if _, err := f.Write(manifestMagic[:]); err != nil {
 		f.Close()
-		_ = os.Remove(tmp)
+		_ = sys.Remove(tmp)
 		return err
 	}
 	if err := binary.Write(f, binary.BigEndian, manifestVersion); err != nil {
 		f.Close()
-		_ = os.Remove(tmp)
+		_ = sys.Remove(tmp)
 		return err
 	}
 	count := uint64(len(m.Entries))
 	if err := binary.Write(f, binary.BigEndian, count); err != nil {
 		f.Close()
-		_ = os.Remove(tmp)
+		_ = sys.Remove(tmp)
 		return err
 	}
 	for _, e := range m.Entries {
 		if err := binary.Write(f, binary.BigEndian, e.ID); err != nil {
 			f.Close()
-			_ = os.Remove(tmp)
+			_ = sys.Remove(tmp)
 			return err
 		}
 		if err := binary.Write(f, binary.BigEndian, e.KeyCount); err != nil {
 			f.Close()
-			_ = os.Remove(tmp)
+			_ = sys.Remove(tmp)
 			return err
 		}
 		if err := binary.Write(f, binary.BigEndian, e.CreatedAt.UnixNano()); err != nil {
 			f.Close()
-			_ = os.Remove(tmp)
+			_ = sys.Remove(tmp)
 			return err
 		}
 		pathBytes := []byte(e.FilePath)
 		pathLen := uint32(len(pathBytes))
 		if err := binary.Write(f, binary.BigEndian, pathLen); err != nil {
 			f.Close()
-			_ = os.Remove(tmp)
+			_ = sys.Remove(tmp)
 			return err
 		}
 		if _, err := f.Write(pathBytes); err != nil {
 			f.Close()
-			_ = os.Remove(tmp)
+			_ = sys.Remove(tmp)
 			return err
 		}
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		_ = os.Remove(tmp)
+		_ = sys.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
+		_ = sys.Remove(tmp)
 		return err
 	}
 
