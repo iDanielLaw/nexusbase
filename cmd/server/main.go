@@ -15,11 +15,11 @@ import (
 	// Generated gRPC code
 	// Core utilities
 	"github.com/INLOpen/nexusbase/config"
-	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine" // StorageEngine
+	"github.com/INLOpen/nexusbase/engine" // StorageEngine (kept for interface types)
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/hooks/listeners"
-	"github.com/INLOpen/nexusbase/levels"
+	"github.com/INLOpen/nexusbase/sys"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -30,7 +30,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 
 	// For sstable.DefaultBlockSize and ErrNotFound
-	"github.com/INLOpen/nexusbase/compressors"
+
 	"github.com/INLOpen/nexusbase/server" // Your gRPC server implementation
 )
 
@@ -159,25 +159,7 @@ func main() {
 	}
 	logger.Info("Using data directory", "path", cfg.Engine.DataDir)
 
-	// Select compressor based on config
-	var sstCompressor core.Compressor
-	switch cfg.Engine.SSTable.Compression {
-	case "lz4":
-		sstCompressor = &compressors.LZ4Compressor{}
-		logger.Info("Using LZ4 compression for SSTables.")
-	case "zstd":
-		sstCompressor = compressors.NewZstdCompressor()
-		logger.Info("Using ZSTD compression for SSTables.")
-	case "snappy":
-		sstCompressor = &compressors.SnappyCompressor{}
-		logger.Info("Using Snappy compression for SSTables.")
-	case "none":
-		sstCompressor = &compressors.NoCompressionCompressor{}
-		logger.Info("Using no compression for SSTables.")
-	default:
-		logger.Error("Invalid sstable_compression value in config.", "value", cfg.Engine.SSTable.Compression)
-		os.Exit(1)
-	}
+	// compressor selection removed: Engine2 currently manages its own SSTable settings
 	var metricSrv *server.MetricsServer
 	if cfg.Debug.Enabled {
 		metricSrv = server.NewMetricsServer(&cfg.Debug, logger)
@@ -189,144 +171,57 @@ func main() {
 	}
 
 	// Initialize the TracerProvider
-	tp, tracerCleanup, err := initTracerProvider(cfg.Tracing, logger)
+	_, tracerCleanup, err := initTracerProvider(cfg.Tracing, logger)
 	if err != nil {
 		logger.Error("Failed to initialize tracer provider", "error", err)
 		os.Exit(1)
 	}
 
-	// Parse durations from config strings
-	memtableFlushInterval := config.ParseDuration(cfg.Engine.Memtable.FlushInterval, 0, logger)
-	compactionInterval := config.ParseDuration(cfg.Engine.Compaction.CheckInterval, 120*time.Second, logger)
-	metadataSyncInterval := config.ParseDuration(cfg.Engine.MetadataSyncInterval, 60*time.Second, logger)
-	checkpointInterval := config.ParseDuration(cfg.Engine.CheckpointInterval, 300*time.Second, logger)
-	walFlushInterval := config.ParseDuration(cfg.Engine.WAL.FlushInterval, 1000*time.Millisecond, logger)
-	selfMonitoringInterval := config.ParseDuration(cfg.SelfMonitoring.Interval, 5*time.Second, logger)
-	indexFlushInterval := config.ParseDuration(cfg.Engine.Index.FlushInterval, 60*time.Second, logger)
-	indexCompactionInterval := config.ParseDuration(cfg.Engine.Index.CompactionCheckInterval, 20*time.Second, logger)
+	// Manifest lock TTL controls how long an external lockfile is considered valid
+	// before this process may attempt to break it (useful when other process crashed).
+	manifestLockTTL := config.ParseDuration(cfg.Engine.ManifestLockTTL, 30*time.Second, logger)
+	sys.SetDefaultLockStaleTTL(manifestLockTTL)
 
-	// Parse CompactionFallbackStrategy
-	var fallbackStrategy levels.CompactionFallbackStrategy
-	switch strings.ToLower(cfg.Engine.Compaction.FallbackStrategy) {
-	case "picklargest":
-		fallbackStrategy = levels.PickLargest
-	case "picksmallest":
-		fallbackStrategy = levels.PickSmallest
-	case "pickmostkeys":
-		fallbackStrategy = levels.PickMostKeys
-	case "picksmallestavgkeysize":
-		fallbackStrategy = levels.PickSmallestAvgKeySize
-	case "pickoldestbytimestamp":
-		fallbackStrategy = levels.PickOldestByTimestamp
-	case "pickfewestkeys":
-		fallbackStrategy = levels.PickFewestKeys
-	case "pickrandom":
-		fallbackStrategy = levels.PickRandom
-	case "picklargestavgkeysize":
-		fallbackStrategy = levels.PickLargestAvgKeySize
-	case "picknewest":
-		fallbackStrategy = levels.PickNewest
-	case "pickhighesttombstonedensity":
-		fallbackStrategy = levels.PickHighestTombstoneDensity
-	case "pickoldest":
-		fallthrough
-	default:
-		fallbackStrategy = levels.PickOldest
-	}
+	// Legacy StorageEngine options removed; Engine2 is the primary storage engine.
 
-	// Configure StorageEngine options
-	opts := engine.StorageEngineOptions{
-		DataDir:                           cfg.Engine.DataDir,
-		MemtableThreshold:                 cfg.Engine.Memtable.SizeThresholdBytes,
-		MemtableFlushIntervalMs:           int(memtableFlushInterval.Milliseconds()),
-		BlockCacheCapacity:                cfg.Engine.Cache.BlockCacheCapacity,
-		L0CompactionTriggerSize:           cfg.Engine.Compaction.L0TriggerSizeBytes,
-		MaxL0Files:                        cfg.Engine.Compaction.L0TriggerFileCount,
-		TargetSSTableSize:                 cfg.Engine.Compaction.TargetSSTableSizeBytes,
-		LevelsTargetSizeMultiplier:        cfg.Engine.Compaction.LevelsSizeMultiplier,
-		MaxLevels:                         cfg.Engine.Compaction.MaxLevels,
-		BloomFilterFalsePositiveRate:      cfg.Engine.SSTable.BloomFilterFPRate,
-		SSTableDefaultBlockSize:           int(cfg.Engine.SSTable.BlockSizeBytes),
-		CompactionIntervalSeconds:         int(compactionInterval.Seconds()),
-		TracerProvider:                    tp, // Pass the configured provider
-		MetadataSyncIntervalSeconds:       int(metadataSyncInterval.Seconds()),
-		CheckpointIntervalSeconds:         int(checkpointInterval.Seconds()),
-		SSTableCompressor:                 sstCompressor,
-		WALSyncMode:                       core.WALSyncMode(cfg.Engine.WAL.SyncMode),
-		WALBatchSize:                      cfg.Engine.WAL.BatchSize,
-		WALFlushIntervalMs:                int(walFlushInterval.Milliseconds()),
-		WALMaxSegmentSize:                 cfg.Engine.WAL.MaxSegmentSizeBytes,
-		WALPurgeKeepSegments:              cfg.Engine.WAL.PurgeKeepSegments,
-		RetentionPeriod:                   cfg.Engine.RetentionPeriod,
-		SelfMonitoringEnabled:             cfg.SelfMonitoring.Enabled,
-		SelfMonitoringIntervalMs:          int(selfMonitoringInterval.Milliseconds()),
-		IndexMemtableThreshold:            cfg.Engine.Index.MemtableThreshold,
-		IndexFlushIntervalMs:              int(indexFlushInterval.Milliseconds()),
-		IndexCompactionIntervalSeconds:    int(indexCompactionInterval.Seconds()),
-		IndexMaxL0Files:                   cfg.Engine.Index.L0TriggerFileCount,
-		IndexBaseTargetSize:               cfg.Engine.Index.BaseTargetSizeBytes,
-		CompactionFallbackStrategy:        fallbackStrategy,
-		CompactionTombstoneWeight:         cfg.Engine.Compaction.TombstoneWeight,
-		CompactionOverlapWeight:           cfg.Engine.Compaction.OverlapPenaltyWeight,
-		IntraL0CompactionTriggerFiles:     cfg.Engine.Compaction.IntraL0TriggerFileCount,
-		IntraL0CompactionMaxFileSizeBytes: cfg.Engine.Compaction.IntraL0MaxFileSizeBytes,
-		Logger:                            logger,
-		ReplicationMode:                   cfg.Replication.Mode,             // Pass replication mode
-		LeaderAddress:                     cfg.SelfMonitoring.LeaderAddress, // Use self-monitoring leader address
-	}
-
-	// Create the storage engine instance first.
-	dbEngine, err := engine.NewStorageEngine(opts)
-	if err != nil {
-		logger.Error("Failed to create storage engine", "error", err)
-		os.Exit(1)
-	}
-
-	// --- Register Hooks ---
-	// 1. Create listener instances
+	// Engine2-only startup: create a HookManager, register listeners, and start Engine2.
+	hookManager := hooks.NewHookManager(logger.With("component", "HookManager"))
 	waListener := listeners.NewWriteAmplificationListener(logger)
 	cardinalityListener := listeners.NewCardinalityAlerterListener(logger)
-	// Example outlier detection rules
 	outlierRules := []listeners.OutlierRule{
-		{
-			MetricName: "http.requests.latency",
-			FieldName:  "ms",
-			Thresholds: listeners.Thresholds{Min: 0, Max: 2000}, // Alert if latency > 2 seconds
-		},
-		{
-			MetricName: "environment.temperature",
-			FieldName:  "celsius",
-			Thresholds: listeners.Thresholds{Min: -10, Max: 50}, // Alert if temp is outside this range
-		},
+		{MetricName: "http.requests.latency", FieldName: "ms", Thresholds: listeners.Thresholds{Min: 0, Max: 2000}},
+		{MetricName: "environment.temperature", FieldName: "celsius", Thresholds: listeners.Thresholds{Min: -10, Max: 50}},
 	}
 	outlierListener := listeners.NewOutlierDetectionListener(logger, outlierRules)
-	hookManager := dbEngine.GetHookManager()
-
-	//Register the listener for the PostCompaction event
 	hookManager.Register(hooks.EventPostCompaction, waListener)
 	hookManager.Register(hooks.EventOnSeriesCreate, cardinalityListener)
 	hookManager.Register(hooks.EventPrePutBatch, outlierListener)
-	logger.Info("Registered WriteAmplificationListener for PostCompaction events.")
-	logger.Info("Registered CardinalityAlerterListener for OnSeriesCreate events.")
-	// --- End Register Hooks ---
 
-	// --- System Metrics Collector ---
-	// The collector will publish metrics that are automatically exposed by the /metrics endpoint.
-	// We use the engine's data directory as the path to monitor for disk usage.
+	// System metrics collector
 	systemCollector := server.NewSystemCollector(cfg.Engine.DataDir, 2*time.Second, logger)
 	systemCollector.Start()
-	// --- End System Metrics Collector ---
 
-	if err := dbEngine.Start(); err != nil {
-		logger.Error("Failed to start storage engine", "error", err)
+	eng2Inst, eng2Err := engine2.NewEngine2(cfg.Engine.DataDir)
+	if eng2Err != nil {
+		logger.Error("Failed to create Engine2 instance", "error", eng2Err)
 		os.Exit(1)
 	}
+	eng2Adapter := engine2.NewEngine2AdapterWithHooks(eng2Inst, hookManager)
+	if startErr := eng2Adapter.Start(); startErr != nil {
+		logger.Error("Failed to start Engine2 adapter", "error", startErr)
+		_ = eng2Adapter.Close()
+		os.Exit(1)
+	}
+	var primaryEngine engine.StorageEngineInterface = eng2Adapter
 
-	// Create and initialize the application server
-	appServer, err := server.NewAppServer(dbEngine, cfg, logger)
+	// Create and initialize the application server using the selected primary engine.
+	appServer, err := server.NewAppServer(primaryEngine, cfg, logger)
 	if err != nil {
-		logger.Error("Failed to create application server", "error", err) // Ensure engine is closed if app server creation fails
-		dbEngine.Close()
+		logger.Error("Failed to create application server", "error", err)
+		// Cleanup started components
+		if eng2Adapter != nil {
+			_ = eng2Adapter.Close()
+		}
 		os.Exit(1)
 	}
 
@@ -354,8 +249,10 @@ func main() {
 		// 2. รอจนกว่า goroutine ของ AppServer จะทำงานเสร็จสิ้น (block)
 		<-serverErrChan
 
-		// 3. เมื่อ Server หยุดสนิทแล้ว จึงสั่งปิด Database Engine (block จนกว่าจะ flush เสร็จ)
-		dbEngine.Close()
+		// 3. เมื่อ Server หยุดสนิทแล้ว จึงสั่งปิด Engine2 adapter และ Database Engine (block จนกว่าจะ flush เสร็จ)
+		if eng2Adapter != nil {
+			_ = eng2Adapter.Close()
+		}
 
 		tracerCleanup() // Shutdown the tracer provider
 		systemCollector.Stop()

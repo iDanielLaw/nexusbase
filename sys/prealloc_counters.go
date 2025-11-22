@@ -43,6 +43,9 @@ var preallocCache sync.Map
 // semantics and safer concurrent updates.
 var preallocCacheHits atomic.Uint64
 var preallocCacheMisses atomic.Uint64
+var preallocSuccesses atomic.Uint64
+var preallocFailures atomic.Uint64
+var preallocUnsupported atomic.Uint64
 
 // preallocCacheLoad returns (allowed, found).
 func preallocCacheLoad(dev uint64) (allowed bool, found bool) {
@@ -68,3 +71,18 @@ func preallocCacheHit() {
 func preallocCacheMiss() {
 	preallocCacheMisses.Add(1)
 }
+
+// preallocSuccess increments the success counter.
+func preallocSuccessInc()     { preallocSuccesses.Add(1) }
+func preallocFailureInc()     { preallocFailures.Add(1) }
+func preallocUnsupportedInc() { preallocUnsupported.Add(1) }
+
+// PreallocSuccessCount returns the number of successful prealloc attempts.
+func PreallocSuccessCount() uint64 { return preallocSuccesses.Load() }
+
+// PreallocFailureCount returns the number of failed prealloc attempts.
+func PreallocFailureCount() uint64 { return preallocFailures.Load() }
+
+// PreallocUnsupportedCount returns the number of prealloc attempts that
+// were not supported by the underlying filesystem/device.
+func PreallocUnsupportedCount() uint64 { return preallocUnsupported.Load() }

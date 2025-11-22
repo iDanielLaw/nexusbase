@@ -15,7 +15,7 @@ func TestSkippingRangeDeletedIterator(t *testing.T) {
 
 	// Setup range tombstones using the mock checker from mockup.go
 	rangeDeleter := rangeDeletedChecker(map[string][]timeRange{
-		seriesKeyStr: []timeRange{
+		seriesKeyStr: {
 			{start: 100, end: 200, maxSeq: 500}, // RT1
 			{start: 300, end: 400, maxSeq: 600}, // RT2
 		},

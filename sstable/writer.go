@@ -91,16 +91,23 @@ func NewSSTableWriter(opts core.SSTableWriterOptions) (core.SSTableWriterInterfa
 	header := core.NewFileHeader(core.SSTableMagicNumber, opts.Compressor.Type())
 	if err := binary.Write(file, binary.LittleEndian, &header); err != nil {
 		file.Close()
-		os.Remove(tempFilePath)
+		_ = sys.Remove(tempFilePath)
 		return nil, fmt.Errorf("failed to write sstable header: %w", err)
 	}
 	initialOffset := int64(header.Size())
 
 	// Placeholder initialization
+	// Validate bloom filter params. Invalid rates are considered an error
+	// because callers should provide sensible configuration.
+	if opts.BloomFilterFalsePositiveRate <= 0 || opts.BloomFilterFalsePositiveRate >= 1 {
+		file.Close()
+		_ = sys.Remove(tempFilePath)
+		return nil, fmt.Errorf("invalid arguments for NewBloomFilter: BloomFilterFalsePositiveRate must be (0,1), got %v", opts.BloomFilterFalsePositiveRate)
+	}
 	bf, err := NewBloomFilter(opts.EstimatedKeys, opts.BloomFilterFalsePositiveRate) // Use sstable.NewBloomFilter
 	if err != nil {
 		file.Close()                                                     // Clean up the file handle
-		os.Remove(tempFilePath)                                          // Attempt to remove the created .tmp file
+		_ = sys.Remove(tempFilePath)                                     // Attempt to remove the created .tmp file
 		return nil, fmt.Errorf("failed to create bloom filter: %w", err) // Keep fmt.Errorf for error return
 	}
 
@@ -516,24 +523,11 @@ func (w *SSTableWriter) Finish() error {
 		w.logger.Warn("Failed to run GC to aid file handle release (Windows workaround).", "error", gcErr)
 	}
 
-	// FR7.1: Rename the temporary file to its final name
+	// FR7.1: Rename the temporary file to its final name using sys.Rename (includes retry semantics)
 	finalPath := w.filePath[:len(w.filePath)-len(filepath.Ext(w.filePath))] + ".sst" // Change .tmp to .sst
-	// Add retry logic for os.Rename, especially for Windows
-	const maxRetries = 5
-	const retryDelay = 100 * time.Millisecond
-	var renameErr error
-	for i := 0; i < maxRetries; i++ {
-		renameErr = os.Rename(w.filePath, finalPath)
-		if renameErr == nil {
-			break // Success
-		}
-		w.logger.Warn("Failed to rename temporary sstable file, retrying...", "from", w.filePath, "to", finalPath, "attempt", i+1, "error", renameErr)
-		time.Sleep(retryDelay)
-	}
-
-	if renameErr != nil {
-		// This is a critical failure, so we abort.
-		return handleErrorAndAbort(renameErr, fmt.Sprintf("failed to rename temporary sstable file %s to %s after %d retries", w.filePath, finalPath, maxRetries))
+	if err := sys.Rename(w.filePath, finalPath); err != nil {
+		w.logger.Error("Failed to rename temporary sstable file", "from", w.filePath, "to", finalPath, "error", err)
+		return handleErrorAndAbort(err, fmt.Sprintf("failed to rename temporary sstable file %s to %s", w.filePath, finalPath))
 	}
 	w.filePath = finalPath // Update to final path
 

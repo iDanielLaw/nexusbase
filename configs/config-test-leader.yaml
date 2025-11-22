@@ -8,6 +8,7 @@ server:
     enabled: false
 
 engine:
+  mode: engine2
   data_dir: "./data-leader"
   retention_period: ""
   metadata_sync_interval: 60s

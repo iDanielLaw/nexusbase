@@ -36,6 +36,7 @@ type SSTableConfig struct {
 	BlockSizeBytes    int64   `yaml:"block_size_bytes"`
 	Compression       string  `yaml:"compression"`
 	BloomFilterFPRate float64 `yaml:"bloom_filter_fp_rate"`
+	Preallocate       bool    `yaml:"preallocate"`
 }
 
 // CacheConfig holds cache-specific configurations.
@@ -78,10 +79,16 @@ type IndexConfig struct {
 
 // EngineConfig holds all engine-related configurations, grouped logically.
 type EngineConfig struct {
+	// Mode selects which engine implementation to run. Valid values:
+	// - "engine": the legacy StorageEngine (default)
+	// - "engine2": the lightweight Engine2 implementation
+	// - "both": run both (legacy engine as primary, Engine2 loaded for compatibility)
+	Mode                 string           `yaml:"mode"`
 	DataDir              string           `yaml:"data_dir"`
 	RetentionPeriod      string           `yaml:"retention_period"`
 	MetadataSyncInterval string           `yaml:"metadata_sync_interval"`
 	CheckpointInterval   string           `yaml:"checkpoint_interval"` // Added for completeness
+	ManifestLockTTL      string           `yaml:"manifest_lock_ttl"`
 	Memtable             MemtableConfig   `yaml:"memtable"`
 	SSTable              SSTableConfig    `yaml:"sstable"`
 	Cache                CacheConfig      `yaml:"cache"`
@@ -186,6 +193,7 @@ func Load(r io.Reader) (*Config, error) {
 			},
 		},
 		Engine: EngineConfig{
+			Mode:                 "engine2",
 			DataDir:              "./data",
 			RetentionPeriod:      "",
 			MetadataSyncInterval: "60s",
@@ -198,6 +206,7 @@ func Load(r io.Reader) (*Config, error) {
 				BlockSizeBytes:    8 * 1024, // 8 KiB
 				Compression:       "snappy",
 				BloomFilterFPRate: 0.01,
+				Preallocate:       true,
 			},
 			Cache: CacheConfig{
 				BlockCacheCapacity: 1024,
@@ -215,6 +224,7 @@ func Load(r io.Reader) (*Config, error) {
 				IntraL0TriggerFileCount: 8,               // Default to triggering with 8 small files
 				IntraL0MaxFileSizeBytes: 2 * 1024 * 1024, // Default to 2MB for "small" files
 			},
+			ManifestLockTTL: "30s",
 			WAL: WALConfig{
 				SyncMode:            "interval",
 				BatchSize:           1,

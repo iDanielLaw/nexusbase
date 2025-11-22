@@ -11,6 +11,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/snapshot"
+	"github.com/INLOpen/nexusbase/sys"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -80,7 +81,7 @@ func (e *storageEngine) persistManifest() (err error) {
 	defer func() {
 		if err != nil {
 			manifestFile.Close()
-			os.Remove(manifestFilePath)
+			sys.Remove(manifestFilePath)
 		}
 	}()
 
@@ -110,7 +111,7 @@ func (e *storageEngine) persistManifest() (err error) {
 		span.SetStatus(codes.Error, "update_current_file_failed")
 		return fmt.Errorf("failed to write temporary CURRENT file: %w", err)
 	}
-	if err = os.Rename(tempCurrentFilePath, currentFilePath); err != nil {
+	if err = sys.Rename(tempCurrentFilePath, currentFilePath); err != nil {
 		e.logger.Error("Failed to atomically update CURRENT file.", "from", tempCurrentFilePath, "to", currentFilePath, "error", err)
 		span.SetStatus(codes.Error, "update_current_file_failed")
 		return fmt.Errorf("failed to atomically update CURRENT file: %w", err)
@@ -126,7 +127,7 @@ func (e *storageEngine) persistManifest() (err error) {
 	if oldManifestFileName != "" && oldManifestFileName != uniqueManifestFileName {
 		oldManifestFilePath := filepath.Join(e.opts.DataDir, oldManifestFileName)
 		if _, statErr := os.Stat(oldManifestFilePath); statErr == nil {
-			if removeErr := os.Remove(oldManifestFilePath); removeErr != nil {
+			if removeErr := sys.Remove(oldManifestFilePath); removeErr != nil {
 				e.logger.Warn("Failed to delete old manifest file.", "path", oldManifestFilePath, "error", removeErr)
 			} else {
 				e.logger.Info("Old manifest file deleted.", "path", oldManifestFilePath)

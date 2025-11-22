@@ -1,7 +1,7 @@
 package snapshot
 
 import (
-	"encoding/json"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -45,7 +45,7 @@ func (h *helperSnapshot) Rename(oldpath, newpath string) error {
 	if err := h.MkdirAll(filepath.Dir(newpath), 0755); err != nil {
 		return fmt.Errorf("failed to create parent directory for newpath %s: %w", newpath, err)
 	}
-	return os.Rename(oldpath, newpath)
+	return sys.Rename(oldpath, newpath)
 }
 
 func (h *helperSnapshot) Stat(name string) (os.FileInfo, error) {
@@ -256,9 +256,39 @@ func (h *helperSnapshot) SaveJSON(v interface{}, path string) error {
 	if err := h.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory for json file %s: %w", path, err)
 	}
-	data, err := json.Marshal(v)
-	if err != nil {
-		return err
+	// Encode using gob for a compact binary representation. We keep the
+	// function name `SaveJSON` to minimize callsite changes but the on-disk
+	// format is now binary (gob).
+	var b []byte
+	// Use an in-memory pipe via io.Pipe to avoid buffering excessively.
+	// Simpler approach: encode into a bytes.Buffer via an encoder.
+	// We avoid importing bytes at top-level unnecessarily; create locally.
+	buf := &syncBuffer{}
+	enc := gob.NewEncoder(buf)
+	if err := enc.Encode(v); err != nil {
+		return fmt.Errorf("failed to gob-encode value for %s: %w", path, err)
 	}
-	return h.WriteFile(path, data, 0644)
+	b = buf.Bytes()
+	return h.WriteFile(path, b, 0644)
+}
+
+// syncBuffer is a tiny threadsafe buffer wrapper providing io.Writer and
+// a Bytes method without importing bytes for tests simplicity.
+type syncBuffer struct {
+	mu   sync.Mutex
+	data []byte
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = append(s.data, p...)
+	return len(p), nil
+}
+func (s *syncBuffer) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]byte, len(s.data))
+	copy(out, s.data)
+	return out
 }

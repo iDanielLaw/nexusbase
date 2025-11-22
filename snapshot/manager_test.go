@@ -448,14 +448,14 @@ func setupRestorerTest(t *testing.T) (r *restorer, snapshotDir, targetDataDir st
 	manifest := &core.SnapshotManifest{
 		SequenceNumber: 1,
 		// Add files that will be copied to trigger different code paths
-		DeletedSeriesFile: "deleted.json",
+		DeletedSeriesFile: "deleted.bin",
 		WALFile:           "wal",
 		Levels: []core.SnapshotLevelManifest{
 			{LevelNumber: 0, Tables: []core.SSTableMetadata{{ID: 1, FileName: "sst/1.sst"}}},
 		},
 	}
 	// Create the files mentioned in the manifest inside the snapshot dir
-	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "deleted.json"), []byte("{}"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "deleted.bin"), []byte("{}"), 0644))
 	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "sst"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "sst", "1.sst"), []byte("data"), 0644))
 	require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "wal"), 0755))
@@ -589,10 +589,10 @@ func TestManager_CreateFull(t *testing.T) {
 	assert.Equal(t, uint64(1), manifest.LastWALSegmentIndex)
 
 	// ตรวจสอบไฟล์เสริม
-	assert.Equal(t, "deleted_series.json", manifest.DeletedSeriesFile)
-	require.FileExists(t, filepath.Join(snapshotDir, "deleted_series.json"))
-	assert.Equal(t, "range_tombstones.json", manifest.RangeTombstonesFile)
-	require.FileExists(t, filepath.Join(snapshotDir, "range_tombstones.json"))
+	assert.Equal(t, "deleted_series.bin", manifest.DeletedSeriesFile)
+	require.FileExists(t, filepath.Join(snapshotDir, "deleted_series.bin"))
+	assert.Equal(t, "range_tombstones.bin", manifest.RangeTombstonesFile)
+	require.FileExists(t, filepath.Join(snapshotDir, "range_tombstones.bin"))
 	assert.Equal(t, "string_mapping.log", manifest.StringMappingFile)
 	require.FileExists(t, filepath.Join(snapshotDir, "string_mapping.log"))
 	assert.Equal(t, "series_mapping.log", manifest.SeriesMappingFile)
@@ -677,7 +677,7 @@ func TestManager_CreateFull_SSTableCopyError(t *testing.T) {
 	// 2. Simulate the error condition
 	// Remove the source SSTable file *after* it's been registered with the
 	// levels manager but *before* the snapshot process tries to copy it.
-	require.NoError(t, os.Remove(sst1.FilePath()))
+	require.NoError(t, sys.Remove(sst1.FilePath()))
 
 	// 3. Execution
 	manager := NewManager(provider)
@@ -1147,7 +1147,7 @@ func TestManager_CreateIncremental(t *testing.T) {
 		assert.NoFileExists(t, filepath.Join(latestPath, "sst", "1.sst"))
 
 		// Check that auxiliary files were copied
-		assert.FileExists(t, filepath.Join(latestPath, "deleted_series.json"))
+		assert.FileExists(t, filepath.Join(latestPath, "deleted_series.bin"))
 
 		provider.AssertExpectations(t)
 		provider.tagIndexManager.AssertExpectations(t)
@@ -1537,8 +1537,8 @@ func TestRestoreFromFull_MissingFiles(t *testing.T) {
 
 		// Create a manifest that lists the valid file AND a missing file
 		manifest := &core.SnapshotManifest{
-			StringMappingFile: "string_mapping.log",  // This file exists
-			DeletedSeriesFile: "deleted_series.json", // This file does not exist
+			StringMappingFile: "string_mapping.log", // This file exists
+			DeletedSeriesFile: "deleted_series.bin", // This file does not exist
 		}
 		manifestFileName, err := writeTestManifest(snapshotDir, manifest)
 		require.NoError(t, err)
@@ -1551,7 +1551,7 @@ func TestRestoreFromFull_MissingFiles(t *testing.T) {
 
 		// 3. Verification
 		assert.FileExists(t, filepath.Join(targetDataDir, "string_mapping.log"))
-		assert.NoFileExists(t, filepath.Join(targetDataDir, "deleted_series.json"))
+		assert.NoFileExists(t, filepath.Join(targetDataDir, "deleted_series.bin"))
 	})
 
 	t.Run("MissingWALDirectory", func(t *testing.T) {
@@ -1668,7 +1668,7 @@ func TestRestoreFromFull(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "wal", "000001.wal"), []byte("wal1"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "index", "index1.sst"), []byte("index1"), 0644)) // A file inside the index dir
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "index", core.IndexManifestFileName), []byte("{}"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "deleted_series.json"), []byte("{}"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "deleted_series.bin"), []byte("{}"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "string_mapping.log"), []byte("str"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(snapshotDir, "series_mapping.log"), []byte("ser"), 0644))
 
@@ -1684,7 +1684,7 @@ func TestRestoreFromFull(t *testing.T) {
 			},
 		},
 		WALFile:           "wal",
-		DeletedSeriesFile: "deleted_series.json",
+		DeletedSeriesFile: "deleted_series.bin",
 		StringMappingFile: "string_mapping.log",
 		SeriesMappingFile: "series_mapping.log",
 	}
@@ -1712,7 +1712,7 @@ func TestRestoreFromFull(t *testing.T) {
 	assert.FileExists(t, filepath.Join(targetDataDir, "wal", "000001.wal"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "index", "index1.sst"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "index", core.IndexManifestFileName))
-	assert.FileExists(t, filepath.Join(targetDataDir, "deleted_series.json"))
+	assert.FileExists(t, filepath.Join(targetDataDir, "deleted_series.bin"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "string_mapping.log"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "series_mapping.log"))
 	assert.FileExists(t, filepath.Join(targetDataDir, "CURRENT"))
@@ -1835,7 +1835,7 @@ func TestRestoreFromFull_ErrorHandling(t *testing.T) {
 		// Setup: Create a CURRENT file so the os.Stat check passes, but reading it will fail.
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
 		require.NoError(t, os.WriteFile(currentFilePath, []byte("some_manifest.bin"), 0644))
-		defer os.Remove(currentFilePath) // Ensure cleanup for the next sub-test
+		defer sys.Remove(currentFilePath) // Ensure cleanup for the next sub-test
 
 		// Simulate the error condition
 		expectedErr := fmt.Errorf("simulated read file error")
@@ -1873,7 +1873,7 @@ func TestRestoreFromFull_ErrorHandling(t *testing.T) {
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
 		manifestFileName := "MANIFEST_dummy.bin"
 		require.NoError(t, os.WriteFile(currentFilePath, []byte(manifestFileName), 0644))
-		defer os.Remove(currentFilePath) // Cleanup for the next sub-test
+		defer sys.Remove(currentFilePath) // Cleanup for the next sub-test
 
 		// Create the manifest file itself so the os.Stat check passes.
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
@@ -1881,7 +1881,7 @@ func TestRestoreFromFull_ErrorHandling(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, WriteManifestBinary(f, &core.SnapshotManifest{}))
 		f.Close()
-		defer os.Remove(manifestPath)
+		defer sys.Remove(manifestPath)
 
 		// Simulate the error condition
 		expectedErr := fmt.Errorf("simulated mkdir temp error")
@@ -1915,12 +1915,12 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		manifestFileName := "MANIFEST_dummy.bin"
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
 		require.NoError(t, os.WriteFile(currentFilePath, []byte(manifestFileName), 0644))
-		defer os.Remove(currentFilePath)
+		defer sys.Remove(currentFilePath)
 
 		// Create the manifest file so that os.Stat passes and os.Open is called.
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
 		require.NoError(t, os.WriteFile(manifestPath, []byte("dummy content"), 0644))
-		defer os.Remove(manifestPath)
+		defer sys.Remove(manifestPath)
 
 		expectedErr := fmt.Errorf("simulated open error")
 		helper.InterceptOpen = func(name string) (sys.FileHandle, error) {
@@ -1947,10 +1947,10 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
 		manifestFileName := "MANIFEST_read_err.bin"
 		require.NoError(t, os.WriteFile(currentFilePath, []byte(manifestFileName), 0644))
-		defer os.Remove(currentFilePath)
+		defer sys.Remove(currentFilePath)
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
 		require.NoError(t, os.WriteFile(manifestPath, []byte("dummy content"), 0644))
-		defer os.Remove(manifestPath)
+		defer sys.Remove(manifestPath)
 
 		err := RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)
@@ -1968,7 +1968,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
 		manifestFileName := "MANIFEST_mkdir_err.bin"
 		require.NoError(t, os.WriteFile(currentFilePath, []byte(manifestFileName), 0644))
-		defer os.Remove(currentFilePath)
+		defer sys.Remove(currentFilePath)
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
 		f, err := os.Create(manifestPath)
 		require.NoError(t, err)
@@ -1980,7 +1980,7 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		}
 		require.NoError(t, WriteManifestBinary(f, manifestWithFile))
 		f.Close()
-		defer os.Remove(manifestPath)
+		defer sys.Remove(manifestPath)
 
 		// Create the source file that the manifest points to
 		require.NoError(t, os.MkdirAll(filepath.Join(snapshotDir, "sst"), 0755))
@@ -2008,17 +2008,17 @@ func TestRestoreFromFull_ErrorHandling_Continued(t *testing.T) {
 		currentFilePath := filepath.Join(snapshotDir, "CURRENT")
 		manifestFileName := "MANIFEST_copy_file_err.bin"
 		require.NoError(t, os.WriteFile(currentFilePath, []byte(manifestFileName), 0644))
-		defer os.Remove(currentFilePath)
+		defer sys.Remove(currentFilePath)
 		manifestPath := filepath.Join(snapshotDir, manifestFileName)
 		f, err := os.Create(manifestPath)
 		require.NoError(t, err)
-		manifestWithFile := &core.SnapshotManifest{DeletedSeriesFile: "deleted_series.json"} //nolint:govet
+		manifestWithFile := &core.SnapshotManifest{DeletedSeriesFile: "deleted_series.bin"} //nolint:govet
 		require.NoError(t, WriteManifestBinary(f, manifestWithFile))
 		f.Close()
-		defer os.Remove(manifestPath)
-		srcFilePath := filepath.Join(snapshotDir, "deleted_series.json")
+		defer sys.Remove(manifestPath)
+		srcFilePath := filepath.Join(snapshotDir, "deleted_series.bin")
 		require.NoError(t, os.WriteFile(srcFilePath, []byte("{}"), 0644))
-		defer os.Remove(srcFilePath)
+		defer sys.Remove(srcFilePath)
 
 		err = RestoreFromFull(restoreOpts, snapshotDir)
 		require.Error(t, err)

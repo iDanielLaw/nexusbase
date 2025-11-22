@@ -124,7 +124,7 @@ func (m *mockFileRemover) Remove(name string) error {
 	}
 	// If not configured to fail, simulate successful removal by actually removing the file.
 	// This makes the test environment more realistic.
-	if err := os.Remove(name); err != nil {
+	if err := sys.Remove(name); err != nil {
 		return err
 	}
 	m.removedFiles = append(m.removedFiles, name)
@@ -412,7 +412,7 @@ func TestCompactionManager_Merge_WriterAddError(t *testing.T) {
 	inputSST := createDummySSTable(t, cm.Engine, 101, []testEntry{
 		{metric: "merge.test.metric", tags: map[string]string{"id": "1"}, value: "val1"},
 	})
-	t.Cleanup(func() { inputSST.Close(); os.Remove(inputSST.FilePath()) })
+	t.Cleanup(func() { inputSST.Close(); sys.Remove(inputSST.FilePath()) })
 
 	_, err := cm.mergeMultipleSSTables(context.Background(), []*sstable.SSTable{inputSST}, 1)
 	if err == nil {
@@ -433,7 +433,7 @@ func TestCompactionManager_Merge_WriterFinishError(t *testing.T) {
 		{metric: "merge.test.metric", tags: map[string]string{"id": "1"}, value: "val1"},
 		{metric: "merge.test.metric", tags: map[string]string{"id": "2"}, value: "val2"},
 	})
-	t.Cleanup(func() { inputSST.Close(); os.Remove(inputSST.FilePath()) })
+	t.Cleanup(func() { inputSST.Close(); sys.Remove(inputSST.FilePath()) })
 
 	// To trigger Finish, we need enough data to cause a rollover or the final flush.
 	// Mock CurrentSize() to be large enough to trigger rollover after first Add.
@@ -458,7 +458,7 @@ func TestCompactionManager_Merge_LoadSSTableError(t *testing.T) {
 		{metric: "merge.test.metric", tags: map[string]string{"id": "1"}, value: "val1"},
 		{metric: "merge.test.metric", tags: map[string]string{"id": "2"}, value: "val2"},
 	})
-	t.Cleanup(func() { inputSST.Close(); os.Remove(inputSST.FilePath()) })
+	t.Cleanup(func() { inputSST.Close(); sys.Remove(inputSST.FilePath()) })
 
 	// To trigger LoadSSTable, we need enough data to cause a rollover.
 	mockWriter.currentSizeFunc = func() int64 { return cm.opts.TargetSSTableSize + 1 }
@@ -472,7 +472,7 @@ func TestCompactionManager_Merge_LoadSSTableError(t *testing.T) {
 	}
 	// Clean up the dummy corrupted file created by the mock factory
 	if mockWriter.filePath != "" {
-		os.Remove(mockWriter.filePath)
+		sys.Remove(mockWriter.filePath)
 	}
 }
 

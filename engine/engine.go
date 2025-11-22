@@ -87,6 +87,12 @@ type StorageEngineOptions struct {
 	Logger                         *slog.Logger
 	Clock                          clock.Clock
 
+	// EnableSSTablePreallocate controls whether the engine will attempt to
+	// preallocate space for new SSTable segment files. This setting is
+	// provided by configuration and can be used to disable preallocation
+	// on platforms or deployments where it's undesirable.
+	EnableSSTablePreallocate bool
+
 	SelfMonitoringEnabled      bool
 	SelfMonitoringPrefix       string
 	SelfMonitoringIntervalMs   int
@@ -273,7 +279,7 @@ func (e *storageEngine) Start() error {
 		return fmt.Errorf("data directory %s is not writable: %w", e.opts.DataDir, testErr)
 	} else {
 		_ = testFile.Close()
-		_ = os.Remove(testFilePath)
+		_ = sys.Remove(testFilePath)
 	}
 
 	e.initializeMetrics()
@@ -436,8 +442,8 @@ func (e *storageEngine) wipeDataDirectory() error {
 		filepath.Join(e.opts.DataDir, "string_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series_mapping.log"),
 		filepath.Join(e.opts.DataDir, "series.log"),
-		filepath.Join(e.opts.DataDir, "deleted_series.json"),
-		filepath.Join(e.opts.DataDir, "range_tombstones.json"),
+		filepath.Join(e.opts.DataDir, "deleted_series.bin"),
+		filepath.Join(e.opts.DataDir, "range_tombstones.bin"),
 		filepath.Join(e.opts.DataDir, "tag_index"),
 	}
 
@@ -584,6 +590,18 @@ func (e *storageEngine) initializeMetrics() {
 			_, _, _, s := core.BufferPool.GetMetrics()
 			return s
 		})
+
+		// Publish preallocation counters from the sys package so operators can
+		// observe how often preallocation succeeds, fails, or is unsupported.
+		publishExpvarFunc("engine_prealloc_successes_total", func() interface{} {
+			return int64(sys.PreallocSuccessCount())
+		})
+		publishExpvarFunc("engine_prealloc_failures_total", func() interface{} {
+			return int64(sys.PreallocFailureCount())
+		})
+		publishExpvarFunc("engine_prealloc_unsupported_total", func() interface{} {
+			return int64(sys.PreallocUnsupportedCount())
+		})
 		publishExpvarFunc("engine_memtable_key_pool_hits_total", func() any {
 			h, _, _ := memtable.KeyPool.GetMetrics()
 			return h
@@ -614,6 +632,56 @@ func (e *storageEngine) initializeMetrics() {
 		e.activeSeriesMu.RLock()
 		defer e.activeSeriesMu.RUnlock()
 		return len(e.activeSeries)
+	}
+
+	// Expose whether SSTable preallocation is enabled via metrics (1 = enabled, 0 = disabled)
+	if e.metrics.PreallocateEnabled != nil {
+		if e.opts.EnableSSTablePreallocate {
+			e.metrics.PreallocateEnabled.Set(1)
+		} else {
+			e.metrics.PreallocateEnabled.Set(0)
+		}
+	}
+
+	// Populate the preallocation counters initially so non-global metric
+	// collectors still have baseline values.
+	if e.metrics.PreallocSuccesses != nil {
+		e.metrics.PreallocSuccesses.Set(int64(sys.PreallocSuccessCount()))
+	}
+	if e.metrics.PreallocFailures != nil {
+		e.metrics.PreallocFailures.Set(int64(sys.PreallocFailureCount()))
+	}
+	if e.metrics.PreallocUnsupported != nil {
+		e.metrics.PreallocUnsupported.Set(int64(sys.PreallocUnsupportedCount()))
+	}
+
+	// If metrics are not published globally, spawn a background updater that
+	// periodically refreshes the preallocation counters so non-global expvar
+	// collectors see near-real-time values. The updater listens on the engine
+	// shutdown channel and is synchronized with the engine WaitGroup.
+	if !e.metrics.PublishedGlobally {
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if e.metrics.PreallocSuccesses != nil {
+						e.metrics.PreallocSuccesses.Set(int64(sys.PreallocSuccessCount()))
+					}
+					if e.metrics.PreallocFailures != nil {
+						e.metrics.PreallocFailures.Set(int64(sys.PreallocFailureCount()))
+					}
+					if e.metrics.PreallocUnsupported != nil {
+						e.metrics.PreallocUnsupported.Set(int64(sys.PreallocUnsupportedCount()))
+					}
+				case <-e.shutdownChan:
+					return
+				}
+			}
+		}()
 	}
 	e.metrics.mutableMemtableSizeFunc = func() interface{} {
 		e.mu.RLock()
@@ -797,7 +865,7 @@ func getTableIDs(tables []*sstable.SSTable) []uint64 {
 
 type realFileRemover struct{}
 
-func (r *realFileRemover) Remove(name string) error { return os.Remove(name) }
+func (r *realFileRemover) Remove(name string) error { return sys.Remove(name) }
 
 func (e *storageEngine) closeWAL() error {
 	if e.wal == nil {

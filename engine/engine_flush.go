@@ -13,6 +13,7 @@ import (
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexuscore/types"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -323,7 +324,7 @@ func (e *storageEngine) _flushMemtableToL0SSTable(memToFlush *memtable.Memtable,
 	}
 	newSST, err := sstable.LoadSSTable(loadOpts)
 	if err != nil {
-		os.Remove(writer.FilePath())
+		sys.Remove(writer.FilePath())
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed_to_load_new_sstable")
 		return nil, fmt.Errorf("failed to load newly created SSTable %s: %w", writer.FilePath(), err)

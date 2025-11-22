@@ -60,6 +60,12 @@ type EngineMetrics struct {
 	ReplicationDeleteSeriesTotal *expvar.Int
 	ReplicationDeleteRangeTotal  *expvar.Int
 
+	PreallocateEnabled *expvar.Int
+
+	PreallocSuccesses   *expvar.Int
+	PreallocFailures    *expvar.Int
+	PreallocUnsupported *expvar.Int
+
 	activeSeriesCountFunc                func() interface{}
 	mutableMemtableSizeFunc              func() interface{}
 	immutableMemtablesCountFunc          func() interface{}
@@ -138,6 +144,12 @@ func NewEngineMetrics(publishGlobally bool, prefix string) *EngineMetrics {
 		ReplicationPutTotal:          newIntFunc(prefix + "replication_put_total"),
 		ReplicationDeleteSeriesTotal: newIntFunc(prefix + "replication_delete_series_total"),
 		ReplicationDeleteRangeTotal:  newIntFunc(prefix + "replication_delete_range_total"),
+
+		PreallocateEnabled: newIntFunc(prefix + "preallocate_enabled"),
+
+		PreallocSuccesses:   newIntFunc(prefix + "prealloc_successes_total"),
+		PreallocFailures:    newIntFunc(prefix + "prealloc_failures_total"),
+		PreallocUnsupported: newIntFunc(prefix + "prealloc_unsupported_total"),
 	}
 
 	histMaps := []*expvar.Map{

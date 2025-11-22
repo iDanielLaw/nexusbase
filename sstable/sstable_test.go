@@ -165,7 +165,7 @@ func TestWriteAndLoadSSTable_New(t *testing.T) {
 	if writtenSST != nil {
 		defer writtenSST.Close()
 	}
-	defer os.Remove(sstPath) // Clean up
+	defer sys.Remove(sstPath) // Clean up
 
 	// Check basic properties of the in-memory SSTable struct after writing and loading
 	if writtenSST == nil {
@@ -257,7 +257,7 @@ func TestLoadSSTable_CorruptedIndexData(t *testing.T) {
 	// 1. Create a valid SSTable using the general helper
 	sst, sstPath := writeTestSSTableGeneral(t, tempDir, entries, fileID, logger)
 	sst.Close() // Close the file handle so we can modify it
-	defer os.Remove(sstPath)
+	defer sys.Remove(sstPath)
 
 	// 2. Read the file content and corrupt the indexLen in the footer.
 	//    This should cause LoadSSTable to fail when reading the index data.
@@ -315,7 +315,7 @@ func TestLoadSSTable_CorruptedBloomFilterData(t *testing.T) {
 	// 1. Create a valid SSTable using the general helper
 	sst, sstPath := writeTestSSTableGeneral(t, tempDir, entries, fileID, logger)
 	sst.Close() // Close the file handle so we can modify it
-	defer os.Remove(sstPath)
+	defer sys.Remove(sstPath)
 
 	// 2. Read the file content and corrupt the bloomFilterLen in the footer.
 	//    This should cause LoadSSTable to fail when reading the bloom filter data.
@@ -377,7 +377,7 @@ func TestLoadSSTable_TruncatedFile(t *testing.T) {
 	// 1. Create a valid SSTable using the general helper
 	sst, sstPath := writeTestSSTableGeneral(t, tempDir, entries, fileID, logger)
 	sst.Close() // Close the file handle so we can modify it
-	defer os.Remove(sstPath)
+	defer sys.Remove(sstPath)
 
 	originalFileSize := sst.Size()
 	if originalFileSize < int64(FooterSize) {
@@ -427,7 +427,7 @@ func TestLoadSSTable_TruncatedFile(t *testing.T) {
 			if err := os.WriteFile(subTestSSTPath, truncatedData, 0644); err != nil {
 				t.Fatalf("Failed to write truncated SSTable file for sub-test: %v", err)
 			}
-			defer os.Remove(subTestSSTPath)
+			defer sys.Remove(subTestSSTPath)
 
 			// Attempt to load the truncated SSTable
 			loadOpts := LoadSSTableOptions{
@@ -465,7 +465,7 @@ func TestSSTable_Get_New(t *testing.T) {
 	if sst != nil {
 		defer sst.Close()
 	}
-	defer os.Remove(sstPath)
+	defer sys.Remove(sstPath)
 
 	// Metrics for cache testing
 	cacheHits := new(expvar.Int) // Initialize to 0
@@ -586,7 +586,7 @@ func TestLoadSSTable_FileTooSmall_New(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("short"), 0644); err != nil {
 		t.Fatalf("Failed to write small file: %v", err)
 	}
-	defer os.Remove(filePath)
+	defer sys.Remove(filePath)
 
 	loadOpts := LoadSSTableOptions{
 		FilePath:   filePath,
@@ -913,7 +913,7 @@ func TestSSTableIterator_New(t *testing.T) {
 	if sst != nil {
 		defer sst.Close()
 	}
-	defer os.Remove(sstPath)
+	defer sys.Remove(sstPath)
 
 	blockCache := cache.NewLRUCache(10, nil, nil, nil) // No onEvicted func for test
 	blockCache.SetMetrics(nil, nil)
@@ -1184,7 +1184,7 @@ func TestSSTable_VerifyIntegrity_DeepChecks(t *testing.T) {
 		t.Fatalf("writer.Finish() error = %v", err)
 	}
 	sstPath := writer.FilePath()
-	defer os.Remove(sstPath)
+	defer sys.Remove(sstPath)
 
 	blockCache := cache.NewLRUCache(10, nil, nil, nil) // No onEvicted func for test
 	blockCache.SetMetrics(nil, nil)
@@ -1339,7 +1339,7 @@ func TestSSTable_CorruptedBlockChecksum(t *testing.T) {
 	if err := os.WriteFile(corruptedSSTPath, fileData, 0644); err != nil {
 		t.Fatalf("Failed to write corrupted SSTable file: %v", err)
 	}
-	defer os.Remove(corruptedSSTPath)
+	defer sys.Remove(corruptedSSTPath)
 
 	// 4. Attempt to load and read from the corrupted SSTable
 	corruptedLoadOpts := LoadSSTableOptions{
@@ -1444,7 +1444,7 @@ func TestSSTable_Close(t *testing.T) {
 
 	// 1. Create a valid SSTable
 	sst, sstPath := writeTestSSTableGeneral(t, tempDir, entries, fileID, logger)
-	defer os.Remove(sstPath) // Ensure cleanup even if test fails early
+	defer sys.Remove(sstPath) // Ensure cleanup even if test fails early
 
 	// 2. First call to Close should succeed
 	err := sst.Close()

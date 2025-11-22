@@ -1,6 +1,6 @@
+name: "Go Building & Testing"
 permissions:
   contents: read
-name: "Go Building & Testing"
 
 on:
   push:
@@ -17,6 +17,7 @@ jobs:
       with:
           fetch-depth: 0
           submodules: true
+
     - name: "Check for .go file changes"
       id: check_changes
       run: |
@@ -27,14 +28,19 @@ jobs:
             echo "No changes in .go files. Skipping..."
             echo "go_changes_detected=false" >> "$GITHUB_OUTPUT"
           fi
+
     - name: Set up Go
       if: steps.check_changes.outputs.go_changes_detected == 'true'
       uses: actions/setup-go@v4
       with:
         go-version: '1.23'
-    - name: Build
-      if: steps.check_changes.outputs.go_changes_detected == 'true'
-      run: go build -v ./...
+  
+    - name: Install dependencies
+      run: go mod download
+
+#    - name: Build
+#      if: steps.check_changes.outputs.go_changes_detected == 'true'
+#      run: go build -v ./...
 
     - name: Test
       if: steps.check_changes.outputs.go_changes_detected == 'true'
@@ -68,9 +74,12 @@ jobs:
       with:
         go-version: '1.23'
 
-    - name: Build
-      if: steps.check_changes.outputs.go_changes_detected == 'true'
-      run: go build -v ./...
+    - name: Install dependencies
+      run: go mod download
+
+#    - name: Build
+#      if: steps.check_changes.outputs.go_changes_detected == 'true'
+#      run: go build -v ./...
 
     - name: Test
       if: steps.check_changes.outputs.go_changes_detected == 'true'

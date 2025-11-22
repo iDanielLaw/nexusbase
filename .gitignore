@@ -44,3 +44,4 @@ openssl.cnf
 *.out
 *.exe
 docs
+*.prof

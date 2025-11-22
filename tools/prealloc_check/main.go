@@ -32,7 +32,7 @@ func main() {
 	}
 	defer func() {
 		f.Close()
-		os.Remove(tmp)
+		sys.Remove(tmp)
 	}()
 
 	// Try unix.Fallocate with KEEP_SIZE first and report exact error values.

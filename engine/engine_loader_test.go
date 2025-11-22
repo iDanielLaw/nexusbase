@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/INLOpen/nexusbase/sys"
+
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/internal"
 	"github.com/stretchr/testify/assert"
@@ -116,11 +118,11 @@ func TestStateLoader_Load_FallbackScan(t *testing.T) {
 	require.NoError(t, engine1.Close())
 
 	// Now, remove the manifest to force a fallback scan
-	require.NoError(t, os.Remove(filepath.Join(dataDir, core.CurrentFileName)))
+	require.NoError(t, sys.Remove(filepath.Join(dataDir, core.CurrentFileName)))
 	files, _ := os.ReadDir(dataDir)
 	for _, f := range files {
 		if strings.HasPrefix(f.Name(), "MANIFEST") {
-			os.Remove(filepath.Join(dataDir, f.Name()))
+			sys.Remove(filepath.Join(dataDir, f.Name()))
 		}
 	}
 

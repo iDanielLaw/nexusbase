@@ -349,7 +349,7 @@ func (w *WAL) Purge(upToIndex uint64) error {
 				continue
 			}
 			path := filepath.Join(w.dir, core.FormatSegmentFileName(index))
-			if err := os.Remove(path); err != nil {
+			if err := sys.Remove(path); err != nil {
 				w.logger.Error("Failed to purge WAL segment", "path", path, "error", err)
 			} else {
 				purgedCount++

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/INLOpen/nexusbase/sys"
+
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core" // For core.EntryType
 	"github.com/INLOpen/nexuscore/types"
@@ -97,7 +99,7 @@ func setupCompressionTest(t *testing.T) *testSetup {
 		if sstSnappy != nil {
 			sstSnappy.Close()
 		}
-		os.Remove(snappyPath)
+		sys.Remove(snappyPath)
 	})
 	t.Logf("SSTable with Snappy compression created: %s, Size: %d bytes, MinKey: %s, MaxKey: %s", snappyPath, snappySize, string(sstSnappy.MinKey()), string(sstSnappy.MaxKey()))
 
@@ -106,7 +108,7 @@ func setupCompressionTest(t *testing.T) *testSetup {
 		if sstLz4 != nil {
 			sstLz4.Close()
 		}
-		os.Remove(lz4Path)
+		sys.Remove(lz4Path)
 	})
 	t.Logf("SSTable with LZ4 compression created: %s, Size: %d bytes", lz4Path, lz4Size)
 
@@ -115,7 +117,7 @@ func setupCompressionTest(t *testing.T) *testSetup {
 		if sstZstd != nil {
 			sstZstd.Close()
 		}
-		os.Remove(zstdPath)
+		sys.Remove(zstdPath)
 	})
 	t.Logf("SSTable with ZSTD compression created: %s, Size: %d bytes", zstdPath, zstdSize)
 
@@ -124,7 +126,7 @@ func setupCompressionTest(t *testing.T) *testSetup {
 		if sstNone != nil {
 			sstNone.Close()
 		}
-		os.Remove(nonePath)
+		sys.Remove(nonePath)
 	})
 	t.Logf("SSTable with No compression created: %s, Size: %d bytes", nonePath, noneSize)
 
@@ -474,7 +476,7 @@ func TestSSTable_Compression_IteratorEdgeCases(t *testing.T) {
 				if sstOnlyDeletes != nil {
 					defer sstOnlyDeletes.Close()
 				}
-				defer os.Remove(sstOnlyDeletesPath)
+				defer sys.Remove(sstOnlyDeletesPath)
 
 				iter, err := sstOnlyDeletes.NewIterator(nil, nil, nil, types.Ascending)
 				if err != nil {

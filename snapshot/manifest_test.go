@@ -32,8 +32,8 @@ func TestManifest_RoundTrip_Full(t *testing.T) {
 			},
 		},
 		WALFile:             "wal",
-		DeletedSeriesFile:   "deleted_series.json",
-		RangeTombstonesFile: "range_tombstones.json",
+		DeletedSeriesFile:   "deleted_series.bin",
+		RangeTombstonesFile: "range_tombstones.bin",
 		StringMappingFile:   "string_mapping.log",
 		SeriesMappingFile:   "series_mapping.log",
 		SSTableCompression:  "snappy",
@@ -216,7 +216,7 @@ func TestStringBytesWithLength_RoundTrip(t *testing.T) {
 	})
 
 	t.Run("Bytes", func(t *testing.T) {
-		testBytes := [][]byte{[]byte("hello"), {}, nil, []byte{0, 1, 2, 3, 4, 5}}
+		testBytes := [][]byte{[]byte("hello"), {}, nil, {0, 1, 2, 3, 4, 5}}
 		for _, b := range testBytes {
 			var buf bytes.Buffer
 			err := writeBytesWithLength(&buf, b)

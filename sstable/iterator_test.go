@@ -3,9 +3,10 @@ package sstable
 import (
 	"bytes"
 	"log/slog"
-	"os"
 	"sort"
 	"testing"
+
+	"github.com/INLOpen/nexusbase/sys"
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
@@ -94,7 +95,7 @@ func setupIteratorTest(t *testing.T) (*SSTable, []testEntry) {
 	sst, sstPath := writeTestSSTableForIterator(t, tempDir, entries, fileID, logger)
 	t.Cleanup(func() {
 		sst.Close()
-		os.Remove(sstPath)
+		sys.Remove(sstPath)
 	})
 
 	return sst, entries
@@ -237,7 +238,7 @@ func TestSSTableIterator_EdgeCases(t *testing.T) {
 		tempDir := t.TempDir()
 		emptySST, path := writeTestSSTableForIterator(t, tempDir, []testEntry{}, 202, slog.Default())
 		defer emptySST.Close()
-		defer os.Remove(path)
+		defer sys.Remove(path)
 
 		it, err := emptySST.NewIterator(nil, nil, nil, types.Ascending)
 		require.NoError(t, err)

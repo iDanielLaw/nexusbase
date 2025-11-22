@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/INLOpen/nexusbase/sys"
+
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/stretchr/testify/assert"
@@ -354,7 +356,7 @@ func TestSSTable_VerifyIntegrity_BloomFilterFalseNegative(t *testing.T) {
 	require.NoError(t, writer.Add(entries[0].Key, entries[0].Value, entries[0].EntryType, entries[0].PointID))
 	require.NoError(t, writer.Finish())
 	validPath := writer.FilePath()
-	defer os.Remove(validPath)
+	defer sys.Remove(validPath)
 
 	// 2. Read the valid data, corrupt it in memory, and write it back.
 	validData, err := os.ReadFile(validPath)
