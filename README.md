@@ -74,6 +74,35 @@
     ```bash
     ./tsdb-server -config /path/to/your/config.yaml
     ```
+### เลือก Engine (Engine Mode)
+
+NexusBase มีสองการใช้งานของ engine ในโค้ด: the legacy `StorageEngine` (เรียกว่า "engine") และ lightweight `Engine2` (เรียกว่า "engine2").
+ค่าคอนฟิกใหม่ `engine.mode` ควบคุมว่าส่วนใดของ engine จะถูกสตาร์ทเมื่อรันเซิร์ฟเวอร์:
+
+- `engine` : รัน `StorageEngine` แบบดั้งเดิม (LSM-based).
+- `engine2` (recommended default): รัน `Engine2` แบบ lightweight ซึ่งในเวอร์ชันนี้ถูกตั้งให้เป็นค่าเริ่มต้นของระบบ — ใช้เมื่อคุณต้องการให้ Engine2 ทำหน้าที่เป็น storage engine หลัก
+- `both`: รัน `StorageEngine` แบบดั้งเดิมเป็น engine หลัก และยังสตาร์ท `Engine2` (เชื่อมต่อกับ `HookManager` ของ engine หลัก) เพื่อความเข้ากันได้หรือการย้ายข้อมูลแบบคู่ขนาน
+
+ตัวอย่างการตั้งค่าใน `configs/config-test-leader.yaml`:
+
+```yaml
+engine:
+    mode: both
+    data_dir: "./data-leader"
+    # ... (อื่นๆ)
+```
+
+และตัวอย่าง follower ที่ใช้ `engine2`:
+
+```yaml
+engine:
+    mode: engine2
+    data_dir: "./data-follower"
+    # ... (อื่นๆ)
+```
+
+แนะนำ: ถ้าคุณต้องการทดสอบฟังก์ชันใหม่หรือรันในสภาพแวดล้อมเบาๆ ให้ใช้ `engine2`. ถ้าต้องการใช้งาน LSM เต็มรูปแบบใน production ให้ใช้ `engine`.
+
 ## Documentation
 WIP
 

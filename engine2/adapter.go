@@ -3,6 +3,7 @@ package engine2
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"sync/atomic"
@@ -33,24 +34,37 @@ type Engine2Adapter struct {
 	*Engine2
 	// simple monotonic sstable id allocator
 	nextSSTableID uint64
-	// simple in-memory string store for ID mapping
-	stringStore *inMemoryStringStore
+	// string store for ID mapping (persisted)
+	stringStore indexer.StringStoreInterface
 	// manifest manager for discovered SSTables
 	manifestMgr *ManifestManager
+	// optional hook manager passed from hosting engine/server
+	hookManager hooks.HookManager
 }
 
 // NewEngine2Adapter wraps an existing Engine2.
 func NewEngine2Adapter(e *Engine2) *Engine2Adapter {
+	return NewEngine2AdapterWithHooks(e, nil)
+}
+
+// NewEngine2AdapterWithHooks constructs an adapter and allows injecting a
+// real hooks.HookManager to be passed into the persisted StringStore.
+func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapter {
 	a := &Engine2Adapter{
 		Engine2:       e,
 		nextSSTableID: uint64(time.Now().UnixNano()),
-		stringStore:   newInMemoryStringStore(),
+		stringStore:   indexer.NewStringStore(slog.Default(), hm),
+		hookManager:   hm,
 	}
 	// initialize manifest manager (best-effort)
 	if e != nil {
 		manifestPath := filepath.Join(e.GetDataRoot(), "sstables", "manifest.json")
 		if mgr, err := NewManifestManager(manifestPath); err == nil {
 			a.manifestMgr = mgr
+		}
+		// try to load string store from data root
+		if ss := a.stringStore; ss != nil {
+			_ = ss.LoadFromFile(e.GetDataRoot())
 		}
 	}
 	return a
@@ -324,6 +338,15 @@ func (a *Engine2Adapter) Close() error {
 			return err
 		}
 	}
+	// close string store if present
+	if a.stringStore != nil {
+		_ = a.stringStore.Sync()
+		_ = a.stringStore.Close()
+	}
+	// close manifest manager
+	if a.manifestMgr != nil {
+		a.manifestMgr.Close()
+	}
 	// drop memtable reference
 	a.mem = nil
 	return nil
@@ -335,7 +358,7 @@ func (a *Engine2Adapter) GetPubSub() (engine.PubSubInterface, error) {
 }
 func (a *Engine2Adapter) GetSnapshotsBaseDir() string                   { return filepath.Join(a.dataRoot, "snapshots") }
 func (a *Engine2Adapter) Metrics() (*engine.EngineMetrics, error)       { return nil, nil }
-func (a *Engine2Adapter) GetHookManager() hooks.HookManager             { return nil }
+func (a *Engine2Adapter) GetHookManager() hooks.HookManager             { return a.hookManager }
 func (a *Engine2Adapter) GetDLQDir() string                             { return filepath.Join(a.dataRoot, "dlq") }
 func (a *Engine2Adapter) GetDataDir() string                            { return a.dataRoot }
 func (a *Engine2Adapter) GetWALPath() string                            { return filepath.Join(a.dataRoot, "wal") }

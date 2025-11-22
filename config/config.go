@@ -79,6 +79,11 @@ type IndexConfig struct {
 
 // EngineConfig holds all engine-related configurations, grouped logically.
 type EngineConfig struct {
+	// Mode selects which engine implementation to run. Valid values:
+	// - "engine": the legacy StorageEngine (default)
+	// - "engine2": the lightweight Engine2 implementation
+	// - "both": run both (legacy engine as primary, Engine2 loaded for compatibility)
+	Mode                 string           `yaml:"mode"`
 	DataDir              string           `yaml:"data_dir"`
 	RetentionPeriod      string           `yaml:"retention_period"`
 	MetadataSyncInterval string           `yaml:"metadata_sync_interval"`
@@ -188,6 +193,7 @@ func Load(r io.Reader) (*Config, error) {
 			},
 		},
 		Engine: EngineConfig{
+			Mode:                 "engine2",
 			DataDir:              "./data",
 			RetentionPeriod:      "",
 			MetadataSyncInterval: "60s",
