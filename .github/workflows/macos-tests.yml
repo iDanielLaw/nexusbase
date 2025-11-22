@@ -1,4 +1,4 @@
-name: macOS Tests
+name: macOS Tests (Experimental)
 
 on:
   push:
