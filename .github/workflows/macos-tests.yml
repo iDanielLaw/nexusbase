@@ -22,10 +22,10 @@ jobs:
           fetch-depth: 0
           submodules: true
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Setup Golang with cache
+        uses: magnetikonline/action-golang-cache@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: go.mod
 
       - name: Install dependencies
         run: go mod download
