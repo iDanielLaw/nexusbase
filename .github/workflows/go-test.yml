@@ -32,6 +32,10 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: '1.23'
+  
+    - name: Install dependencies
+      run: go mod download
+
 #    - name: Build
 #      if: steps.check_changes.outputs.go_changes_detected == 'true'
 #      run: go build -v ./...
@@ -67,6 +71,9 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: '1.23'
+
+    - name: Install dependencies
+      run: go mod download
 
 #    - name: Build
 #      if: steps.check_changes.outputs.go_changes_detected == 'true'
