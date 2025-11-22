@@ -3,15 +3,15 @@ package engine2
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	// strconv and strings were used in previous implementation; keep none now
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
@@ -63,6 +63,9 @@ type Engine2Adapter struct {
 	snapshotMgr snapshot.ManagerInterface
 	// adapter lock used by snapshot provider methods
 	providerLock sync.Mutex
+	// memtable snapshot/flush configuration
+	memtableThreshold int64
+	clk               clock.Clock
 	// basic active series tracking (in-memory)
 	activeSeries   map[string]struct{}
 	activeSeriesMu sync.RWMutex
@@ -87,6 +90,9 @@ func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapte
 		activeSeries:  make(map[string]struct{}),
 		deletedSeries: make(map[string]uint64),
 	}
+	// defaults for memtable snapshot conversion
+	a.memtableThreshold = 1 << 30
+	a.clk = clock.SystemClockDefault
 	// initialize manifest manager (best-effort)
 	if e != nil {
 		manifestPath := filepath.Join(e.GetDataRoot(), "sstables", "manifest.json")
@@ -162,7 +168,7 @@ func (a *Engine2Adapter) Get(ctx context.Context, metric string, tags map[string
 		return nil, fmt.Errorf("engine2 not initialized")
 	}
 	if fv, ok := a.mem.Get(metric, tags, timestamp); ok {
-		if fv == nil || len(fv) == 0 {
+		if len(fv) == 0 {
 			return nil, sstable.ErrNotFound
 		}
 		return fv, nil
@@ -497,15 +503,119 @@ func (a *Engine2Adapter) GetTracer() trace.Tracer { return noop.NewTracerProvide
 
 func (a *Engine2Adapter) GetLevelsManager() levels.Manager {
 	if a.levelsMgr == nil {
-		if lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer("levels"), levels.PickOldest, 1.5, 1.0); err == nil {
+		if lm, err := levels.NewLevelsManager(7, 4, 1024, noop.NewTracerProvider().Tracer("levels"), levels.PickOldest, 1.5, 1.0); err == nil && lm != nil {
 			a.levelsMgr = lm
+		} else {
+			// Fallback: provide a minimal no-op implementation so snapshot manager
+			// can proceed without a fully-featured levels manager.
+			a.levelsMgr = &noopLevels{}
 		}
 	}
 	return a.levelsMgr
 }
 
+// noopLevels is a minimal no-op implementation of levels.Manager used as a
+// fallback when creating a real LevelsManager fails. It returns empty state
+// and no-ops for mutations.
+type noopLevels struct{}
+
+func (n *noopLevels) GetSSTablesForRead() ([]*levels.LevelState, func()) {
+	return []*levels.LevelState{}, func() {}
+}
+func (n *noopLevels) AddL0Table(table *sstable.SSTable) error                     { return nil }
+func (n *noopLevels) AddTablesToLevel(level int, tables []*sstable.SSTable) error { return nil }
+func (n *noopLevels) AddTableToLevel(level int, table *sstable.SSTable) error     { return nil }
+func (n *noopLevels) Close() error                                                { return nil }
+func (n *noopLevels) VerifyConsistency() []error                                  { return nil }
+func (n *noopLevels) GetTablesForLevel(level int) []*sstable.SSTable              { return nil }
+func (n *noopLevels) GetTotalSizeForLevel(level int) int64                        { return 0 }
+func (n *noopLevels) MaxLevels() int                                              { return 0 }
+func (n *noopLevels) NeedsL0Compaction(maxL0Files int, l0CompactionTriggerSize int64) bool {
+	return false
+}
+func (n *noopLevels) NeedsIntraL0Compaction(triggerFileCount int, maxFileSizeBytes int64) bool {
+	return false
+}
+func (n *noopLevels) PickIntraL0CompactionCandidates(triggerFileCount int, maxFileSizeBytes int64) []*sstable.SSTable {
+	return nil
+}
+func (n *noopLevels) NeedsLevelNCompaction(levelN int, multiplier int) bool        { return false }
+func (n *noopLevels) PickCompactionCandidateForLevelN(levelN int) *sstable.SSTable { return nil }
+func (n *noopLevels) GetOverlappingTables(level int, minKey, maxKey []byte) []*sstable.SSTable {
+	return nil
+}
+func (n *noopLevels) ApplyCompactionResults(sourceLevel, targetLevel int, newTables, oldTables []*sstable.SSTable) error {
+	return nil
+}
+func (n *noopLevels) RemoveTables(level int, tablesToRemove []uint64) error { return nil }
+func (n *noopLevels) GetLevels() []*levels.LevelState                       { return nil }
+func (n *noopLevels) GetTotalTableCount() int                               { return 0 }
+func (n *noopLevels) GetLevelForTable(tableID uint64) (int, bool)           { return -1, false }
+func (n *noopLevels) GetLevelTableCounts() (map[int]int, error)             { return nil, nil }
+
 func (a *Engine2Adapter) GetTagIndexManager() indexer.TagIndexManagerInterface {
 	return a.tagIndexManager
+}
+
+// noopWAL is a minimal no-op WAL implementation returned when no leader WAL
+// exists. It ensures callers can safely call Path() and ActiveSegmentIndex()
+// without nil pointer dereferences.
+type noopWAL struct{}
+
+func (n *noopWAL) AppendBatch(entries []core.WALEntry) error { return nil }
+func (n *noopWAL) Append(entry core.WALEntry) error          { return nil }
+func (n *noopWAL) Sync() error                               { return nil }
+func (n *noopWAL) Purge(upToIndex uint64) error              { return nil }
+func (n *noopWAL) Close() error                              { return nil }
+func (n *noopWAL) Path() string                              { return "" }
+func (n *noopWAL) SetTestingOnlyInjectCloseError(err error)  {}
+func (n *noopWAL) ActiveSegmentIndex() uint64                { return 0 }
+func (n *noopWAL) Rotate() error                             { return nil }
+func (n *noopWAL) NewStreamReader(fromSeqNum uint64) (wal.StreamReader, error) {
+	return nil, fmt.Errorf("noop wal has no stream reader")
+}
+
+// copyDir is a simple, best-effort directory copy helper used as a fallback
+// when os.Rename fails across devices. It copies files and creates directories
+// preserving file permissions where possible.
+func copyDir(src string, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		// copy file
+		r, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		w, err := os.Create(target)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(w, r); err != nil {
+			w.Close()
+			return err
+		}
+		if err := w.Close(); err != nil {
+			return err
+		}
+		return os.Chmod(target, info.Mode())
+	})
 }
 
 // privateManagerAdapter adapts an object that exposes GetLogFilePath() to the
@@ -546,13 +656,123 @@ func (a *Engine2Adapter) Lock()   { a.providerLock.Lock() }
 func (a *Engine2Adapter) Unlock() { a.providerLock.Unlock() }
 
 func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable, newMemtable *memtable.Memtable) {
-	// engine2 uses its own memtable type; snapshot manager expects top-level memtable package.
-	// Return nil to indicate nothing to flush.
-	return nil, nil
+	// Called while provider lock is held. Swap engine2's active memtable with
+	// a fresh one and return a top-level memtable snapshot suitable for the
+	// snapshot manager.
+	if a.Engine2 == nil {
+		return nil, nil
+	}
+
+	// Swap engine2's memtable under its own lock to keep invariants.
+	a.Engine2.mu.Lock()
+	old := a.Engine2.mem
+	a.Engine2.mem = NewMemtable()
+	a.Engine2.mu.Unlock()
+
+	if old == nil {
+		return nil, nil
+	}
+
+	// Convert engine2.Memtable -> top-level memtable.Memtable
+	// Use configured threshold and clock so the resulting memtable doesn't
+	// immediately trigger IsFull during snapshot operations.
+	top := memtable.NewMemtable(a.memtableThreshold, a.clk)
+
+	old.mu.RLock()
+	for metric, tagMap := range old.data {
+		for tagKey, tsMap := range tagMap {
+			tags := parseTagsFromKey(tagKey)
+			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			var pairs []core.EncodedSeriesTagPair
+			for k, v := range tags {
+				kid, _ := a.stringStore.GetOrCreateID(k)
+				vid, _ := a.stringStore.GetOrCreateID(v)
+				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
+			}
+			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
+
+			for ts, fv := range tsMap {
+				key := core.EncodeTSDBKey(metricID, pairs, ts)
+				if len(fv) == 0 {
+					// tombstone
+					_ = top.Put(key, nil, core.EntryTypeDelete, 0)
+				} else {
+					vb, encErr := fv.Encode()
+					if encErr != nil {
+						old.mu.RUnlock()
+						return nil, nil
+					}
+					_ = top.Put(key, vb, core.EntryTypePutEvent, 0)
+				}
+			}
+		}
+	}
+	old.mu.RUnlock()
+
+	return []*memtable.Memtable{top}, nil
 }
 
 func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable, parentCtx context.Context) error {
-	// No-op for engine2 implementation.
+	if mem == nil {
+		return nil
+	}
+
+	// Use memtable's FlushToSSTable if available: create a writer and delegate.
+	id := a.GetNextSSTableID()
+	sstDir := filepath.Join(a.dataRoot, "sstables")
+	writerOpts := core.SSTableWriterOptions{
+		DataDir:                      sstDir,
+		ID:                           id,
+		EstimatedKeys:                0, // best-effort, memtable will write whatever it has
+		BloomFilterFalsePositiveRate: 0.01,
+		BlockSize:                    32 * 1024,
+		Compressor:                   &compressors.NoCompressionCompressor{},
+		Logger:                       nil,
+	}
+	writer, err := sstable.NewSSTableWriter(writerOpts)
+	if err != nil {
+		return fmt.Errorf("failed to create sstable writer: %w", err)
+	}
+
+	// Use mem.FlushToSSTable when available on top-level memtable implementation.
+	if err := mem.FlushToSSTable(writer); err != nil {
+		writer.Abort()
+		return fmt.Errorf("failed to flush memtable to sstable: %w", err)
+	}
+	if err := writer.Finish(); err != nil {
+		writer.Abort()
+		return fmt.Errorf("failed to finish sstable writer: %w", err)
+	}
+
+	// Load SSTable to get *sstable.SSTable for levels manager
+	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: id}
+	sst, loadErr := sstable.LoadSSTable(loadOpts)
+	if loadErr != nil {
+		_ = sys.Remove(writer.FilePath())
+		return fmt.Errorf("failed to load newly created sstable %s: %w", writer.FilePath(), loadErr)
+	}
+
+	// Persist manifest entry
+	entry := SSTableManifestEntry{ID: id, FilePath: writer.FilePath(), KeyCount: sst.KeyCount(), CreatedAt: time.Now().UTC()}
+	manifestPath := filepath.Join(sstDir, "manifest.json")
+	if a.manifestMgr != nil {
+		if err := a.manifestMgr.AddEntry(entry); err != nil {
+			return fmt.Errorf("failed to persist manifest entry: %w", err)
+		}
+	} else {
+		if err := AppendManifestEntry(manifestPath, entry); err != nil {
+			return fmt.Errorf("failed to append sstable manifest: %w", err)
+		}
+	}
+
+	if a.GetLevelsManager() != nil && sst != nil {
+		if err := a.GetLevelsManager().AddL0Table(sst); err != nil {
+			slog.Default().Warn("levels manager AddL0Table failed", "err", err)
+		}
+		// Log successful registration for debugging snapshot inclusion.
+		slog.Default().Info("registered SSTable with levels manager", "id", sst.ID(), "path", sst.FilePath())
+	}
+
 	return nil
 }
 
@@ -583,15 +803,82 @@ func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 	if dataDir == "" {
 		return fmt.Errorf("data dir not configured")
 	}
+	// If the snapshot directory is inside the data directory, preserve it by
+	// moving it to a temporary location before wiping the data directory.
+	restoreFrom := snapshotDir
+	movedTempDir := ""
+	absDataDir, _ := filepath.Abs(dataDir)
+	absSnapDir, _ := filepath.Abs(snapshotDir)
+	// Normalize with path separator to avoid partial prefix matches.
+	if absDataDir != "" && strings.HasPrefix(absSnapDir, absDataDir+string(os.PathSeparator)) {
+		tmp, err := os.MkdirTemp("", "nexus-snapshot-restore-*")
+		if err != nil {
+			return fmt.Errorf("failed to create temp dir to preserve snapshot: %w", err)
+		}
+		moved := filepath.Join(tmp, filepath.Base(absSnapDir))
+		if err := os.Rename(absSnapDir, moved); err != nil {
+			// If rename fails (cross-device), attempt copy fallback by copying files.
+			if cpErr := copyDir(absSnapDir, moved); cpErr != nil {
+				return fmt.Errorf("failed to preserve snapshot before restore: rename err=%v copy err=%v", err, cpErr)
+			}
+			// Remove original after copy
+			_ = os.RemoveAll(absSnapDir)
+		}
+		restoreFrom = moved
+		movedTempDir = tmp
+	}
+
 	if err := os.RemoveAll(dataDir); err != nil {
+		// Attempt to clean up temp snapshot if we created one.
+		if movedTempDir != "" {
+			_ = os.RemoveAll(movedTempDir)
+		}
 		return fmt.Errorf("failed to wipe data directory before restore: %w", err)
 	}
+
 	mgr := a.GetSnapshotManager()
 	if mgr == nil {
+		if movedTempDir != "" {
+			_ = os.RemoveAll(movedTempDir)
+		}
 		return fmt.Errorf("snapshot manager not available")
 	}
-	if err := mgr.RestoreFrom(context.Background(), snapshotDir); err != nil {
+	if err := mgr.RestoreFrom(context.Background(), restoreFrom); err != nil {
+		if movedTempDir != "" {
+			_ = os.RemoveAll(movedTempDir)
+		}
 		return fmt.Errorf("snapshot restore failed: %w", err)
+	}
+
+	// After a successful restore, some providers (like engine2) expect
+	// SSTables to live under `sstables/` while snapshots use `sst/`.
+	// Move any restored `sst/` files into `sstables/` so engine2 finds them
+	// in its expected location. This is a best-effort, non-fatal step.
+	srcSst := filepath.Join(dataDir, "sst")
+	dstSstables := filepath.Join(dataDir, "sstables")
+	if fi, err := os.Stat(srcSst); err == nil && fi.IsDir() {
+		// ensure destination exists
+		if err := os.MkdirAll(dstSstables, 0o755); err == nil {
+			entries, rerr := os.ReadDir(srcSst)
+			if rerr == nil {
+				for _, e := range entries {
+					src := filepath.Join(srcSst, e.Name())
+					dst := filepath.Join(dstSstables, e.Name())
+					// try rename first, fall back to copyDir for robustness
+					if err := os.Rename(src, dst); err != nil {
+						_ = copyDir(src, dst)
+						_ = os.RemoveAll(src)
+					}
+				}
+				// remove the leftover src dir if empty
+				_ = os.RemoveAll(srcSst)
+			}
+		}
+	}
+
+	// Cleanup temp preserved snapshot if any.
+	if movedTempDir != "" {
+		_ = os.RemoveAll(movedTempDir)
 	}
 	return nil
 }
@@ -660,14 +947,62 @@ func (a *Engine2Adapter) Close() error {
 func (a *Engine2Adapter) GetPubSub() (engine.PubSubInterface, error) {
 	return nil, fmt.Errorf("GetPubSub not implemented")
 }
-func (a *Engine2Adapter) GetSnapshotsBaseDir() string                  { return filepath.Join(a.dataRoot, "snapshots") }
-func (a *Engine2Adapter) Metrics() (*engine.EngineMetrics, error)      { return nil, nil }
-func (a *Engine2Adapter) GetHookManager() hooks.HookManager            { return a.hookManager }
-func (a *Engine2Adapter) GetDLQDir() string                            { return filepath.Join(a.dataRoot, "dlq") }
-func (a *Engine2Adapter) GetDataDir() string                           { return a.dataRoot }
-func (a *Engine2Adapter) GetWALPath() string                           { return filepath.Join(a.dataRoot, "wal") }
-func (a *Engine2Adapter) GetClock() clock.Clock                        { return clock.SystemClockDefault }
-func (a *Engine2Adapter) GetWAL() wal.WALInterface                     { return a.leaderWal }
+func (a *Engine2Adapter) GetSnapshotsBaseDir() string             { return filepath.Join(a.dataRoot, "snapshots") }
+func (a *Engine2Adapter) Metrics() (*engine.EngineMetrics, error) { return nil, nil }
+func (a *Engine2Adapter) GetHookManager() hooks.HookManager {
+	if a.hookManager != nil {
+		return a.hookManager
+	}
+	return hooks.NewHookManager(nil)
+}
+func (a *Engine2Adapter) GetDLQDir() string     { return filepath.Join(a.dataRoot, "dlq") }
+func (a *Engine2Adapter) GetDataDir() string    { return a.dataRoot }
+func (a *Engine2Adapter) GetWALPath() string    { return filepath.Join(a.dataRoot, "wal") }
+func (a *Engine2Adapter) GetClock() clock.Clock { return clock.SystemClockDefault }
+func (a *Engine2Adapter) GetWAL() wal.WALInterface {
+	// Prefer the leader WAL if present (tests and replication expect a WAL
+	// implementation that supports Rotate/ActiveSegmentIndex). Fall back to
+	// the engine-native WAL wrapper so snapshots can still include WAL files.
+	if a.leaderWal != nil {
+		return a.leaderWal
+	}
+	if a.wal != nil {
+		return &engine2WALWrapper{w: a.wal}
+	}
+	return &noopWAL{}
+}
+
+// engine2WALWrapper adapts the engine2.WAL (file-based append-only wal)
+// to the wal.WALInterface expected by the snapshot manager. Only a small
+// subset of methods are meaningfully implemented: Path and ActiveSegmentIndex
+// are provided; other methods are no-ops to satisfy the interface for
+// snapshotting purposes.
+type engine2WALWrapper struct {
+	w *WAL
+}
+
+func (e *engine2WALWrapper) AppendBatch(entries []core.WALEntry) error { return nil }
+func (e *engine2WALWrapper) Append(entry core.WALEntry) error          { return nil }
+func (e *engine2WALWrapper) Sync() error                               { return nil }
+func (e *engine2WALWrapper) Purge(upToIndex uint64) error              { return nil }
+func (e *engine2WALWrapper) Close() error {
+	if e.w == nil {
+		return nil
+	}
+	return e.w.Close()
+}
+func (e *engine2WALWrapper) Path() string {
+	if e.w == nil {
+		return ""
+	}
+	return filepath.Dir(e.w.path)
+}
+func (e *engine2WALWrapper) SetTestingOnlyInjectCloseError(err error) {}
+func (e *engine2WALWrapper) ActiveSegmentIndex() uint64               { return 0 }
+func (e *engine2WALWrapper) Rotate() error                            { return nil }
+func (e *engine2WALWrapper) NewStreamReader(fromSeqNum uint64) (wal.StreamReader, error) {
+	return nil, fmt.Errorf("engine2 WAL wrapper does not support streaming")
+}
 func (a *Engine2Adapter) GetStringStore() indexer.StringStoreInterface { return a.stringStore }
 
 // (GetSnapshotManager implemented earlier)
@@ -695,7 +1030,7 @@ func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WA
 
 	key := core.EncodeTSDBKey(metricID, pairs, dp.Timestamp)
 
-	if dp.Fields == nil || len(dp.Fields) == 0 {
+	if len(dp.Fields) == 0 {
 		return &core.WALEntry{EntryType: core.EntryTypeDelete, Key: key, Value: nil}, nil
 	}
 	vb, err := dp.Fields.Encode()
