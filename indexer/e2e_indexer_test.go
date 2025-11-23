@@ -42,16 +42,15 @@ func TestEndToEnd_Indexer(t *testing.T) {
 	defer tim.Stop()
 
 	// Create strings and add a series
-	// Prepare commonly used strings
-	deps.StringStore.GetOrCreateID("host")
-	deps.StringStore.GetOrCreateID("serverX")
-	deps.StringStore.GetOrCreateID("serverY")
-	deps.StringStore.GetOrCreateID("region")
-	deps.StringStore.GetOrCreateID("eu")
-	deps.StringStore.GetOrCreateID("us")
-	deps.StringStore.GetOrCreateID("env")
-	deps.StringStore.GetOrCreateID("prod")
-	deps.StringStore.GetOrCreateID("staging")
+	// Prepare commonly used strings via batch API to mirror runtime batching.
+	list := []string{"host", "serverX", "serverY", "region", "eu", "us", "env", "prod", "staging"}
+	if ss, ok := deps.StringStore.(*StringStore); ok {
+		_, _ = ss.AddStringsBatch(list)
+	} else {
+		for _, s := range list {
+			_, _ = deps.StringStore.GetOrCreateID(s)
+		}
+	}
 
 	// Create three series with different tag combinations:
 	// s1: host=serverX, region=eu, env=prod

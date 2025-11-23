@@ -363,12 +363,23 @@ func TestStreamWAL_Success(t *testing.T) {
 	fields1, _ := core.NewFieldValuesFromMap(map[string]interface{}{"value": 50.5})
 
 	// Manually encode the data just like the engine would.
-	metricID, _ := stringStore.GetOrCreateID(metric)
+	// Use batched string ID creation to mirror runtime behavior and reduce
+	// per-string calls in tests.
+	list := make([]string, 0, 1+len(tags)*2)
+	list = append(list, metric)
+	for k, v := range tags {
+		list = append(list, k, v)
+	}
+	ids, err := stringStore.AddStringsBatch(list)
+	require.NoError(t, err)
+	idMap := make(map[string]uint64, len(list))
+	for i, s := range list {
+		idMap[s] = ids[i]
+	}
+	metricID := idMap[metric]
 	encodedTags := make([]core.EncodedSeriesTagPair, 0, len(tags))
 	for k, v := range tags {
-		kID, _ := stringStore.GetOrCreateID(k)
-		vID, _ := stringStore.GetOrCreateID(v)
-		encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: kID, ValueID: vID})
+		encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: idMap[k], ValueID: idMap[v]})
 	}
 	sort.Slice(encodedTags, func(i, j int) bool {
 		return encodedTags[i].KeyID < encodedTags[j].KeyID
@@ -407,7 +418,7 @@ func TestStreamWAL_Success(t *testing.T) {
 	mockStream.On("Send", mock.Anything).Return(nil).Once()
 
 	// --- Act ---
-	err := server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 100}, mockStream)
+	err = server.StreamWAL(&pb.StreamWALRequest{FromSequenceNumber: 100}, mockStream)
 
 	// --- Assert ---
 	// Expect context.Canceled because we canceled it to stop the loop
@@ -654,15 +665,26 @@ func TestConvertWALEntryToProto(t *testing.T) {
 // createTestSeriesKey is a helper to create an encoded series key
 func createTestSeriesKey(t *testing.T, stringStore *indexer.StringStore, metric string, tags map[string]string) ([]byte, []core.EncodedSeriesTagPair) {
 	t.Helper()
-	metricID, err := stringStore.GetOrCreateID(metric)
+	// Batch-create IDs for metric and tags to mirror runtime batching.
+	list := make([]string, 0, 1+len(tags)*2)
+	list = append(list, metric)
+	if tags != nil {
+		for k, v := range tags {
+			list = append(list, k, v)
+		}
+	}
+	ids, err := stringStore.AddStringsBatch(list)
 	require.NoError(t, err)
+	idMap := make(map[string]uint64, len(list))
+	for i, s := range list {
+		idMap[s] = ids[i]
+	}
+	metricID := idMap[metric]
 
 	encodedTags := make([]core.EncodedSeriesTagPair, 0, len(tags))
 	if tags != nil {
 		for k, v := range tags {
-			kID, _ := stringStore.GetOrCreateID(k)
-			vID, _ := stringStore.GetOrCreateID(v)
-			encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: kID, ValueID: vID})
+			encodedTags = append(encodedTags, core.EncodedSeriesTagPair{KeyID: idMap[k], ValueID: idMap[v]})
 		}
 	}
 	sort.Slice(encodedTags, func(i, j int) bool {

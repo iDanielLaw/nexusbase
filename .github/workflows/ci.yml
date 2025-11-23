@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, master, 'feature/**' ]
+    branches: [ main, 'feature/**' ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
 
 jobs:
   test:
@@ -12,10 +12,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
-        go-version: [1.20]
+        go-version: [1.23.4]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
 
       - name: Setup Go
         uses: actions/setup-go@v4
@@ -33,8 +36,28 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Run gofmt (list only)
-        run: gofmt -l . || true
+      - name: Check gofmt (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          bad=$(gofmt -l .)
+          if [ -n "$bad" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$bad"
+            exit 1
+          fi
 
-      - name: Run tests
-        run: go test ./...
+      - name: Check gofmt (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bad = & gofmt -l .
+          if ($bad) { Write-Host "gofmt found unformatted files:`n$bad"; exit 1 }
+
+      - name: Run tests (non-Windows)
+        if: runner.os != 'Windows'
+        run: go test -v -race -timeout 180s ./...
+
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: go test -v -timeout 180s ./...

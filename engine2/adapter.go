@@ -338,25 +338,13 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 			a.ensureIDs(idMap, strs)
 			// convert metric and tags to IDs using the string store (use idMap when available)
 			var metricID uint64
-			if v, ok := idMap[metric]; ok {
-				metricID = v
-			} else if a.stringStore != nil {
-				metricID, _ = a.stringStore.GetOrCreateID(metric)
-			}
+			metricID, _ = a.getOrCreateIDFromMap(idMap, metric)
 			// build encoded tag pairs
 			var pairs []core.EncodedSeriesTagPair
 			for k, v := range tags {
 				var kid, vid uint64
-				if x, ok := idMap[k]; ok {
-					kid = x
-				} else if a.stringStore != nil {
-					kid, _ = a.stringStore.GetOrCreateID(k)
-				}
-				if x, ok := idMap[v]; ok {
-					vid = x
-				} else if a.stringStore != nil {
-					vid, _ = a.stringStore.GetOrCreateID(v)
-				}
+				kid, _ = a.getOrCreateIDFromMap(idMap, k)
+				vid, _ = a.getOrCreateIDFromMap(idMap, v)
 				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 			}
 			// sort by KeyID for canonical ordering
@@ -668,20 +656,8 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 		var pairs []core.EncodedSeriesTagPair
 		for k, v := range entry.GetTags() {
 			var kid, vid uint64
-			if idMapDel != nil {
-				if x, ok := idMapDel[k]; ok {
-					kid = x
-				}
-				if x, ok := idMapDel[v]; ok {
-					vid = x
-				}
-			}
-			if kid == 0 && a.stringStore != nil {
-				kid, _ = a.stringStore.GetOrCreateID(k)
-			}
-			if vid == 0 && a.stringStore != nil {
-				vid, _ = a.stringStore.GetOrCreateID(v)
-			}
+			kid, _ = a.getOrCreateIDFromMap(idMapDel, k)
+			vid, _ = a.getOrCreateIDFromMap(idMapDel, v)
 			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 		}
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
@@ -978,16 +954,8 @@ func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable,
 			var pairs []core.EncodedSeriesTagPair
 			for k, v := range tags {
 				var kid, vid uint64
-				if x, ok := idMap[k]; ok {
-					kid = x
-				} else if a.stringStore != nil {
-					kid, _ = a.stringStore.GetOrCreateID(k)
-				}
-				if x, ok := idMap[v]; ok {
-					vid = x
-				} else if a.stringStore != nil {
-					vid, _ = a.stringStore.GetOrCreateID(v)
-				}
+				kid, _ = a.getOrCreateIDFromMap(idMap, k)
+				vid, _ = a.getOrCreateIDFromMap(idMap, v)
 				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 			}
 			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
@@ -1427,6 +1395,21 @@ func (a *Engine2Adapter) ensureIDs(idMap map[string]uint64, strs []string) {
 			idMap[s] = id
 		}
 	}
+}
+
+// getOrCreateIDFromMap returns an ID for `s` using `idMap` if present,
+// otherwise it falls back to the persistent StringStore. It returns (0,nil)
+// when the adapter has no StringStore configured.
+func (a *Engine2Adapter) getOrCreateIDFromMap(idMap map[string]uint64, s string) (uint64, error) {
+	if idMap != nil {
+		if v, ok := idMap[s]; ok {
+			return v, nil
+		}
+	}
+	if a.stringStore == nil {
+		return 0, nil
+	}
+	return a.stringStore.GetOrCreateID(s)
 }
 
 // (GetSnapshotManager implemented earlier)
