@@ -28,8 +28,9 @@ import (
 // IndexMemtable is the in-memory store for the tag index.
 // It maps tag IDs to roaring bitmaps of series IDs.
 type IndexMemtable struct {
-	mu    sync.RWMutex
-	index map[uint64]map[uint64]*roaring64.Bitmap
+	mu sync.RWMutex
+	// map[tagKeyID] -> map[tagValueID] -> *roaring64.Bitmap
+	index map[uint64]tagValueMap
 	// size tracks the number of bitmaps in the memtable.
 	size int64
 }
@@ -37,9 +38,12 @@ type IndexMemtable struct {
 // NewIndexMemtable creates a new, empty index memtable.
 func NewIndexMemtable() *IndexMemtable {
 	return &IndexMemtable{
-		index: make(map[uint64]map[uint64]*roaring64.Bitmap),
+		index: make(map[uint64]tagValueMap),
 	}
 }
+
+// tagValueMap represents the nested map for a tag key mapping to value bitmaps.
+type tagValueMap map[uint64]*roaring64.Bitmap
 
 // Add adds a seriesID to the bitmap for a given tag key/value pair.
 // It is safe for concurrent use.
@@ -47,14 +51,16 @@ func (im *IndexMemtable) Add(tagKeyID, tagValueID uint64, seriesID uint64) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 
-	if _, ok := im.index[tagKeyID]; !ok {
-		im.index[tagKeyID] = make(map[uint64]*roaring64.Bitmap)
+	vmap, ok := im.index[tagKeyID]
+	if !ok {
+		vmap = make(tagValueMap)
+		im.index[tagKeyID] = vmap
 	}
-	if _, ok := im.index[tagKeyID][tagValueID]; !ok {
-		im.index[tagKeyID][tagValueID] = roaring64.New()
+	if _, ok := vmap[tagValueID]; !ok {
+		vmap[tagValueID] = roaring64.New()
 		im.size++ // Increment size only when a new bitmap is created.
 	}
-	im.index[tagKeyID][tagValueID].Add(seriesID)
+	vmap[tagValueID].Add(seriesID)
 }
 
 // Remove removes a seriesID from all bitmaps in the memtable.

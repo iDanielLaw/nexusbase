@@ -282,17 +282,74 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 	// Collect named series for index population and per-series samples for chunk payloads
 	namedMap := make(map[string]NamedSeries)
 	samples := make(map[string]*bytes.Buffer)
+	// First pass: collect all unique strings that may need IDs so we can
+	// assign them in a single batched write. This reduces many small
+	// write+sync operations when flushing large memtables.
+	unique := make(map[string]struct{})
+	a.mem.mu.RLock()
+	for metric, tagMap := range a.mem.data {
+		unique[metric] = struct{}{}
+		for tagKey := range tagMap {
+			tags := parseTagsFromKey(tagKey)
+			for k, v := range tags {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+		}
+	}
+	a.mem.mu.RUnlock()
+
+	// Batch create any missing IDs in the string store.
+	var idMap map[string]uint64
+	if a.stringStore != nil && len(unique) > 0 {
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		// Attempt to use the concrete implementation's batch API when available.
+		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+			ids, err := ss.AddStringsBatch(list)
+			if err == nil {
+				idMap = make(map[string]uint64, len(list))
+				for i, s := range list {
+					idMap[s] = ids[i]
+				}
+			} else {
+				idMap = make(map[string]uint64)
+			}
+		} else {
+			// Fall back to per-call creation if batch API isn't available.
+			idMap = make(map[string]uint64)
+		}
+	} else {
+		idMap = make(map[string]uint64)
+	}
+
 	a.mem.mu.RLock()
 	for metric, tagMap := range a.mem.data {
 		for tagKey, tsMap := range tagMap {
 			tags := parseTagsFromKey(tagKey)
-			// convert metric and tags to IDs using the string store
-			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			// convert metric and tags to IDs using the string store (use idMap when available)
+			var metricID uint64
+			if v, ok := idMap[metric]; ok {
+				metricID = v
+			} else if a.stringStore != nil {
+				metricID, _ = a.stringStore.GetOrCreateID(metric)
+			}
 			// build encoded tag pairs
 			var pairs []core.EncodedSeriesTagPair
 			for k, v := range tags {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
+				var kid, vid uint64
+				if x, ok := idMap[k]; ok {
+					kid = x
+				} else if a.stringStore != nil {
+					kid, _ = a.stringStore.GetOrCreateID(k)
+				}
+				if x, ok := idMap[v]; ok {
+					vid = x
+				} else if a.stringStore != nil {
+					vid, _ = a.stringStore.GetOrCreateID(v)
+				}
 				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 			}
 			// sort by KeyID for canonical ordering
@@ -502,18 +559,48 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 
 		// Ensure dictionary IDs exist for metric and tags so indexers can use them.
 		metric := entry.GetMetric()
+		// Collect unique strings for this entry and attempt batch creation when concrete store available.
+		var idMap map[string]uint64
 		if a.stringStore != nil {
-			_, _ = a.stringStore.GetOrCreateID(metric)
+			unique := make(map[string]struct{})
+			unique[metric] = struct{}{}
+			for k, v := range entry.GetTags() {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+			list := make([]string, 0, len(unique))
+			for s := range unique {
+				list = append(list, s)
+			}
+			if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+				if ids, err := ss.AddStringsBatch(list); err == nil {
+					idMap = make(map[string]uint64, len(list))
+					for i, s := range list {
+						idMap[s] = ids[i]
+					}
+				}
+			}
 		}
 
-		// build encoded tag pairs
+		// build encoded tag pairs using idMap when available
 		var pairs []core.EncodedSeriesTagPair
 		for k, v := range entry.GetTags() {
-			if a.stringStore != nil {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
-				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
+			var kid, vid uint64
+			if idMap != nil {
+				if x, ok := idMap[k]; ok {
+					kid = x
+				}
+				if x, ok := idMap[v]; ok {
+					vid = x
+				}
 			}
+			if kid == 0 && a.stringStore != nil {
+				kid, _ = a.stringStore.GetOrCreateID(k)
+			}
+			if vid == 0 && a.stringStore != nil {
+				vid, _ = a.stringStore.GetOrCreateID(v)
+			}
+			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 		}
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
 
@@ -539,20 +626,59 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 
 	case pb.WALEntry_DELETE_SERIES:
 		// For replicated series delete, update memtable and index state without writing to local WAL.
+		// Batch-create any missing IDs for metric and tags for this delete event
+		var idMapDel map[string]uint64
 		if a.stringStore != nil {
-			_, _ = a.stringStore.GetOrCreateID(entry.GetMetric())
+			unique := make(map[string]struct{})
+			unique[entry.GetMetric()] = struct{}{}
+			for k, v := range entry.GetTags() {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+			list := make([]string, 0, len(unique))
+			for s := range unique {
+				list = append(list, s)
+			}
+			if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+				if ids, err := ss.AddStringsBatch(list); err == nil {
+					idMapDel = make(map[string]uint64, len(list))
+					for i, s := range list {
+						idMapDel[s] = ids[i]
+					}
+				}
+			}
 		}
+
 		var pairs []core.EncodedSeriesTagPair
 		for k, v := range entry.GetTags() {
-			if a.stringStore != nil {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
-				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
+			var kid, vid uint64
+			if idMapDel != nil {
+				if x, ok := idMapDel[k]; ok {
+					kid = x
+				}
+				if x, ok := idMapDel[v]; ok {
+					vid = x
+				}
 			}
+			if kid == 0 && a.stringStore != nil {
+				kid, _ = a.stringStore.GetOrCreateID(k)
+			}
+			if vid == 0 && a.stringStore != nil {
+				vid, _ = a.stringStore.GetOrCreateID(v)
+			}
+			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 		}
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
 		if a.stringStore != nil && a.seriesIDStore != nil {
-			metricID, _ := a.stringStore.GetOrCreateID(entry.GetMetric())
+			var metricID uint64
+			if idMapDel != nil {
+				if x, ok := idMapDel[entry.GetMetric()]; ok {
+					metricID = x
+				}
+			}
+			if metricID == 0 {
+				metricID, _ = a.stringStore.GetOrCreateID(entry.GetMetric())
+			}
 			seriesKey := core.EncodeSeriesKey(metricID, pairs)
 			seriesKeyStr := string(seriesKey)
 			a.deletedSeriesMu.Lock()
@@ -779,15 +905,66 @@ func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable,
 	// immediately trigger IsFull during snapshot operations.
 	top := memtable.NewMemtable(a.memtableThreshold, a.clk)
 
+	// First pass: collect unique strings to batch-create IDs and avoid
+	// many small write+sync operations during snapshot conversion.
+	unique := make(map[string]struct{})
+	old.mu.RLock()
+	for metric, tagMap := range old.data {
+		unique[metric] = struct{}{}
+		for tagKey := range tagMap {
+			tags := parseTagsFromKey(tagKey)
+			for k, v := range tags {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+		}
+	}
+	old.mu.RUnlock()
+
+	idMap := make(map[string]uint64)
+	if a.stringStore != nil && len(unique) > 0 {
+		// Build slice of unique strings
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		// Use concrete batch API when available
+		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+			ids, err := ss.AddStringsBatch(list)
+			if err == nil {
+				for i, s := range list {
+					idMap[s] = ids[i]
+				}
+			} else {
+				idMap = make(map[string]uint64)
+			}
+		}
+	}
+
+	// Second pass: build keys using the idMap (fall back to per-call creation).
 	old.mu.RLock()
 	for metric, tagMap := range old.data {
 		for tagKey, tsMap := range tagMap {
 			tags := parseTagsFromKey(tagKey)
-			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			var metricID uint64
+			if v, ok := idMap[metric]; ok {
+				metricID = v
+			} else if a.stringStore != nil {
+				metricID, _ = a.stringStore.GetOrCreateID(metric)
+			}
 			var pairs []core.EncodedSeriesTagPair
 			for k, v := range tags {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
+				var kid, vid uint64
+				if x, ok := idMap[k]; ok {
+					kid = x
+				} else if a.stringStore != nil {
+					kid, _ = a.stringStore.GetOrCreateID(k)
+				}
+				if x, ok := idMap[v]; ok {
+					vid = x
+				} else if a.stringStore != nil {
+					vid, _ = a.stringStore.GetOrCreateID(v)
+				}
 				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 			}
 			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
@@ -1199,13 +1376,58 @@ func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WA
 	if a.stringStore == nil {
 		return nil, fmt.Errorf("string store not initialized")
 	}
-	// metric id
-	metricID, _ := a.stringStore.GetOrCreateID(dp.Metric)
+	// Attempt to batch-create metric and tag symbol IDs for this datapoint
+	var metricID uint64
+	var idMapPoint map[string]uint64
+	if a.stringStore != nil {
+		unique := make(map[string]struct{})
+		unique[dp.Metric] = struct{}{}
+		for k, v := range dp.Tags {
+			unique[k] = struct{}{}
+			unique[v] = struct{}{}
+		}
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+			if ids, err := ss.AddStringsBatch(list); err == nil {
+				idMapPoint = make(map[string]uint64, len(list))
+				for i, s := range list {
+					idMapPoint[s] = ids[i]
+				}
+			}
+		}
+	}
+
+	// metric id (from idMapPoint when available)
+	if idMapPoint != nil {
+		if x, ok := idMapPoint[dp.Metric]; ok {
+			metricID = x
+		}
+	}
+	if metricID == 0 && a.stringStore != nil {
+		metricID, _ = a.stringStore.GetOrCreateID(dp.Metric)
+	}
+
 	// build encoded tag pairs
 	var pairs []core.EncodedSeriesTagPair
 	for k, v := range dp.Tags {
-		kid, _ := a.stringStore.GetOrCreateID(k)
-		vid, _ := a.stringStore.GetOrCreateID(v)
+		var kid, vid uint64
+		if idMapPoint != nil {
+			if x, ok := idMapPoint[k]; ok {
+				kid = x
+			}
+			if x, ok := idMapPoint[v]; ok {
+				vid = x
+			}
+		}
+		if kid == 0 && a.stringStore != nil {
+			kid, _ = a.stringStore.GetOrCreateID(k)
+		}
+		if vid == 0 && a.stringStore != nil {
+			vid, _ = a.stringStore.GetOrCreateID(v)
+		}
 		pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 	}
 	// sort by KeyID for canonical ordering
