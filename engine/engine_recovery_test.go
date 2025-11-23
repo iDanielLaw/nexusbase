@@ -19,7 +19,19 @@ func init() {
 }
 
 func TestWALRecovery_Successful(t *testing.T) {
-	tempDir := t.TempDir()
+	// Allow preserving the test data directory for debugging by setting
+	// the environment variable `PRESERVE_TEST_DIR=1`. When set, the test
+	// will use a stable directory under OS temp and will not be removed
+	// by Go's test cleanup, making it easier to inspect files after failures.
+	var tempDir string
+	if os.Getenv("PRESERVE_TEST_DIR") != "" {
+		tempDir = filepath.Join(os.TempDir(), "nexus_test_wal")
+		_ = os.RemoveAll(tempDir)
+		require.NoError(t, os.MkdirAll(tempDir, 0755))
+		t.Logf("PRESERVE_TEST_DIR enabled, using tempDir=%s", tempDir)
+	} else {
+		tempDir = t.TempDir()
+	}
 	opts := GetBaseOptsForTest(t, "test")
 	opts.DataDir = tempDir
 
