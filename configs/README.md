@@ -113,3 +113,27 @@ server:
 - [Configuration Reference](../docs/api_reference.md)
 - [Testing Guide](../TESTING-REPLICATION.md)
 - [Admin Guide](../docs/admin-guide.md)
+
+## ⚙️ Engine Index Configuration
+
+This section documents the `engine.max_chunk_bytes` option used by the engine's on-disk index writer.
+
+- **Key:** `engine.max_chunk_bytes`
+- **Default:** `16384` (16 KiB)
+
+Purpose: controls the maximum size (in bytes) of a single chunk payload written into `chunks.dat` during block flush. The runtime index writer will split series samples into one or more chunk payloads such that each payload is <= this size.
+
+YAML example:
+
+```yaml
+engine:
+  max_chunk_bytes: 32768  # 32 KiB
+```
+
+Atomic publish guarantees:
+- During a block flush the engine writes `chunks.dat` to a temporary file inside the block directory, calls `fsync` on the file, closes it, and then moves it into place with a rename. If `rename` fails (e.g. cross-device), the engine falls back to copying the temporary file into `chunks.dat` and ensuring the destination is synced before cleanup.
+- The `index.idx` and `chunks.dat` pair will either be both present and valid for the completed flush, or the temporary file will remain (diagnostic) — callers should treat the presence of a completed `index.idx` + `chunks.dat` pair as the indicator of a successful published block index.
+
+Notes:
+- Increasing `max_chunk_bytes` reduces the number of separate chunk payloads per series (fewer index entries) but increases memory used while building chunk payloads during flush.
+- The default value was chosen as a balance between write-size and memory usage; tune only if you have large series or want to optimize disk layout.

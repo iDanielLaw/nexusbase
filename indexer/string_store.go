@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -205,6 +206,30 @@ func (s *StringStore) GetID(str string) (uint64, bool) {
 	return id, ok
 }
 
+// Symbols returns a copy of all stored symbols in insertion order.
+func (s *StringStore) Symbols() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.idToString))
+	// idToString is a map; to return in id order, collect ids and sort them
+	ids := make([]uint64, 0, len(s.idToString))
+	for id := range s.idToString {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		out = append(out, s.idToString[id])
+	}
+	return out
+}
+
+// ExportSortedSymbols returns a lexicographically sorted copy of all stored symbols.
+func (s *StringStore) ExportSortedSymbols() []string {
+	syms := s.Symbols()
+	sort.Strings(syms)
+	return syms
+}
+
 // addEntry persists a new string mapping to the log file.
 func (s *StringStore) addEntry(str string, id uint64) error {
 	if s.logFile == nil {
@@ -226,11 +251,98 @@ func (s *StringStore) addEntry(str string, id uint64) error {
 	recordBuf.Write(dataBytes)
 	binary.Write(&recordBuf, binary.BigEndian, checksum)
 
-	if _, err := s.logFile.Write(recordBuf.Bytes()); err != nil {
+	// Write and sync using a centralized helper so batch writes can reuse the same logic.
+	return s.writeAndSync(recordBuf.Bytes())
+}
+
+// writeAndSync writes the given bytes to the log file and performs an fsync.
+// It assumes caller holds any required locks.
+func (s *StringStore) writeAndSync(data []byte) error {
+	if s.logFile == nil {
+		return errors.New("string store log file is not open for writing")
+	}
+	if _, err := s.logFile.Write(data); err != nil {
 		return err
 	}
-
 	return s.logFile.Sync()
+}
+
+// AddStringsBatch atomically appends multiple new string entries to the store
+// in a single write+sync operation. It assigns IDs for strings that do not
+// already exist and returns the assigned IDs in the same order as the input
+// slice. If writing fails, in-memory assignments are rolled back.
+func (s *StringStore) AddStringsBatch(strs []string) ([]uint64, error) {
+	if len(strs) == 0 {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	newIDs := make([]uint64, len(strs))
+	// track which strings we newly inserted to allow rollback on failure
+	inserted := make([]string, 0, len(strs))
+
+	var batchBuf bytes.Buffer
+	for i, str := range strs {
+		// If already present, return existing id
+		if id, ok := s.stringToID[str]; ok {
+			newIDs[i] = id
+			continue
+		}
+
+		id := s.nextID.Load()
+		s.nextID.Add(1)
+
+		// prepare record data bytes
+		var dataBuf bytes.Buffer
+		binary.Write(&dataBuf, binary.BigEndian, id)
+		strLen := uint16(len(str))
+		binary.Write(&dataBuf, binary.BigEndian, strLen)
+		dataBuf.WriteString(str)
+		dataBytes := dataBuf.Bytes()
+
+		// record header + data + checksum
+		recordLen := uint32(len(dataBytes))
+		checksum := crc32.ChecksumIEEE(dataBytes)
+
+		binary.Write(&batchBuf, binary.BigEndian, recordLen)
+		batchBuf.Write(dataBytes)
+		binary.Write(&batchBuf, binary.BigEndian, checksum)
+
+		// tentatively add to in-memory maps
+		s.stringToID[str] = id
+		s.idToString[id] = str
+		inserted = append(inserted, str)
+		newIDs[i] = id
+	}
+
+	// nothing to persist (all existed)
+	if batchBuf.Len() == 0 {
+		return newIDs, nil
+	}
+
+	// attempt a single write+sync for the whole batch
+	if err := s.writeAndSync(batchBuf.Bytes()); err != nil {
+		// rollback in-memory insertions
+		for _, str := range inserted {
+			if id, ok := s.stringToID[str]; ok {
+				delete(s.idToString, id)
+				delete(s.stringToID, str)
+			}
+		}
+		// restore nextID (best-effort) by finding max id in maps
+		maxID := uint64(0)
+		for id := range s.idToString {
+			if id > maxID {
+				maxID = id
+			}
+		}
+		s.nextID.Store(maxID + 1)
+		return nil, fmt.Errorf("failed to persist string store batch: %w", err)
+	}
+
+	return newIDs, nil
 }
 
 // Sync flushes the string mapping log to disk.

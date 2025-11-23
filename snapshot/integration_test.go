@@ -314,11 +314,15 @@ func TestSnapshot_E2E_CreateAndRestore(t *testing.T) {
 	// Add to tag index and populate string/series stores. This simulates the engine's
 	// behavior of creating string/series mappings before adding to the index.
 	tags := map[string]string{"tag1": "val1"}
-	for k, v := range tags {
-		_, err := provider.stringStore.GetOrCreateID(k)
+	// Batch-create tag mapping entries in string store to mirror engine behavior
+	if len(tags) > 0 {
+		list := make([]string, 0, len(tags)*2)
+		for k, v := range tags {
+			list = append(list, k, v)
+		}
+		ids, err := provider.stringStore.AddStringsBatch(list)
 		require.NoError(t, err)
-		_, err = provider.stringStore.GetOrCreateID(v)
-		require.NoError(t, err)
+		_ = ids // ids not used directly here
 	}
 	require.NoError(t, provider.tagIndexManager.Add(1, tags))
 

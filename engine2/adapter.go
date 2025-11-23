@@ -1,7 +1,9 @@
 package engine2
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +19,7 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/index"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/internal"
 	"github.com/INLOpen/nexusbase/levels"
@@ -26,6 +29,7 @@ import (
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexusbase/sys"
 	"github.com/INLOpen/nexusbase/wal"
+	"github.com/INLOpen/nexuscore/types"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -65,7 +69,10 @@ type Engine2Adapter struct {
 	providerLock sync.Mutex
 	// memtable snapshot/flush configuration
 	memtableThreshold int64
-	clk               clock.Clock
+	// maximum bytes per chunk payload written to `chunks.dat`. Defaulted
+	// in constructor but exposed for testability/configuration.
+	maxChunkBytes int
+	clk           clock.Clock
 	// basic active series tracking (in-memory)
 	activeSeries   map[string]struct{}
 	activeSeriesMu sync.RWMutex
@@ -89,6 +96,8 @@ func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapte
 		hookManager:   hm,
 		activeSeries:  make(map[string]struct{}),
 		deletedSeries: make(map[string]uint64),
+		// default chunk payload size: 16KB
+		maxChunkBytes: 16 * 1024,
 	}
 	// defaults for memtable snapshot conversion
 	a.memtableThreshold = 1 << 30
@@ -270,26 +279,87 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 		entryType core.EntryType
 	}
 	var entries []encEntry
+	// Collect named series for index population and per-series samples for chunk payloads
+	namedMap := make(map[string]NamedSeries)
+	samples := make(map[string]*bytes.Buffer)
+	// First pass: collect all unique strings that may need IDs so we can
+	// assign them in a single batched write. This reduces many small
+	// write+sync operations when flushing large memtables.
+	unique := make(map[string]struct{})
+	a.mem.mu.RLock()
+	for metric, tagMap := range a.mem.data {
+		unique[metric] = struct{}{}
+		for tagKey := range tagMap {
+			tags := parseTagsFromKey(tagKey)
+			for k, v := range tags {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+		}
+	}
+	a.mem.mu.RUnlock()
+
+	// Batch create any missing IDs in the string store.
+	var idMap map[string]uint64
+	if a.stringStore != nil && len(unique) > 0 {
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		// Attempt to use the concrete implementation's batch API when available.
+		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+			ids, err := ss.AddStringsBatch(list)
+			if err == nil {
+				idMap = make(map[string]uint64, len(list))
+				for i, s := range list {
+					idMap[s] = ids[i]
+				}
+			} else {
+				idMap = make(map[string]uint64)
+			}
+		} else {
+			// Fall back to per-call creation if batch API isn't available.
+			idMap = make(map[string]uint64)
+		}
+	} else {
+		idMap = make(map[string]uint64)
+	}
+
 	a.mem.mu.RLock()
 	for metric, tagMap := range a.mem.data {
 		for tagKey, tsMap := range tagMap {
 			tags := parseTagsFromKey(tagKey)
-			// convert metric and tags to IDs using the string store
-			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			// attempt to ensure IDs for metric and all tag strings in a batch
+			strs := make([]string, 0, len(tags)+1)
+			strs = append(strs, metric)
+			for k, v := range tags {
+				strs = append(strs, k, v)
+			}
+			a.ensureIDs(idMap, strs)
+			// convert metric and tags to IDs using the string store (use idMap when available)
+			var metricID uint64
+			metricID, _ = a.getOrCreateIDFromMap(idMap, metric)
 			// build encoded tag pairs
 			var pairs []core.EncodedSeriesTagPair
 			for k, v := range tags {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
+				var kid, vid uint64
+				kid, _ = a.getOrCreateIDFromMap(idMap, k)
+				vid, _ = a.getOrCreateIDFromMap(idMap, v)
 				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 			}
 			// sort by KeyID for canonical ordering
 			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
 
+			// track min/max timestamps for this series in order to emit a single
+			// ChunkMeta entry covering the flushed timestamps (DataRef is a
+			// placeholder 0 here; chunk payload management lives elsewhere).
+			var minTs int64 = 0
+			var maxTs int64 = 0
+			first := true
 			for ts, fv := range tsMap {
 				var e encEntry
 				e.key = core.EncodeTSDBKey(metricID, pairs, ts)
-				if fv == nil || len(fv) == 0 {
+				if len(fv) == 0 {
 					e.entryType = core.EntryTypeDelete
 					e.val = nil
 				} else {
@@ -300,8 +370,51 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 					}
 					e.entryType = core.EntryTypePutEvent
 					e.val = vb
+					// append sample bytes to per-series buffer (timestamp + length + payload)
+					seriesKey := metric + "|" + tagKey
+					sb := samples[seriesKey]
+					if sb == nil {
+						sb = &bytes.Buffer{}
+						samples[seriesKey] = sb
+					}
+					// write timestamp (big-endian uint64) then length (uvarint) then payload
+					tsb := make([]byte, 8)
+					binary.BigEndian.PutUint64(tsb, uint64(ts))
+					sb.Write(tsb)
+					tmp := make([]byte, binary.MaxVarintLen64)
+					n := binary.PutUvarint(tmp, uint64(len(vb)))
+					sb.Write(tmp[:n])
+					sb.Write(vb)
 				}
 				entries = append(entries, e)
+				// update min/max
+				if first {
+					minTs = ts
+					maxTs = ts
+					first = false
+				} else {
+					if ts < minTs {
+						minTs = ts
+					}
+					if ts > maxTs {
+						maxTs = ts
+					}
+				}
+			}
+			// after collecting timestamps for this series, record NamedSeries
+			seriesKey := metric + "|" + tagKey
+			if _, ok := namedMap[seriesKey]; !ok {
+				lbls := make(map[string]string, len(tags)+1)
+				lbls["__name__"] = metric
+				for kk, vv := range tags {
+					lbls[kk] = vv
+				}
+				var chunks []index.ChunkMeta
+				if !first {
+					// DataRef will be populated after writing chunk payloads
+					chunks = []index.ChunkMeta{{Mint: minTs, Maxt: maxTs, DataRef: 0}}
+				}
+				namedMap[seriesKey] = NamedSeries{Labels: lbls, Chunks: chunks}
 			}
 		}
 	}
@@ -373,6 +486,37 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 
 	// Success — clear memtable now
 	a.mem.Flush()
+
+	// Write a minimal block index alongside the new SSTable so tools and
+	// other components can discover a per-block index even when the engine
+	// does not yet populate it with real symbol/series data.
+	blockDir := filepath.Join(a.dataRoot, "blocks", fmt.Sprintf("%d", id))
+	if err := os.MkdirAll(blockDir, 0o755); err == nil {
+		// If we collected samples, write chunk payload file and obtain chunk metas
+		var refs map[string][]index.ChunkMeta
+		if len(samples) > 0 {
+			var werr error
+			refs, werr = writeChunksFile(blockDir, samples, a.maxChunkBytes)
+			if werr != nil {
+				// best-effort: log but continue with DataRef=0
+				slog.Default().Warn("failed to write chunks file for block", "err", werr)
+				refs = nil
+			}
+		}
+
+		// Convert namedMap to slice for writer, populate Chunks from refs if available
+		named := make([]NamedSeries, 0, len(namedMap))
+		for k, v := range namedMap {
+			if refs != nil {
+				if r, ok := refs[k]; ok {
+					// assign the slice of chunk metas produced for this series
+					v.Chunks = r
+				}
+			}
+			named = append(named, v)
+		}
+		_ = WriteBlockIndexNamed(blockDir, named)
+	}
 	return nil
 }
 func (a *Engine2Adapter) TriggerCompaction() {}
@@ -410,24 +554,63 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 
 		// Ensure dictionary IDs exist for metric and tags so indexers can use them.
 		metric := entry.GetMetric()
+		// Collect unique strings for this entry and attempt batch creation when concrete store available.
+		var idMap map[string]uint64
 		if a.stringStore != nil {
-			_, _ = a.stringStore.GetOrCreateID(metric)
+			unique := make(map[string]struct{})
+			unique[metric] = struct{}{}
+			for k, v := range entry.GetTags() {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+			list := make([]string, 0, len(unique))
+			for s := range unique {
+				list = append(list, s)
+			}
+			if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+				if ids, err := ss.AddStringsBatch(list); err == nil {
+					idMap = make(map[string]uint64, len(list))
+					for i, s := range list {
+						idMap[s] = ids[i]
+					}
+				}
+			}
 		}
 
-		// build encoded tag pairs
+		// build encoded tag pairs using idMap when available
 		var pairs []core.EncodedSeriesTagPair
 		for k, v := range entry.GetTags() {
-			if a.stringStore != nil {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
-				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
+			var kid, vid uint64
+			if idMap != nil {
+				if x, ok := idMap[k]; ok {
+					kid = x
+				}
+				if x, ok := idMap[v]; ok {
+					vid = x
+				}
 			}
+			if kid == 0 && a.stringStore != nil {
+				kid, _ = a.stringStore.GetOrCreateID(k)
+			}
+			if vid == 0 && a.stringStore != nil {
+				vid, _ = a.stringStore.GetOrCreateID(v)
+			}
+			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 		}
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
 
-		// register series in active map and seriesID store
+		// register series in active map and seriesID store. Prefer ids from the
+		// batch-created idMap when available to avoid extra writes.
 		if a.stringStore != nil {
-			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			var metricID uint64
+			if idMap != nil {
+				if x, ok := idMap[metric]; ok {
+					metricID = x
+				}
+			}
+			if metricID == 0 {
+				metricID, _ = a.stringStore.GetOrCreateID(metric)
+			}
 			seriesKey := core.EncodeSeriesKey(metricID, pairs)
 			seriesKeyStr := string(seriesKey)
 			a.addActiveSeries(seriesKeyStr)
@@ -447,20 +630,47 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 
 	case pb.WALEntry_DELETE_SERIES:
 		// For replicated series delete, update memtable and index state without writing to local WAL.
+		// Batch-create any missing IDs for metric and tags for this delete event
+		var idMapDel map[string]uint64
 		if a.stringStore != nil {
-			_, _ = a.stringStore.GetOrCreateID(entry.GetMetric())
+			unique := make(map[string]struct{})
+			unique[entry.GetMetric()] = struct{}{}
+			for k, v := range entry.GetTags() {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+			list := make([]string, 0, len(unique))
+			for s := range unique {
+				list = append(list, s)
+			}
+			if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+				if ids, err := ss.AddStringsBatch(list); err == nil {
+					idMapDel = make(map[string]uint64, len(list))
+					for i, s := range list {
+						idMapDel[s] = ids[i]
+					}
+				}
+			}
 		}
+
 		var pairs []core.EncodedSeriesTagPair
 		for k, v := range entry.GetTags() {
-			if a.stringStore != nil {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
-				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
-			}
+			var kid, vid uint64
+			kid, _ = a.getOrCreateIDFromMap(idMapDel, k)
+			vid, _ = a.getOrCreateIDFromMap(idMapDel, v)
+			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 		}
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
 		if a.stringStore != nil && a.seriesIDStore != nil {
-			metricID, _ := a.stringStore.GetOrCreateID(entry.GetMetric())
+			var metricID uint64
+			if idMapDel != nil {
+				if x, ok := idMapDel[entry.GetMetric()]; ok {
+					metricID = x
+				}
+			}
+			if metricID == 0 {
+				metricID, _ = a.stringStore.GetOrCreateID(entry.GetMetric())
+			}
 			seriesKey := core.EncodeSeriesKey(metricID, pairs)
 			seriesKeyStr := string(seriesKey)
 			a.deletedSeriesMu.Lock()
@@ -652,6 +862,15 @@ func (a *Engine2Adapter) GetPrivateSeriesIDStore() internal.PrivateManagerStore 
 }
 func (a *Engine2Adapter) GetSSTableCompressionType() string { return "none" }
 
+// SetMaxChunkBytes configures the maximum bytes allowed per chunk payload
+// when writing `chunks.dat`. A value <= 0 is ignored.
+func (a *Engine2Adapter) SetMaxChunkBytes(n int) {
+	if n <= 0 {
+		return
+	}
+	a.maxChunkBytes = n
+}
+
 func (a *Engine2Adapter) Lock()   { a.providerLock.Lock() }
 func (a *Engine2Adapter) Unlock() { a.providerLock.Unlock() }
 
@@ -678,15 +897,65 @@ func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable,
 	// immediately trigger IsFull during snapshot operations.
 	top := memtable.NewMemtable(a.memtableThreshold, a.clk)
 
+	// First pass: collect unique strings to batch-create IDs and avoid
+	// many small write+sync operations during snapshot conversion.
+	unique := make(map[string]struct{})
+	old.mu.RLock()
+	for metric, tagMap := range old.data {
+		unique[metric] = struct{}{}
+		for tagKey := range tagMap {
+			tags := parseTagsFromKey(tagKey)
+			for k, v := range tags {
+				unique[k] = struct{}{}
+				unique[v] = struct{}{}
+			}
+		}
+	}
+	old.mu.RUnlock()
+
+	idMap := make(map[string]uint64)
+	if a.stringStore != nil && len(unique) > 0 {
+		// Build slice of unique strings
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		// Use concrete batch API when available
+		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+			ids, err := ss.AddStringsBatch(list)
+			if err == nil {
+				for i, s := range list {
+					idMap[s] = ids[i]
+				}
+			} else {
+				idMap = make(map[string]uint64)
+			}
+		}
+	}
+
+	// Second pass: build keys using the idMap (fall back to per-call creation).
 	old.mu.RLock()
 	for metric, tagMap := range old.data {
 		for tagKey, tsMap := range tagMap {
 			tags := parseTagsFromKey(tagKey)
-			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			// attempt to ensure IDs for metric and tag strings in batch
+			strs := make([]string, 0, len(tags)+1)
+			strs = append(strs, metric)
+			for k, v := range tags {
+				strs = append(strs, k, v)
+			}
+			a.ensureIDs(idMap, strs)
+			var metricID uint64
+			if v, ok := idMap[metric]; ok {
+				metricID = v
+			} else if a.stringStore != nil {
+				metricID, _ = a.stringStore.GetOrCreateID(metric)
+			}
 			var pairs []core.EncodedSeriesTagPair
 			for k, v := range tags {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
+				var kid, vid uint64
+				kid, _ = a.getOrCreateIDFromMap(idMap, k)
+				vid, _ = a.getOrCreateIDFromMap(idMap, v)
 				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 			}
 			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
@@ -771,6 +1040,88 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable, parentCtx con
 		}
 		// Log successful registration for debugging snapshot inclusion.
 		slog.Default().Info("registered SSTable with levels manager", "id", sst.ID(), "path", sst.FilePath())
+	}
+
+	// Write a minimal block index alongside the new SSTable so tools can
+	// discover a per-block index even when the engine does not yet populate
+	// it with real symbol/series data. This mirrors the behavior in
+	// ForceFlush to ensure a block index exists for freshly created tables.
+	blockDir := filepath.Join(a.dataRoot, "blocks", fmt.Sprintf("%d", id))
+	if err := os.MkdirAll(blockDir, 0o755); err == nil {
+		// Build named series by iterating the memtable so index contains real data
+		namedMap := make(map[string]NamedSeries)
+		samples := make(map[string]*bytes.Buffer)
+		mins := make(map[string]int64)
+		maxs := make(map[string]int64)
+		iter := mem.NewIterator(nil, nil, types.Ascending)
+		defer iter.Close()
+		for iter.Next() {
+			node, _ := iter.At()
+			k := node.Key
+			if len(k) < 8 {
+				continue
+			}
+			seriesKey := k[:len(k)-8] // strip timestamp
+			// decode timestamp from key (last 8 bytes, big-endian)
+			ts := int64(binary.BigEndian.Uint64(k[len(k)-8:]))
+			metricID, pairs, derr := core.DecodeSeriesKey(seriesKey)
+			if derr != nil {
+				continue
+			}
+			metricName, _ := a.stringStore.GetString(metricID)
+			lbls := make(map[string]string, len(pairs)+1)
+			lbls["__name__"] = metricName
+			for _, p := range pairs {
+				kstr, _ := a.stringStore.GetString(p.KeyID)
+				vstr, _ := a.stringStore.GetString(p.ValueID)
+				lbls[kstr] = vstr
+			}
+			keyStr := string(seriesKey)
+			// append sample to per-series buffer if this is a Put event
+			if node.EntryType == core.EntryTypePutEvent && len(node.Value) > 0 {
+				sb := samples[keyStr]
+				if sb == nil {
+					sb = &bytes.Buffer{}
+					samples[keyStr] = sb
+				}
+				// write timestamp + length + payload
+				tsb := make([]byte, 8)
+				binary.BigEndian.PutUint64(tsb, uint64(ts))
+				sb.Write(tsb)
+				tmp := make([]byte, binary.MaxVarintLen64)
+				n := binary.PutUvarint(tmp, uint64(len(node.Value)))
+				sb.Write(tmp[:n])
+				sb.Write(node.Value)
+				if _, ok := mins[keyStr]; !ok {
+					mins[keyStr] = ts
+				}
+				maxs[keyStr] = ts
+			}
+			if _, ok := namedMap[keyStr]; !ok {
+				namedMap[keyStr] = NamedSeries{Labels: lbls, Chunks: nil}
+			}
+		}
+		// write chunks file if samples exist and populate ChunkMeta slices
+		var refs map[string][]index.ChunkMeta
+		if len(samples) > 0 {
+			var werr error
+			refs, werr = writeChunksFile(blockDir, samples, a.maxChunkBytes)
+			if werr != nil {
+				slog.Default().Warn("failed to write chunks file for block", "err", werr)
+				refs = nil
+			}
+		}
+		named := make([]NamedSeries, 0, len(namedMap))
+		for k, v := range namedMap {
+			if refs != nil {
+				if r, ok := refs[k]; ok {
+					// assign the chunk metas produced for this series
+					v.Chunks = r
+				}
+			}
+			named = append(named, v)
+		}
+		_ = WriteBlockIndexNamed(blockDir, named)
 	}
 
 	return nil
@@ -1005,6 +1356,62 @@ func (e *engine2WALWrapper) NewStreamReader(fromSeqNum uint64) (wal.StreamReader
 }
 func (a *Engine2Adapter) GetStringStore() indexer.StringStoreInterface { return a.stringStore }
 
+// ensureIDs attempts to populate `idMap` with IDs for any strings in `strs`
+// that are not already present. It prefers the concrete StringStore's
+// `AddStringsBatch` for efficiency and falls back to per-string
+// `GetOrCreateID` when batching isn't available or fails.
+func (a *Engine2Adapter) ensureIDs(idMap map[string]uint64, strs []string) {
+	if a.stringStore == nil || len(strs) == 0 {
+		return
+	}
+	// build list of missing strings
+	missing := make([]string, 0)
+	seen := make(map[string]struct{}, len(strs))
+	for _, s := range strs {
+		if _, ok := idMap[s]; ok {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		missing = append(missing, s)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	// try batch API on concrete implementation
+	if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+		if ids, err := ss.AddStringsBatch(missing); err == nil {
+			for i, s := range missing {
+				idMap[s] = ids[i]
+			}
+			return
+		}
+	}
+	// fallback to per-string creation
+	for _, s := range missing {
+		if id, err := a.stringStore.GetOrCreateID(s); err == nil {
+			idMap[s] = id
+		}
+	}
+}
+
+// getOrCreateIDFromMap returns an ID for `s` using `idMap` if present,
+// otherwise it falls back to the persistent StringStore. It returns (0,nil)
+// when the adapter has no StringStore configured.
+func (a *Engine2Adapter) getOrCreateIDFromMap(idMap map[string]uint64, s string) (uint64, error) {
+	if idMap != nil {
+		if v, ok := idMap[s]; ok {
+			return v, nil
+		}
+	}
+	if a.stringStore == nil {
+		return 0, nil
+	}
+	return a.stringStore.GetOrCreateID(s)
+}
+
 // (GetSnapshotManager implemented earlier)
 
 func (a *Engine2Adapter) GetSequenceNumber() uint64 { return a.sequenceNumber.Load() }
@@ -1016,13 +1423,70 @@ func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WA
 	if a.stringStore == nil {
 		return nil, fmt.Errorf("string store not initialized")
 	}
-	// metric id
-	metricID, _ := a.stringStore.GetOrCreateID(dp.Metric)
+	// Attempt to batch-create metric and tag symbol IDs for this datapoint
+	var metricID uint64
+	var idMapPoint map[string]uint64
+	if a.stringStore != nil {
+		unique := make(map[string]struct{})
+		unique[dp.Metric] = struct{}{}
+		for k, v := range dp.Tags {
+			unique[k] = struct{}{}
+			unique[v] = struct{}{}
+		}
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+			if ids, err := ss.AddStringsBatch(list); err == nil {
+				idMapPoint = make(map[string]uint64, len(list))
+				for i, s := range list {
+					idMapPoint[s] = ids[i]
+				}
+			}
+		}
+	}
+
+	// metric id (from idMapPoint when available)
+	if idMapPoint != nil {
+		if x, ok := idMapPoint[dp.Metric]; ok {
+			metricID = x
+		}
+	}
+	if metricID == 0 && a.stringStore != nil {
+		metricID, _ = a.stringStore.GetOrCreateID(dp.Metric)
+	}
+
 	// build encoded tag pairs
 	var pairs []core.EncodedSeriesTagPair
+	// ensure any missing ids are created in a batch when possible
+	if idMapPoint == nil {
+		idMapPoint = make(map[string]uint64)
+	}
+	missingStrs := make([]string, 0, len(dp.Tags)*2)
 	for k, v := range dp.Tags {
-		kid, _ := a.stringStore.GetOrCreateID(k)
-		vid, _ := a.stringStore.GetOrCreateID(v)
+		if _, ok := idMapPoint[k]; !ok {
+			missingStrs = append(missingStrs, k)
+		}
+		if _, ok := idMapPoint[v]; !ok {
+			missingStrs = append(missingStrs, v)
+		}
+	}
+	a.ensureIDs(idMapPoint, missingStrs)
+	for k, v := range dp.Tags {
+		var kid, vid uint64
+		if x, ok := idMapPoint[k]; ok {
+			kid = x
+		}
+		if x, ok := idMapPoint[v]; ok {
+			vid = x
+		}
+		if kid == 0 && a.stringStore != nil {
+			kid, _ = a.stringStore.GetOrCreateID(k)
+		}
+		if vid == 0 && a.stringStore != nil {
+			vid, _ = a.stringStore.GetOrCreateID(v)
+		}
 		pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 	}
 	// sort by KeyID for canonical ordering
@@ -1058,4 +1522,173 @@ func (a *Engine2Adapter) addActiveSeries(seriesKey string) {
 		a.activeSeries[seriesKey] = struct{}{}
 	}
 	a.activeSeriesMu.Unlock()
+}
+
+// writeChunksFile writes per-series chunk payloads to a single chunk file under blockDir.
+// It writes series in deterministic order (sorted by seriesKey) and returns a map
+// of seriesKey -> DataRef (file offset where the chunk payload length prefix starts).
+// writeChunksFile writes per-series chunk payloads to a single chunk file under blockDir.
+// It splits per-series samples into multiple chunk payloads when the accumulated
+// payload would exceed `maxChunkBytes`. Returns a map of seriesKey -> slice of
+// DataRef offsets (one per chunk) in file order.
+func writeChunksFile(blockDir string, samples map[string]*bytes.Buffer, maxChunkBytes int) (map[string][]index.ChunkMeta, error) {
+	if len(samples) == 0 {
+		return nil, nil
+	}
+	// Create a temporary file in the same directory and atomically rename
+	// it into place once writing is complete. This avoids exposing partial
+	// `chunks.dat` files if the process crashes while writing.
+	chunksPath := filepath.Join(blockDir, "chunks.dat")
+	tmpPath := filepath.Join(blockDir, "chunks.dat.tmp")
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return nil, err
+	}
+	// Ensure we close the temp file on any early return.
+	defer func() {
+		_ = f.Close()
+		// If tmpPath still exists (on error), attempt to remove it.
+		_ = os.Remove(tmpPath)
+	}()
+
+	refs := make(map[string][]index.ChunkMeta, len(samples))
+	keys := make([]string, 0, len(samples))
+	for k := range samples {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Each samples[k] buffer contains sequence of records we wrote earlier:
+	// [ts(8) | len(uvarint) | payload bytes] ... repeated. We'll re-scan that
+	// buffer to create chunk payloads that do not exceed maxChunkBytes.
+	for _, k := range keys {
+		buf := samples[k].Bytes()
+		r := bytes.NewReader(buf)
+		var chunkBuf bytes.Buffer
+		var chunkRefs []index.ChunkMeta
+		var chunkMin int64 = 0
+		var chunkMax int64 = 0
+		firstInChunk := true
+
+		flushChunk := func() error {
+			if chunkBuf.Len() == 0 {
+				return nil
+			}
+			off, err := f.Seek(0, io.SeekCurrent)
+			if err != nil {
+				return err
+			}
+			// write length prefix and payload
+			if err := binary.Write(f, binary.LittleEndian, uint32(chunkBuf.Len())); err != nil {
+				return err
+			}
+			if _, err := f.Write(chunkBuf.Bytes()); err != nil {
+				return err
+			}
+			// append chunk meta (mint/maxt set from chunkMin/chunkMax)
+			chunkRefs = append(chunkRefs, index.ChunkMeta{Mint: chunkMin, Maxt: chunkMax, DataRef: uint64(off)})
+			// reset chunk buffer state
+			chunkBuf.Reset()
+			firstInChunk = true
+			chunkMin = 0
+			chunkMax = 0
+			return nil
+		}
+
+		for r.Len() > 0 {
+			// read timestamp (8 bytes big-endian)
+			var tsb [8]byte
+			if _, err := io.ReadFull(r, tsb[:]); err != nil {
+				return refs, err
+			}
+			ts := int64(binary.BigEndian.Uint64(tsb[:]))
+			// read length uvarint
+			l, err := binary.ReadUvarint(r)
+			if err != nil {
+				return refs, err
+			}
+			// read payload
+			payload := make([]byte, l)
+			if _, err := io.ReadFull(r, payload); err != nil {
+				return refs, err
+			}
+
+			// estimate additional bytes if we append this record to chunkBuf:
+			// timestamp(8) + len(uvarint) + payload
+			tmp := make([]byte, binary.MaxVarintLen64)
+			n := binary.PutUvarint(tmp, l)
+			recSize := 8 + n + int(l)
+
+			if chunkBuf.Len()+recSize > maxChunkBytes && chunkBuf.Len() > 0 {
+				// flush current chunk and start a new one
+				if err := flushChunk(); err != nil {
+					return refs, err
+				}
+			}
+
+			// append record to chunkBuf in the same encoding
+			chunkBuf.Write(tsb[:])
+			tmp2 := make([]byte, binary.MaxVarintLen64)
+			m := binary.PutUvarint(tmp2, l)
+			chunkBuf.Write(tmp2[:m])
+			chunkBuf.Write(payload)
+
+			if firstInChunk {
+				chunkMin = ts
+				chunkMax = ts
+				firstInChunk = false
+			} else {
+				if ts < chunkMin {
+					chunkMin = ts
+				}
+				if ts > chunkMax {
+					chunkMax = ts
+				}
+			}
+		}
+
+		// flush remaining chunkBuf
+		if err := flushChunk(); err != nil {
+			return refs, err
+		}
+
+		if len(chunkRefs) > 0 {
+			refs[k] = chunkRefs
+		}
+	}
+	// sync and close temp file before renaming into place.
+	if err := f.Sync(); err != nil {
+		return refs, err
+	}
+	if err := f.Close(); err != nil {
+		return refs, err
+	}
+
+	// Attempt atomic rename into final path. Use sys.Rename which includes
+	// cross-device fallback logic used elsewhere in the codebase.
+	if err := sys.Rename(tmpPath, chunksPath); err != nil {
+		// Try a best-effort copy fallback: open src and dst and copy bytes.
+		src, rerr := os.Open(tmpPath)
+		if rerr != nil {
+			_ = os.Remove(tmpPath)
+			return refs, err
+		}
+		defer src.Close()
+		dst, werr := os.Create(chunksPath)
+		if werr != nil {
+			src.Close()
+			_ = os.Remove(tmpPath)
+			return refs, err
+		}
+		if _, cerr := io.Copy(dst, src); cerr != nil {
+			dst.Close()
+			_ = os.Remove(tmpPath)
+			return refs, err
+		}
+		_ = dst.Sync()
+		_ = dst.Close()
+		_ = os.Remove(tmpPath)
+	}
+
+	return refs, nil
 }

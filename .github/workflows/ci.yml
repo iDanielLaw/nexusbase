@@ -1,0 +1,67 @@
+name: CI
+
+permissions:
+  contents: read
+  pull-requests: write
+
+on:
+  push:
+    branches: [ main, 'feature/**' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        go-version: [1.23.4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ${{ env.GOMODCACHE }}
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+
+      - name: Install dependencies
+        run: go mod download
+
+#      - name: Check gofmt (Linux/macOS)
+#        if: runner.os != 'Windows'
+#        run: |
+#          bad=$(gofmt -l .)
+#          if [ -n "$bad" ]; then
+#            echo "gofmt found unformatted files:"
+#            echo "$bad"
+#            exit 1
+#          fi
+
+#      - name: Check gofmt (Windows)
+#        if: runner.os == 'Windows'
+#        shell: pwsh
+#        run: |
+#          $bad = & gofmt -l .
+#          if ($bad) { Write-Host "gofmt found unformatted files:`n$bad"; exit 1 }
+
+      - name: Run tests (non-Windows)
+        if: runner.os != 'Windows'
+        run: go test -v -race -timeout 180s ./...
+
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: go test -v -timeout 180s ./...

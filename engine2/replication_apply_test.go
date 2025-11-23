@@ -6,6 +6,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
+	"github.com/INLOpen/nexusbase/indexer"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/stretchr/testify/require"
@@ -64,14 +65,27 @@ func TestApplyReplicatedEntry_PutAndDeleteSeries(t *testing.T) {
 	require.NoError(t, a.ApplyReplicatedEntry(context.Background(), entry))
 
 	// compute series key as adapter would
-	metricID, _ := a.stringStore.GetOrCreateID("cpu")
+	// Batch-create IDs for metric and tags to match runtime batching
+	list := []string{"cpu", "host", "a", "region", "us"}
+	idMap := make(map[string]uint64, len(list))
+	if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+		ids, err := ss.AddStringsBatch(list)
+		require.NoError(t, err)
+		for i, s := range list {
+			idMap[s] = ids[i]
+		}
+	} else {
+		// fallback: create individually
+		for _, s := range list {
+			id, err := a.stringStore.GetOrCreateID(s)
+			require.NoError(t, err)
+			idMap[s] = id
+		}
+	}
+	metricID := idMap["cpu"]
 	var pairs []core.EncodedSeriesTagPair
-	kid, _ := a.stringStore.GetOrCreateID("host")
-	vid, _ := a.stringStore.GetOrCreateID("a")
-	pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
-	kid2, _ := a.stringStore.GetOrCreateID("region")
-	vid2, _ := a.stringStore.GetOrCreateID("us")
-	pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid2, ValueID: vid2})
+	pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: idMap["host"], ValueID: idMap["a"]})
+	pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: idMap["region"], ValueID: idMap["us"]})
 	// ensure canonical ordering
 	if pairs[0].KeyID > pairs[1].KeyID {
 		pairs[0], pairs[1] = pairs[1], pairs[0]

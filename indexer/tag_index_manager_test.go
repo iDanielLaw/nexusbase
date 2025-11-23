@@ -55,9 +55,19 @@ func TestTagIndexManager_Persistence(t *testing.T) {
 	// Helper to add data and ensure strings are in the store first,
 	// simulating the behavior of the main StorageEngine.
 	addData := func(seriesID uint64, tags map[string]string) {
-		for k, v := range tags {
-			deps.StringStore.GetOrCreateID(k)
-			deps.StringStore.GetOrCreateID(v)
+		// Batch-create keys/values when possible
+		if len(tags) > 0 {
+			list := make([]string, 0, len(tags)*2)
+			for k, v := range tags {
+				list = append(list, k, v)
+			}
+			if ss, ok := deps.StringStore.(*StringStore); ok {
+				_, _ = ss.AddStringsBatch(list)
+			} else {
+				for _, s := range list {
+					_, _ = deps.StringStore.GetOrCreateID(s)
+				}
+			}
 		}
 		tim1.Add(seriesID, tags)
 	}
@@ -136,15 +146,25 @@ func TestTagIndexManager_AddEncoded(t *testing.T) {
 	}
 	defer tim.Stop()
 
-	// Manually encode some tags
-	hostID, _ := deps.StringStore.GetOrCreateID("host")
-	serverAID, _ := deps.StringStore.GetOrCreateID("serverA")
-	regionID, _ := deps.StringStore.GetOrCreateID("region")
-	usEastID, _ := deps.StringStore.GetOrCreateID("us-east")
+	// Manually encode some tags (batch-create IDs first)
+	list := []string{"host", "serverA", "region", "us-east"}
+	var encodedTags1 []core.EncodedSeriesTagPair
+	if ss, ok := deps.StringStore.(*StringStore); ok {
+		ids, _ := ss.AddStringsBatch(list)
+		encodedTags1 = []core.EncodedSeriesTagPair{
+			{KeyID: ids[0], ValueID: ids[1]},
+			{KeyID: ids[2], ValueID: ids[3]},
+		}
+	} else {
+		hostID, _ := deps.StringStore.GetOrCreateID("host")
+		serverAID, _ := deps.StringStore.GetOrCreateID("serverA")
+		regionID, _ := deps.StringStore.GetOrCreateID("region")
+		usEastID, _ := deps.StringStore.GetOrCreateID("us-east")
 
-	encodedTags1 := []core.EncodedSeriesTagPair{
-		{KeyID: hostID, ValueID: serverAID},
-		{KeyID: regionID, ValueID: usEastID},
+		encodedTags1 = []core.EncodedSeriesTagPair{
+			{KeyID: hostID, ValueID: serverAID},
+			{KeyID: regionID, ValueID: usEastID},
+		}
 	}
 
 	// Add the encoded data
@@ -290,9 +310,14 @@ func TestTagIndexManager_Compaction_WithDeletions(t *testing.T) {
 	seriesA_ID, _ := deps.SeriesIDStore.GetOrCreateID("seriesA") // ID 1
 	seriesB_ID, _ := deps.SeriesIDStore.GetOrCreateID("seriesB") // ID 2
 	seriesC_ID, _ := deps.SeriesIDStore.GetOrCreateID("seriesC") // ID 3
-	deps.StringStore.GetOrCreateID("region")
-	deps.StringStore.GetOrCreateID("us")
-	deps.StringStore.GetOrCreateID("eu")
+	// Batch-create common strings
+	if ss, ok := deps.StringStore.(*StringStore); ok {
+		_, _ = ss.AddStringsBatch([]string{"region", "us", "eu"})
+	} else {
+		deps.StringStore.GetOrCreateID("region")
+		deps.StringStore.GetOrCreateID("us")
+		deps.StringStore.GetOrCreateID("eu")
+	}
 
 	// Mark series B as deleted
 	deps.DeletedSeries["seriesB"] = 100
@@ -390,9 +415,18 @@ func TestTagIndexManager_Compaction(t *testing.T) {
 
 	// Helper to add data and ensure strings are in the store first
 	addData := func(seriesID uint64, tags map[string]string) {
-		for k, v := range tags {
-			deps.StringStore.GetOrCreateID(k)
-			deps.StringStore.GetOrCreateID(v)
+		if len(tags) > 0 {
+			list := make([]string, 0, len(tags)*2)
+			for k, v := range tags {
+				list = append(list, k, v)
+			}
+			if ss, ok := deps.StringStore.(*StringStore); ok {
+				_, _ = ss.AddStringsBatch(list)
+			} else {
+				for _, s := range list {
+					_, _ = deps.StringStore.GetOrCreateID(s)
+				}
+			}
 		}
 		tim.Add(seriesID, tags)
 	}

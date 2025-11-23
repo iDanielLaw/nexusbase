@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -29,8 +28,9 @@ import (
 // IndexMemtable is the in-memory store for the tag index.
 // It maps tag IDs to roaring bitmaps of series IDs.
 type IndexMemtable struct {
-	mu    sync.RWMutex
-	index map[uint64]map[uint64]*roaring64.Bitmap
+	mu sync.RWMutex
+	// map[tagKeyID] -> map[tagValueID] -> *roaring64.Bitmap
+	index map[uint64]tagValueMap
 	// size tracks the number of bitmaps in the memtable.
 	size int64
 }
@@ -38,9 +38,12 @@ type IndexMemtable struct {
 // NewIndexMemtable creates a new, empty index memtable.
 func NewIndexMemtable() *IndexMemtable {
 	return &IndexMemtable{
-		index: make(map[uint64]map[uint64]*roaring64.Bitmap),
+		index: make(map[uint64]tagValueMap),
 	}
 }
+
+// tagValueMap represents the nested map for a tag key mapping to value bitmaps.
+type tagValueMap map[uint64]*roaring64.Bitmap
 
 // Add adds a seriesID to the bitmap for a given tag key/value pair.
 // It is safe for concurrent use.
@@ -48,14 +51,16 @@ func (im *IndexMemtable) Add(tagKeyID, tagValueID uint64, seriesID uint64) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 
-	if _, ok := im.index[tagKeyID]; !ok {
-		im.index[tagKeyID] = make(map[uint64]*roaring64.Bitmap)
+	vmap, ok := im.index[tagKeyID]
+	if !ok {
+		vmap = make(tagValueMap)
+		im.index[tagKeyID] = vmap
 	}
-	if _, ok := im.index[tagKeyID][tagValueID]; !ok {
-		im.index[tagKeyID][tagValueID] = roaring64.New()
+	if _, ok := vmap[tagValueID]; !ok {
+		vmap[tagValueID] = roaring64.New()
 		im.size++ // Increment size only when a new bitmap is created.
 	}
-	im.index[tagKeyID][tagValueID].Add(seriesID)
+	vmap[tagValueID].Add(seriesID)
 }
 
 // Remove removes a seriesID from all bitmaps in the memtable.
@@ -342,7 +347,7 @@ func (tim *TagIndexManager) Query(tags map[string]string) (*roaring64.Bitmap, er
 // by merging results from the memtables and all SSTable levels.
 func (tim *TagIndexManager) getBitmapForTag(tagKeyID, tagValueID uint64) (*roaring64.Bitmap, error) {
 	mergedBitmap := roaring64.New()
-	indexKey := encodeTagIndexKey(tagKeyID, tagValueID)
+	indexKey := EncodeTagIndexKey(tagKeyID, tagValueID)
 
 	// 1. Check memtables (mutable and immutable)
 	tim.mu.RLock()
@@ -769,7 +774,7 @@ func (tim *TagIndexManager) flushIndexMemtableToSSTable(memToFlush *IndexMemtabl
 
 		for _, tagValueID := range sortedTagValueIDs {
 			bitmap := tagValueMap[tagValueID]
-			key := encodeTagIndexKey(tagKeyID, tagValueID)
+			key := EncodeTagIndexKey(tagKeyID, tagValueID)
 			value, err := bitmap.ToBytes()
 			if err != nil {
 				writer.Abort()
@@ -871,13 +876,6 @@ func (tim *TagIndexManager) createNewIndexWriter() (core.SSTableWriterInterface,
 	return writer, fileID, nil
 }
 
-func encodeTagIndexKey(keyID, valueID uint64) []byte {
-	buf := make([]byte, 16)
-	binary.BigEndian.PutUint64(buf[0:8], keyID)
-	binary.BigEndian.PutUint64(buf[8:16], valueID)
-	return buf
-}
-
 // persistIndexManifest saves the current state of the index's levels manager to disk.
 func (tim *TagIndexManager) persistIndexManifestLocked() error {
 	manifest := core.SnapshotManifest{ // Reusing the main manifest struct for simplicity
@@ -907,28 +905,8 @@ func (tim *TagIndexManager) persistIndexManifestLocked() error {
 		manifest.Levels = append(manifest.Levels, levelManifest)
 	}
 
-	// Write to a temporary file first, then rename for atomicity.
-	tempPath := tim.manifestPath + ".tmp"
-	file, err := os.Create(tempPath)
-	if err != nil {
-		return fmt.Errorf("failed to create temporary index manifest file: %w", err)
-	}
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-
-	if err := encoder.Encode(manifest); err != nil {
-		file.Close()
-		sys.Remove(tempPath)
-		return fmt.Errorf("failed to encode index manifest: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		sys.Remove(tempPath)
-		return fmt.Errorf("failed to close temporary index manifest file: %w", err)
-	}
-
-	if err := sys.Rename(tempPath, tim.manifestPath); err != nil {
-		return fmt.Errorf("failed to rename temporary index manifest to final path: %w", err)
+	if err := PersistIndexManifest(tim.manifestPath, manifest); err != nil {
+		return err
 	}
 
 	tim.logger.Debug("Index manifest persisted successfully.")
@@ -1044,22 +1022,13 @@ func (tim *TagIndexManager) RestoreFromSnapshot(snapshotDir string) error {
 func (tim *TagIndexManager) LoadFromFile(dataDir string) error {
 	indexSstDir := filepath.Join(dataDir, core.IndexSSTDirName)
 	manifestPath := filepath.Join(indexSstDir, core.IndexManifestFileName)
-
-	file, err := os.Open(manifestPath)
+	manifest, err := LoadIndexManifest(manifestPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			tim.logger.Info("Index manifest not found, starting with a fresh index state.", "path", manifestPath)
-			return nil // Not an error, just a fresh start.
-		}
-		return fmt.Errorf("failed to open index manifest file %s: %w", manifestPath, err)
+		return fmt.Errorf("failed to load index manifest: %w", err)
 	}
-	defer file.Close()
-
-	var manifest core.SnapshotManifest
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&manifest); err != nil {
-		tim.logger.Warn("Failed to decode index manifest, starting with a fresh index state.", "path", manifestPath, "error", err)
-		return nil // Treat as a fresh start if manifest is corrupted.
+	if manifest == nil {
+		tim.logger.Info("Index manifest not found, starting with a fresh index state.", "path", manifestPath)
+		return nil
 	}
 
 	tim.logger.Info("Loading index SSTables from manifest.", "path", manifestPath)
