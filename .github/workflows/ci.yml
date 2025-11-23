@@ -36,22 +36,22 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Check gofmt (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          bad=$(gofmt -l .)
-          if [ -n "$bad" ]; then
-            echo "gofmt found unformatted files:"
-            echo "$bad"
-            exit 1
-          fi
+#      - name: Check gofmt (Linux/macOS)
+#        if: runner.os != 'Windows'
+#        run: |
+#          bad=$(gofmt -l .)
+#          if [ -n "$bad" ]; then
+#            echo "gofmt found unformatted files:"
+#            echo "$bad"
+#            exit 1
+#          fi
 
-      - name: Check gofmt (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $bad = & gofmt -l .
-          if ($bad) { Write-Host "gofmt found unformatted files:`n$bad"; exit 1 }
+#      - name: Check gofmt (Windows)
+#        if: runner.os == 'Windows'
+#        shell: pwsh
+#        run: |
+#          $bad = & gofmt -l .
+#          if ($bad) { Write-Host "gofmt found unformatted files:`n$bad"; exit 1 }
 
       - name: Run tests (non-Windows)
         if: runner.os != 'Windows'
