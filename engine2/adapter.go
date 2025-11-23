@@ -329,6 +329,13 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 	for metric, tagMap := range a.mem.data {
 		for tagKey, tsMap := range tagMap {
 			tags := parseTagsFromKey(tagKey)
+			// attempt to ensure IDs for metric and all tag strings in a batch
+			strs := make([]string, 0, len(tags)+1)
+			strs = append(strs, metric)
+			for k, v := range tags {
+				strs = append(strs, k, v)
+			}
+			a.ensureIDs(idMap, strs)
 			// convert metric and tags to IDs using the string store (use idMap when available)
 			var metricID uint64
 			if v, ok := idMap[metric]; ok {
@@ -604,9 +611,18 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 		}
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
 
-		// register series in active map and seriesID store
+		// register series in active map and seriesID store. Prefer ids from the
+		// batch-created idMap when available to avoid extra writes.
 		if a.stringStore != nil {
-			metricID, _ := a.stringStore.GetOrCreateID(metric)
+			var metricID uint64
+			if idMap != nil {
+				if x, ok := idMap[metric]; ok {
+					metricID = x
+				}
+			}
+			if metricID == 0 {
+				metricID, _ = a.stringStore.GetOrCreateID(metric)
+			}
 			seriesKey := core.EncodeSeriesKey(metricID, pairs)
 			seriesKeyStr := string(seriesKey)
 			a.addActiveSeries(seriesKeyStr)
@@ -946,6 +962,13 @@ func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable,
 	for metric, tagMap := range old.data {
 		for tagKey, tsMap := range tagMap {
 			tags := parseTagsFromKey(tagKey)
+			// attempt to ensure IDs for metric and tag strings in batch
+			strs := make([]string, 0, len(tags)+1)
+			strs = append(strs, metric)
+			for k, v := range tags {
+				strs = append(strs, k, v)
+			}
+			a.ensureIDs(idMap, strs)
 			var metricID uint64
 			if v, ok := idMap[metric]; ok {
 				metricID = v
@@ -1365,6 +1388,47 @@ func (e *engine2WALWrapper) NewStreamReader(fromSeqNum uint64) (wal.StreamReader
 }
 func (a *Engine2Adapter) GetStringStore() indexer.StringStoreInterface { return a.stringStore }
 
+// ensureIDs attempts to populate `idMap` with IDs for any strings in `strs`
+// that are not already present. It prefers the concrete StringStore's
+// `AddStringsBatch` for efficiency and falls back to per-string
+// `GetOrCreateID` when batching isn't available or fails.
+func (a *Engine2Adapter) ensureIDs(idMap map[string]uint64, strs []string) {
+	if a.stringStore == nil || len(strs) == 0 {
+		return
+	}
+	// build list of missing strings
+	missing := make([]string, 0)
+	seen := make(map[string]struct{}, len(strs))
+	for _, s := range strs {
+		if _, ok := idMap[s]; ok {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		missing = append(missing, s)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	// try batch API on concrete implementation
+	if ss, ok := a.stringStore.(*indexer.StringStore); ok {
+		if ids, err := ss.AddStringsBatch(missing); err == nil {
+			for i, s := range missing {
+				idMap[s] = ids[i]
+			}
+			return
+		}
+	}
+	// fallback to per-string creation
+	for _, s := range missing {
+		if id, err := a.stringStore.GetOrCreateID(s); err == nil {
+			idMap[s] = id
+		}
+	}
+}
+
 // (GetSnapshotManager implemented earlier)
 
 func (a *Engine2Adapter) GetSequenceNumber() uint64 { return a.sequenceNumber.Load() }
@@ -1412,15 +1476,27 @@ func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WA
 
 	// build encoded tag pairs
 	var pairs []core.EncodedSeriesTagPair
+	// ensure any missing ids are created in a batch when possible
+	if idMapPoint == nil {
+		idMapPoint = make(map[string]uint64)
+	}
+	missingStrs := make([]string, 0, len(dp.Tags)*2)
+	for k, v := range dp.Tags {
+		if _, ok := idMapPoint[k]; !ok {
+			missingStrs = append(missingStrs, k)
+		}
+		if _, ok := idMapPoint[v]; !ok {
+			missingStrs = append(missingStrs, v)
+		}
+	}
+	a.ensureIDs(idMapPoint, missingStrs)
 	for k, v := range dp.Tags {
 		var kid, vid uint64
-		if idMapPoint != nil {
-			if x, ok := idMapPoint[k]; ok {
-				kid = x
-			}
-			if x, ok := idMapPoint[v]; ok {
-				vid = x
-			}
+		if x, ok := idMapPoint[k]; ok {
+			kid = x
+		}
+		if x, ok := idMapPoint[v]; ok {
+			vid = x
 		}
 		if kid == 0 && a.stringStore != nil {
 			kid, _ = a.stringStore.GetOrCreateID(k)

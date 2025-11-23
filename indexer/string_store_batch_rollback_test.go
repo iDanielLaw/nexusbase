@@ -97,3 +97,61 @@ func TestAddStringsBatch_RollbackOnWriteFailure(t *testing.T) {
 	// cleanup
 	_ = s.Close()
 }
+
+func TestAddStringsBatch_RollbackOnSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	// create a backing real file
+	tmp, err := os.CreateTemp(dir, "string_mapping-*.log")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	// ensure file closed/removed at end
+	defer os.Remove(tmp.Name())
+	// wrap it with a failingFile initially failing on Sync
+	ff := &failingFile{f: tmp, failSync: true}
+
+	s := NewStringStore(nil, nil)
+	// inject failing file handle
+	s.logFile = ff
+
+	inputs := []string{"a", "b", "c"}
+	ids, err := s.AddStringsBatch(inputs)
+	if err == nil {
+		t.Fatalf("expected AddStringsBatch to fail due to injected sync error, got ids=%v", ids)
+	}
+
+	// Ensure no in-memory mappings exist after rollback
+	for _, v := range inputs {
+		if _, ok := s.GetID(v); ok {
+			t.Fatalf("expected no id for %s after rollback", v)
+		}
+	}
+
+	// nextID should be restored to 1 (no entries present)
+	if s.nextID.Load() != 1 {
+		t.Fatalf("expected nextID to be reset to 1 after rollback, got %d", s.nextID.Load())
+	}
+
+	// Now allow Sync to succeed and try again
+	ff.failSync = false
+	ids2, err2 := s.AddStringsBatch(inputs)
+	if err2 != nil {
+		t.Fatalf("AddStringsBatch failed on retry after clearing sync error: %v", err2)
+	}
+	if len(ids2) != len(inputs) {
+		t.Fatalf("expected %d ids on success, got %d", len(inputs), len(ids2))
+	}
+	// mappings should now exist
+	for i, v := range inputs {
+		id, ok := s.GetID(v)
+		if !ok {
+			t.Fatalf("expected id for %s after successful batch", v)
+		}
+		if id != ids2[i] {
+			t.Fatalf("id mismatch for %s: expected %d got %d", v, ids2[i], id)
+		}
+	}
+
+	// cleanup
+	_ = s.Close()
+}
