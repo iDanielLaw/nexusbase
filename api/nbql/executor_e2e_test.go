@@ -8,7 +8,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexuscore/utils/clock"
@@ -267,7 +266,7 @@ func TestExecutor_E2E_RemoveRange(t *testing.T) {
 	opts := getBaseOptsForE2ETest(t)
 	opts.DataDir = dataDir
 
-	eng, err := engine.NewStorageEngine(opts)
+	eng, err := engine2.NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = eng.Start()
 	require.NoError(t, err)

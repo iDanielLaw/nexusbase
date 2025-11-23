@@ -65,6 +65,8 @@ type Engine2Adapter struct {
 	started atomic.Bool
 	// cached snapshot manager
 	snapshotMgr snapshot.ManagerInterface
+	// simple in-memory pubsub implementation for real-time updates
+	pubsub *PubSub
 	// adapter lock used by snapshot provider methods
 	providerLock sync.Mutex
 	// memtable snapshot/flush configuration
@@ -1292,7 +1294,13 @@ func (a *Engine2Adapter) Close() error {
 
 // Introspection & Utilities
 func (a *Engine2Adapter) GetPubSub() (engine.PubSubInterface, error) {
-	return nil, fmt.Errorf("GetPubSub not implemented")
+	// Lazily initialize a PubSub instance and return it. The PubSub type
+	// in engine2 uses legacy `engine.Subscription`/`engine.SubscriptionFilter`
+	// so it satisfies the `engine.PubSubInterface` expected by callers.
+	if a.pubsub == nil {
+		a.pubsub = NewPubSub()
+	}
+	return a.pubsub, nil
 }
 func (a *Engine2Adapter) GetSnapshotsBaseDir() string             { return filepath.Join(a.dataRoot, "snapshots") }
 func (a *Engine2Adapter) Metrics() (*engine.EngineMetrics, error) { return nil, nil }

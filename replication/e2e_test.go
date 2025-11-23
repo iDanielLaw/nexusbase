@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/config"
-	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/replication"
@@ -41,7 +40,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	lis := testutil.NewBufconnListener(bufSize)
 	leaderAddr := lis.Addr().String()
 
-	leaderOpts := engine.GetBaseOptsForTest(t, "leader_")
+	leaderOpts := engine2.GetBaseOptsForTest(t, "leader_")
 	leaderOpts.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: true}))
 	leaderOpts.ReplicationMode = "leader"
 
@@ -71,7 +70,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 
 	// --- Follower Setup ---
 
-	followerOpts := engine.GetBaseOptsForTest(t, "follower_")
+	followerOpts := engine2.GetBaseOptsForTest(t, "follower_")
 	followerOpts.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: true}))
 	followerOpts.ReplicationMode = "follower"
 
@@ -140,7 +139,7 @@ func TestReplication_HappyPath_Put(t *testing.T) {
 
 	// --- Test Catch-up by writing to a segment and rotating it ---
 	primeTs := time.Now().UnixNano()
-	primePoint := engine.HelperDataPoint(t, "prime", map[string]string{"n": "1"}, primeTs, map[string]any{"v": 1})
+	primePoint := engine2.HelperDataPoint(t, "prime", map[string]string{"n": "1"}, primeTs, map[string]any{"v": 1})
 	err := h.leaderEngine.Put(ctx, primePoint)
 	require.NoError(t, err)
 
@@ -155,7 +154,7 @@ func TestReplication_HappyPath_Put(t *testing.T) {
 
 	// --- Test Tailing by writing to the new active segment ---
 	ts := time.Now().UnixNano()
-	point := engine.HelperDataPoint(t, "cpu", map[string]string{"host": "A"}, ts, map[string]any{"value": 42.0})
+	point := engine2.HelperDataPoint(t, "cpu", map[string]string{"host": "A"}, ts, map[string]any{"value": 42.0})
 	err = h.leaderEngine.Put(ctx, point)
 	require.NoError(t, err)
 
@@ -188,7 +187,7 @@ func TestReplication_Tailing_Only(t *testing.T) {
 	ts := time.Now().UnixNano()
 
 	// Write a point, which should be sent via the notification channel.
-	point := engine.HelperDataPoint(t, "mem", map[string]string{"host": "B"}, ts, map[string]any{"value": 12345.0})
+	point := engine2.HelperDataPoint(t, "mem", map[string]string{"host": "B"}, ts, map[string]any{"value": 12345.0})
 	err := h.leaderEngine.Put(ctx, point)
 	require.NoError(t, err)
 

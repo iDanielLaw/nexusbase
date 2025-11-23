@@ -12,7 +12,6 @@ import (
 	"github.com/INLOpen/nexusbase/auth"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/sstable"
 	"google.golang.org/grpc"
@@ -444,7 +443,7 @@ func (s *GRPCServer) Subscribe(req *tsdb.SubscribeRequest, stream tsdb.TSDBServi
 	}
 	ctx := stream.Context()
 
-	filter := engine.SubscriptionFilter{
+	filter := engine2.SubscriptionFilter{
 		Metric: req.GetMetric(),
 		Tags:   req.GetTags(),
 	}
