@@ -95,6 +95,10 @@ type EngineConfig struct {
 	Compaction           CompactionConfig `yaml:"compaction"`
 	WAL                  WALConfig        `yaml:"wal"`
 	Index                IndexConfig      `yaml:"index"`
+	// MaxChunkBytes controls the maximum bytes per chunk payload written
+	// to `chunks.dat` by the engine2 adapter. If zero, a sensible default
+	// is used by the adapter (16KB).
+	MaxChunkBytes int `yaml:"max_chunk_bytes"`
 }
 
 // LoggingConfig holds logging-specific configurations.
@@ -225,6 +229,7 @@ func Load(r io.Reader) (*Config, error) {
 				IntraL0MaxFileSizeBytes: 2 * 1024 * 1024, // Default to 2MB for "small" files
 			},
 			ManifestLockTTL: "30s",
+			MaxChunkBytes:   16 * 1024,
 			WAL: WALConfig{
 				SyncMode:            "interval",
 				BatchSize:           1,

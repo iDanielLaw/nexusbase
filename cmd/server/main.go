@@ -207,6 +207,10 @@ func main() {
 		os.Exit(1)
 	}
 	eng2Adapter := engine2.NewEngine2AdapterWithHooks(eng2Inst, hookManager)
+	// Apply configured max chunk bytes to engine2 adapter if provided.
+	if cfg.Engine.MaxChunkBytes > 0 {
+		eng2Adapter.SetMaxChunkBytes(cfg.Engine.MaxChunkBytes)
+	}
 	if startErr := eng2Adapter.Start(); startErr != nil {
 		logger.Error("Failed to start Engine2 adapter", "error", startErr)
 		_ = eng2Adapter.Close()

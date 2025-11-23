@@ -69,7 +69,10 @@ type Engine2Adapter struct {
 	providerLock sync.Mutex
 	// memtable snapshot/flush configuration
 	memtableThreshold int64
-	clk               clock.Clock
+	// maximum bytes per chunk payload written to `chunks.dat`. Defaulted
+	// in constructor but exposed for testability/configuration.
+	maxChunkBytes int
+	clk           clock.Clock
 	// basic active series tracking (in-memory)
 	activeSeries   map[string]struct{}
 	activeSeriesMu sync.RWMutex
@@ -93,6 +96,8 @@ func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapte
 		hookManager:   hm,
 		activeSeries:  make(map[string]struct{}),
 		deletedSeries: make(map[string]uint64),
+		// default chunk payload size: 16KB
+		maxChunkBytes: 16 * 1024,
 	}
 	// defaults for memtable snapshot conversion
 	a.memtableThreshold = 1 << 30
@@ -439,7 +444,7 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 		var refs map[string][]index.ChunkMeta
 		if len(samples) > 0 {
 			var werr error
-			refs, werr = writeChunksFile(blockDir, samples)
+			refs, werr = writeChunksFile(blockDir, samples, a.maxChunkBytes)
 			if werr != nil {
 				// best-effort: log but continue with DataRef=0
 				slog.Default().Warn("failed to write chunks file for block", "err", werr)
@@ -739,6 +744,15 @@ func (a *Engine2Adapter) GetPrivateSeriesIDStore() internal.PrivateManagerStore 
 }
 func (a *Engine2Adapter) GetSSTableCompressionType() string { return "none" }
 
+// SetMaxChunkBytes configures the maximum bytes allowed per chunk payload
+// when writing `chunks.dat`. A value <= 0 is ignored.
+func (a *Engine2Adapter) SetMaxChunkBytes(n int) {
+	if n <= 0 {
+		return
+	}
+	a.maxChunkBytes = n
+}
+
 func (a *Engine2Adapter) Lock()   { a.providerLock.Lock() }
 func (a *Engine2Adapter) Unlock() { a.providerLock.Unlock() }
 
@@ -923,7 +937,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable, parentCtx con
 		var refs map[string][]index.ChunkMeta
 		if len(samples) > 0 {
 			var werr error
-			refs, werr = writeChunksFile(blockDir, samples)
+			refs, werr = writeChunksFile(blockDir, samples, a.maxChunkBytes)
 			if werr != nil {
 				slog.Default().Warn("failed to write chunks file for block", "err", werr)
 				refs = nil
@@ -1236,18 +1250,25 @@ func (a *Engine2Adapter) addActiveSeries(seriesKey string) {
 // It splits per-series samples into multiple chunk payloads when the accumulated
 // payload would exceed `maxChunkBytes`. Returns a map of seriesKey -> slice of
 // DataRef offsets (one per chunk) in file order.
-func writeChunksFile(blockDir string, samples map[string]*bytes.Buffer) (map[string][]index.ChunkMeta, error) {
+func writeChunksFile(blockDir string, samples map[string]*bytes.Buffer, maxChunkBytes int) (map[string][]index.ChunkMeta, error) {
 	if len(samples) == 0 {
 		return nil, nil
 	}
-	const maxChunkBytes = 16 * 1024 // 16KB per chunk payload; tuneable
-
+	// Create a temporary file in the same directory and atomically rename
+	// it into place once writing is complete. This avoids exposing partial
+	// `chunks.dat` files if the process crashes while writing.
 	chunksPath := filepath.Join(blockDir, "chunks.dat")
-	f, err := os.Create(chunksPath)
+	tmpPath := filepath.Join(blockDir, "chunks.dat.tmp")
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// Ensure we close the temp file on any early return.
+	defer func() {
+		_ = f.Close()
+		// If tmpPath still exists (on error), attempt to remove it.
+		_ = os.Remove(tmpPath)
+	}()
 
 	refs := make(map[string][]index.ChunkMeta, len(samples))
 	keys := make([]string, 0, len(samples))
@@ -1354,7 +1375,39 @@ func writeChunksFile(blockDir string, samples map[string]*bytes.Buffer) (map[str
 			refs[k] = chunkRefs
 		}
 	}
-	// best-effort sync
-	_ = f.Sync()
+	// sync and close temp file before renaming into place.
+	if err := f.Sync(); err != nil {
+		return refs, err
+	}
+	if err := f.Close(); err != nil {
+		return refs, err
+	}
+
+	// Attempt atomic rename into final path. Use sys.Rename which includes
+	// cross-device fallback logic used elsewhere in the codebase.
+	if err := sys.Rename(tmpPath, chunksPath); err != nil {
+		// Try a best-effort copy fallback: open src and dst and copy bytes.
+		src, rerr := os.Open(tmpPath)
+		if rerr != nil {
+			_ = os.Remove(tmpPath)
+			return refs, err
+		}
+		defer src.Close()
+		dst, werr := os.Create(chunksPath)
+		if werr != nil {
+			src.Close()
+			_ = os.Remove(tmpPath)
+			return refs, err
+		}
+		if _, cerr := io.Copy(dst, src); cerr != nil {
+			dst.Close()
+			_ = os.Remove(tmpPath)
+			return refs, err
+		}
+		_ = dst.Sync()
+		_ = dst.Close()
+		_ = os.Remove(tmpPath)
+	}
+
 	return refs, nil
 }

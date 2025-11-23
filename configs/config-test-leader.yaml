@@ -32,6 +32,7 @@ engine:
   index:
     memtable_threshold: 10000
     flush_interval: 60s
+  max_chunk_bytes: 16384
 
 logging:
   level: info
