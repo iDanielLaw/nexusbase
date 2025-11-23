@@ -899,28 +899,8 @@ func (tim *TagIndexManager) persistIndexManifestLocked() error {
 		manifest.Levels = append(manifest.Levels, levelManifest)
 	}
 
-	// Write to a temporary file first, then rename for atomicity.
-	tempPath := tim.manifestPath + ".tmp"
-	file, err := os.Create(tempPath)
-	if err != nil {
-		return fmt.Errorf("failed to create temporary index manifest file: %w", err)
-	}
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-
-	if err := encoder.Encode(manifest); err != nil {
-		file.Close()
-		sys.Remove(tempPath)
-		return fmt.Errorf("failed to encode index manifest: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		sys.Remove(tempPath)
-		return fmt.Errorf("failed to close temporary index manifest file: %w", err)
-	}
-
-	if err := sys.Rename(tempPath, tim.manifestPath); err != nil {
-		return fmt.Errorf("failed to rename temporary index manifest to final path: %w", err)
+	if err := PersistIndexManifest(tim.manifestPath, manifest); err != nil {
+		return err
 	}
 
 	tim.logger.Debug("Index manifest persisted successfully.")
@@ -1036,22 +1016,13 @@ func (tim *TagIndexManager) RestoreFromSnapshot(snapshotDir string) error {
 func (tim *TagIndexManager) LoadFromFile(dataDir string) error {
 	indexSstDir := filepath.Join(dataDir, core.IndexSSTDirName)
 	manifestPath := filepath.Join(indexSstDir, core.IndexManifestFileName)
-
-	file, err := os.Open(manifestPath)
+	manifest, err := LoadIndexManifest(manifestPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			tim.logger.Info("Index manifest not found, starting with a fresh index state.", "path", manifestPath)
-			return nil // Not an error, just a fresh start.
-		}
-		return fmt.Errorf("failed to open index manifest file %s: %w", manifestPath, err)
+		return fmt.Errorf("failed to load index manifest: %w", err)
 	}
-	defer file.Close()
-
-	var manifest core.SnapshotManifest
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&manifest); err != nil {
-		tim.logger.Warn("Failed to decode index manifest, starting with a fresh index state.", "path", manifestPath, "error", err)
-		return nil // Treat as a fresh start if manifest is corrupted.
+	if manifest == nil {
+		tim.logger.Info("Index manifest not found, starting with a fresh index state.", "path", manifestPath)
+		return nil
 	}
 
 	tim.logger.Info("Loading index SSTables from manifest.", "path", manifestPath)
