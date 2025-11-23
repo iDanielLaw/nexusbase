@@ -202,7 +202,7 @@ func Rename(oldpath, newpath string) error {
 	const retryInterval = 100 * time.Millisecond
 	var lastErr error
 	for i := 0; i < maxAttempts; i++ {
-		lastErr = os.Rename(oldpath, newpath)
+		lastErr = renameImpl(oldpath, newpath)
 		if lastErr == nil {
 			return nil
 		}
@@ -262,3 +262,22 @@ func Rename(oldpath, newpath string) error {
 
 // Stat returns file info for the given path.
 func Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
+
+// renameImpl is the platform rename implementation used by Rename. It is
+// a variable so tests can override it to simulate rename failures and exercise
+// the copy-fallback path. By default it calls os.Rename.
+var renameImpl = os.Rename
+
+// SetRenameImpl sets the underlying rename implementation used by Rename.
+// Tests may use this to simulate failures. Passing nil restores the default os.Rename.
+func SetRenameImpl(fn func(oldpath, newpath string) error) {
+	if fn == nil {
+		renameImpl = os.Rename
+	} else {
+		renameImpl = fn
+	}
+}
+
+// GetRenameImpl returns the currently configured rename implementation.
+// Useful for tests to save/restore the previous value.
+func GetRenameImpl() func(oldpath, newpath string) error { return renameImpl }
