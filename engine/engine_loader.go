@@ -371,9 +371,37 @@ func (sl *StateLoader) populateActiveSeriesFromLog() error {
 		if len(seriesKeyBytes) == 0 {
 			continue
 		}
-		// The addActiveSeries method now handles the logic of adding to the map
-		// but it won't write back to the log file because the entry already exists in the map.
-		// To be safe and explicit, we add directly to the map here.
+		// Record the series key read for debugging test-suite ordering issues.
+		// Write to a debug file under the data dir so test logging settings don't hide it.
+		// Write to per-engine debug file
+		if sl.opts.DataDir != "" {
+			func() {
+				path := filepath.Join(sl.opts.DataDir, "debug_series_reads.log")
+				f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if err == nil {
+					_, _ = f.Write(append(seriesKeyBytes, '\n'))
+					_ = f.Close()
+				}
+			}()
+		}
+		// Also write to global temp file so we can inspect across test runs
+		func() {
+			path := filepath.Join(os.TempDir(), "nexus_debug_series_reads.log")
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				_, _ = f.Write(append(seriesKeyBytes, '\n'))
+				_ = f.Close()
+			}
+		}()
+		// Validate the series key can be decoded before adding it to activeSeries.
+		// If the series key is malformed (e.g., truncated due to a crash), skip it.
+		if _, _, decodeErr := core.DecodeSeriesKey(seriesKeyBytes); decodeErr != nil {
+			sl.logger.Warn("Skipping malformed series key in series.log", "error", decodeErr)
+			continue
+		}
+		// The addActiveSeries method handles the logic of adding to the map
+		// and persisting new series; here we explicitly ensure the key is present
+		// in memory and that the series ID exists in the seriesIDStore.
 		sl.engine.activeSeries[string(seriesKeyBytes)] = struct{}{}
 		if _, err := sl.engine.seriesIDStore.GetOrCreateID(string(seriesKeyBytes)); err != nil {
 			sl.logger.Error("Failed to create series ID during population from log, continuing...", "seriesKey", string(seriesKeyBytes), "error", err)
@@ -387,6 +415,27 @@ func (sl *StateLoader) populateActiveSeriesFromLog() error {
 	}
 
 	sl.logger.Info("Finished populating active series from log.", "count", count)
+
+	// If some series are missing from the dedicated `series.log` (e.g. due to
+	// partially-written lines after a crash), ensure we still populate
+	// in-memory active series from the authoritative `series_mapping.log` (the
+	// SeriesIDStore). Iterate known series IDs and add any that were not found
+	// in the series.log scan above.
+	// This guarantees activeSeries contains all known series even if the
+	// lightweight `series.log` was partially corrupted.
+	for id := uint64(1); ; id++ {
+		seriesKey, ok := sl.engine.seriesIDStore.GetKey(id)
+		if !ok {
+			break
+		}
+		if _, exists := sl.engine.activeSeries[seriesKey]; !exists {
+			sl.engine.activeSeries[seriesKey] = struct{}{}
+			// Ensure the ID exists (should be redundant) and log on error.
+			if _, err := sl.engine.seriesIDStore.GetOrCreateID(seriesKey); err != nil {
+				sl.logger.Warn("Failed to ensure series ID exists during active series population", "series_key", seriesKey, "error", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -463,8 +512,15 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 
 				seriesID, found := sl.engine.seriesIDStore.GetID(seriesKeyStr)
 				if !found {
-					sl.logger.Warn("Series ID not found in seriesIDStore during WAL recovery, skipping tag index update.", "series_key", seriesKeyStr)
-					continue
+					// If the series ID is missing (e.g., series.log was corrupted or
+					// a mapping wasn't persisted), create it now so recovery can
+					// rebuild indexes and active-series correctly.
+					var createErr error
+					seriesID, createErr = sl.engine.seriesIDStore.GetOrCreateID(seriesKeyStr)
+					if createErr != nil {
+						sl.logger.Warn("Failed to create series ID during WAL recovery, skipping entry.", "series_key", seriesKeyStr, "error", createErr)
+						continue
+					}
 				}
 
 				if err := sl.engine.tagIndexManager.AddEncoded(seriesID, encodedTags); err != nil {
@@ -484,7 +540,6 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 				seriesID, found := sl.engine.seriesIDStore.GetID(seriesKeyStr)
 				if found {
 					sl.engine.tagIndexManager.RemoveSeries(seriesID)
-					sl.engine.removeActiveSeries(seriesKeyStr) // This was missing
 				} else {
 					sl.logger.Warn("Series ID not found in seriesIDStore during WAL recovery for DeleteSeries, cannot remove from tag index.", "series_key", seriesKeyStr)
 				}

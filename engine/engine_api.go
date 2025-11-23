@@ -495,7 +495,24 @@ func (e *storageEngine) prepareDataPoint(ctx context.Context, p core.DataPoint) 
 	}
 
 	// --- Dictionary & Key Encoding ---
-	metricID, err := e.stringStore.GetOrCreateID(metric)
+	// Batch-create IDs for metric and tag strings to avoid many small writes.
+	var idMap map[string]uint64
+	if e.stringStore != nil {
+		unique := make(map[string]struct{})
+		unique[metric] = struct{}{}
+		for k, v := range tags {
+			unique[k] = struct{}{}
+			unique[v] = struct{}{}
+		}
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		idMap = make(map[string]uint64)
+		e.ensureIDs(idMap, list)
+	}
+
+	metricID, err := e.getOrCreateIDFromMap(idMap, metric)
 	if err != nil {
 		return core.WALEntry{}, nil, hooks.PostPutDataPointPayload{}, fmt.Errorf("failed to encode metric '%s': %w", metric, err)
 	}
@@ -511,11 +528,11 @@ func (e *storageEngine) prepareDataPoint(ctx context.Context, p core.DataPoint) 
 	encodedTags := *tagsSlicePtr
 
 	for k, v := range tags {
-		keyID, err_k := e.stringStore.GetOrCreateID(k)
+		keyID, err_k := e.getOrCreateIDFromMap(idMap, k)
 		if err_k != nil {
 			return core.WALEntry{}, nil, hooks.PostPutDataPointPayload{}, fmt.Errorf("failed to encode tag key '%s': %w", k, err_k)
 		}
-		valueID, err_v := e.stringStore.GetOrCreateID(v)
+		valueID, err_v := e.getOrCreateIDFromMap(idMap, v)
 		if err_v != nil {
 			return core.WALEntry{}, nil, hooks.PostPutDataPointPayload{}, fmt.Errorf("failed to encode tag value '%s': %w", v, err_v)
 		}
@@ -908,8 +925,26 @@ func (e *storageEngine) Delete(ctx context.Context, metric string, tags map[stri
 	}
 
 	// --- Dictionary Encoding ---
+	// Batch-create IDs for metric and tag strings to avoid many small writes.
+	var idMap map[string]uint64
+	if e.stringStore != nil {
+		unique := make(map[string]struct{})
+		unique[metric] = struct{}{}
+		for k, v := range tags {
+			unique[k] = struct{}{}
+			unique[v] = struct{}{}
+		}
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		idMap = make(map[string]uint64)
+		e.ensureIDs(idMap, list)
+	}
+
+	// metric id
 	var metricID uint64
-	metricID, err = e.stringStore.GetOrCreateID(metric)
+	metricID, err = e.getOrCreateIDFromMap(idMap, metric)
 	if err != nil {
 		err = fmt.Errorf("failed to get or create ID for metric '%s' during delete: %w", metric, err)
 		return
@@ -926,12 +961,12 @@ func (e *storageEngine) Delete(ctx context.Context, metric string, tags map[stri
 
 	for k, v := range tags {
 		var keyID, valueID uint64
-		keyID, err = e.stringStore.GetOrCreateID(k)
+		keyID, err = e.getOrCreateIDFromMap(idMap, k)
 		if err != nil {
 			err = fmt.Errorf("failed to get or create ID for tag key '%s' during delete: %w", k, err)
 			return
 		}
-		valueID, err = e.stringStore.GetOrCreateID(v)
+		valueID, err = e.getOrCreateIDFromMap(idMap, v)
 		if err != nil {
 			err = fmt.Errorf("failed to get or create ID for tag value '%s' during delete: %w", v, err)
 			return

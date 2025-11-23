@@ -96,7 +96,24 @@ func (e *storageEngine) ReplaceWithSnapshot(snapshotDir string) error {
 
 func (e *storageEngine) applyPutEvent(ctx context.Context, entry *pb.WALEntry) error {
 	// 1. Get string IDs for metric and tags, creating them if they don't exist.
-	metricID, err := e.stringStore.GetOrCreateID(entry.GetMetric())
+	// Batch-create missing IDs to reduce per-string write+sync overhead.
+	var idMap map[string]uint64
+	if e.stringStore != nil {
+		unique := make(map[string]struct{})
+		unique[entry.GetMetric()] = struct{}{}
+		for k, v := range entry.GetTags() {
+			unique[k] = struct{}{}
+			unique[v] = struct{}{}
+		}
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		idMap = make(map[string]uint64)
+		e.ensureIDs(idMap, list)
+	}
+
+	metricID, err := e.getOrCreateIDFromMap(idMap, entry.GetMetric())
 	if err != nil {
 		return fmt.Errorf("failed to encode metric '%s': %w", entry.GetMetric(), err)
 	}
@@ -110,11 +127,11 @@ func (e *storageEngine) applyPutEvent(ctx context.Context, entry *pb.WALEntry) e
 
 	tags := entry.GetTags()
 	for k, v := range tags {
-		keyID, err_k := e.stringStore.GetOrCreateID(k)
+		keyID, err_k := e.getOrCreateIDFromMap(idMap, k)
 		if err_k != nil {
 			return fmt.Errorf("failed to encode tag key '%s': %w", k, err_k)
 		}
-		valueID, err_v := e.stringStore.GetOrCreateID(v)
+		valueID, err_v := e.getOrCreateIDFromMap(idMap, v)
 		if err_v != nil {
 			return fmt.Errorf("failed to encode tag value '%s': %w", v, err_v)
 		}
@@ -238,7 +255,24 @@ func (e *storageEngine) applyDeleteRange(ctx context.Context, entry *pb.WALEntry
 
 // encodeSeriesKeyFromProto is a helper to derive the binary series key from proto fields.
 func (e *storageEngine) encodeSeriesKeyFromProto(metric string, tags map[string]string) ([]byte, error) {
-	metricID, err := e.stringStore.GetOrCreateID(metric)
+	// Batch-create IDs for metric and tags to reduce write+sync overhead.
+	var idMap map[string]uint64
+	if e.stringStore != nil {
+		unique := make(map[string]struct{})
+		unique[metric] = struct{}{}
+		for k, v := range tags {
+			unique[k] = struct{}{}
+			unique[v] = struct{}{}
+		}
+		list := make([]string, 0, len(unique))
+		for s := range unique {
+			list = append(list, s)
+		}
+		idMap = make(map[string]uint64)
+		e.ensureIDs(idMap, list)
+	}
+
+	metricID, err := e.getOrCreateIDFromMap(idMap, metric)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode metric '%s': %w", metric, err)
 	}
@@ -251,11 +285,11 @@ func (e *storageEngine) encodeSeriesKeyFromProto(metric string, tags map[string]
 	encodedTags := *tagsSlicePtr
 
 	for k, v := range tags {
-		keyID, err_k := e.stringStore.GetOrCreateID(k)
+		keyID, err_k := e.getOrCreateIDFromMap(idMap, k)
 		if err_k != nil {
 			return nil, fmt.Errorf("failed to encode tag key '%s': %w", k, err_k)
 		}
-		valueID, err_v := e.stringStore.GetOrCreateID(v)
+		valueID, err_v := e.getOrCreateIDFromMap(idMap, v)
 		if err_v != nil {
 			return nil, fmt.Errorf("failed to encode tag value '%s': %w", v, err_v)
 		}

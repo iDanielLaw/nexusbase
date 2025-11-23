@@ -590,10 +590,10 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 				}
 			}
 			if kid == 0 && a.stringStore != nil {
-				kid, _ = a.stringStore.GetOrCreateID(k)
+				kid, _ = a.getOrCreateIDFromMap(idMap, k)
 			}
 			if vid == 0 && a.stringStore != nil {
-				vid, _ = a.stringStore.GetOrCreateID(v)
+				vid, _ = a.getOrCreateIDFromMap(idMap, v)
 			}
 			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 		}
@@ -609,7 +609,7 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 				}
 			}
 			if metricID == 0 {
-				metricID, _ = a.stringStore.GetOrCreateID(metric)
+				metricID, _ = a.getOrCreateIDFromMap(idMap, metric)
 			}
 			seriesKey := core.EncodeSeriesKey(metricID, pairs)
 			seriesKeyStr := string(seriesKey)
@@ -669,7 +669,7 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 				}
 			}
 			if metricID == 0 {
-				metricID, _ = a.stringStore.GetOrCreateID(entry.GetMetric())
+				metricID, _ = a.getOrCreateIDFromMap(idMapDel, entry.GetMetric())
 			}
 			seriesKey := core.EncodeSeriesKey(metricID, pairs)
 			seriesKeyStr := string(seriesKey)
@@ -946,11 +946,7 @@ func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable,
 			}
 			a.ensureIDs(idMap, strs)
 			var metricID uint64
-			if v, ok := idMap[metric]; ok {
-				metricID = v
-			} else if a.stringStore != nil {
-				metricID, _ = a.stringStore.GetOrCreateID(metric)
-			}
+			metricID, _ = a.getOrCreateIDFromMap(idMap, metric)
 			var pairs []core.EncodedSeriesTagPair
 			for k, v := range tags {
 				var kid, vid uint64
@@ -1453,8 +1449,8 @@ func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WA
 			metricID = x
 		}
 	}
-	if metricID == 0 && a.stringStore != nil {
-		metricID, _ = a.stringStore.GetOrCreateID(dp.Metric)
+	if metricID == 0 {
+		metricID, _ = a.getOrCreateIDFromMap(idMapPoint, dp.Metric)
 	}
 
 	// build encoded tag pairs
@@ -1481,11 +1477,11 @@ func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WA
 		if x, ok := idMapPoint[v]; ok {
 			vid = x
 		}
-		if kid == 0 && a.stringStore != nil {
-			kid, _ = a.stringStore.GetOrCreateID(k)
+		if kid == 0 {
+			kid, _ = a.getOrCreateIDFromMap(idMapPoint, k)
 		}
-		if vid == 0 && a.stringStore != nil {
-			vid, _ = a.stringStore.GetOrCreateID(v)
+		if vid == 0 {
+			vid, _ = a.getOrCreateIDFromMap(idMapPoint, v)
 		}
 		pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
 	}
