@@ -342,6 +342,17 @@ func (s *StringStore) AddStringsBatch(strs []string) ([]uint64, error) {
 		return nil, fmt.Errorf("failed to persist string store batch: %w", err)
 	}
 
+	// Trigger hooks for newly inserted strings so external listeners
+	// see the same create events as when using GetOrCreateID.
+	if s.hookManager != nil && len(inserted) > 0 {
+		for _, str := range inserted {
+			if id, ok := s.stringToID[str]; ok {
+				payload := hooks.StringCreatePayload{Str: str, ID: id}
+				s.hookManager.Trigger(context.Background(), hooks.NewOnStringCreateEvent(payload))
+			}
+		}
+	}
+
 	return newIDs, nil
 }
 
