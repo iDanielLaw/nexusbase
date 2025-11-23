@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 )
 
 func main() {
@@ -16,7 +17,7 @@ func main() {
 		log.Fatal("provide -dir")
 	}
 	opts := engine.StorageEngineOptions{DataDir: dir}
-	engIface, err := engine.NewStorageEngine(opts)
+	engIface, err := engine2.NewStorageEngine(opts)
 	if err != nil {
 		log.Fatalf("NewStorageEngine failed: %v", err)
 	}

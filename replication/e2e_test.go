@@ -9,6 +9,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/replication"
 	"github.com/stretchr/testify/require"
@@ -20,11 +21,11 @@ import (
 
 // replicationTestHarness holds all the components for a leader-follower test setup.
 type replicationTestHarness struct {
-	leaderEngine  engine.StorageEngineInterface
+	leaderEngine  engine2.StorageEngineInterface
 	leaderCfg     *config.Config
 	leaderManager *replication.Manager
 
-	followerEngine  engine.StorageEngineInterface
+	followerEngine  engine2.StorageEngineInterface
 	followerCfg     *config.Config
 	followerApplier *replication.WALApplier
 }
@@ -49,7 +50,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	leaderCfg.Replication.Mode = "leader"
 	leaderCfg.Replication.ListenAddress = leaderAddr
 
-	leaderEngine, err := engine.NewStorageEngine(leaderOpts)
+	leaderEngine, err := engine2.NewStorageEngine(leaderOpts)
 	require.NoError(t, err)
 	err = leaderEngine.Start()
 	require.NoError(t, err)
@@ -79,7 +80,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	followerCfg.Replication.Mode = "follower"
 	followerCfg.Replication.LeaderAddress = leaderAddr
 
-	followerEngine, err := engine.NewStorageEngine(followerOpts)
+	followerEngine, err := engine2.NewStorageEngine(followerOpts)
 	require.NoError(t, err)
 	err = followerEngine.Start()
 	require.NoError(t, err)

@@ -15,7 +15,6 @@ import (
 	// Generated gRPC code
 	// Core utilities
 	"github.com/INLOpen/nexusbase/config"
-	"github.com/INLOpen/nexusbase/engine" // StorageEngine (kept for interface types)
 	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/hooks/listeners"
@@ -216,7 +215,7 @@ func main() {
 		_ = eng2Adapter.Close()
 		os.Exit(1)
 	}
-	var primaryEngine engine.StorageEngineInterface = eng2Adapter
+	var primaryEngine engine2.StorageEngineInterface = eng2Adapter
 
 	// Create and initialize the application server using the selected primary engine.
 	appServer, err := server.NewAppServer(primaryEngine, cfg, logger)

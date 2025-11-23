@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
@@ -24,7 +24,7 @@ type MockStorageEngine struct {
 }
 
 // Ensure MockStorageEngine implements the interface.
-var _ engine.StorageEngineInterface = (*MockStorageEngine)(nil)
+var _ engine2.StorageEngineInterface = (*MockStorageEngine)(nil)
 
 // CreateSnapshot is a mock method.
 func (m *MockStorageEngine) CreateSnapshot(ctx context.Context) (string, error) {
@@ -139,12 +139,12 @@ func (m *MockStorageEngine) Start() error {
 	return args.Error(0)
 }
 
-func (m *MockStorageEngine) GetPubSub() (engine.PubSubInterface, error) {
+func (m *MockStorageEngine) GetPubSub() (engine2.PubSubInterface, error) {
 	args := m.Called()
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(engine.PubSubInterface), args.Error(1)
+	return args.Get(0).(engine2.PubSubInterface), args.Error(1)
 }
 
 func (m *MockStorageEngine) GetSnapshotsBaseDir() string {
@@ -152,12 +152,12 @@ func (m *MockStorageEngine) GetSnapshotsBaseDir() string {
 	return args.String(0)
 }
 
-func (m *MockStorageEngine) Metrics() (*engine.EngineMetrics, error) {
+func (m *MockStorageEngine) Metrics() (*engine2.EngineMetrics, error) {
 	args := m.Called()
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*engine.EngineMetrics), args.Error(1)
+	return args.Get(0).(*engine2.EngineMetrics), args.Error(1)
 }
 
 func (m *MockStorageEngine) GetHookManager() hooks.HookManager {

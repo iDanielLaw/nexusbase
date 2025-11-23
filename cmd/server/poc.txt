@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/config"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/server"
 )
 

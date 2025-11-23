@@ -13,7 +13,7 @@ import (
 	"github.com/INLOpen/nexusbase/auth"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexuscore/utils/clock"
@@ -34,7 +34,7 @@ type AppServer struct {
 	batchWorker  *WorkerPool
 	cfg          *config.Config
 	logger       *slog.Logger
-	engine       engine.StorageEngineInterface
+	engine       engine2.StorageEngineInterface
 	cancel       context.CancelFunc
 
 	// Replication components
@@ -45,14 +45,14 @@ type AppServer struct {
 // NewAppServer creates and initializes a new application server.
 // NewAppServer preserves the original API and delegates to NewAppServerWithListeners
 // with nil listeners (meaning it will create real TCP listeners based on config).
-func NewAppServer(eng engine.StorageEngineInterface, cfg *config.Config, logger *slog.Logger) (*AppServer, error) {
+func NewAppServer(eng engine2.StorageEngineInterface, cfg *config.Config, logger *slog.Logger) (*AppServer, error) {
 	return NewAppServerWithListeners(eng, cfg, logger, nil, nil)
 }
 
 // NewAppServerWithListeners creates and initializes a new application server.
 // If non-nil listeners are provided they will be used instead of calling
 // net.Listen. This makes it easy for tests to inject in-memory listeners.
-func NewAppServerWithListeners(eng engine.StorageEngineInterface, cfg *config.Config, logger *slog.Logger, grpcLis net.Listener, tcpLis net.Listener) (*AppServer, error) {
+func NewAppServerWithListeners(eng engine2.StorageEngineInterface, cfg *config.Config, logger *slog.Logger, grpcLis net.Listener, tcpLis net.Listener) (*AppServer, error) {
 	var authenticator core.IAuthenticator
 	if cfg.Security.Enabled {
 		var err error

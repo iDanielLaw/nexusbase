@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/replication/proto"
@@ -24,7 +24,7 @@ type MockStorageEngine struct {
 }
 
 // Ensure MockStorageEngine implements the interface.
-var _ engine.StorageEngineInterface = (*MockStorageEngine)(nil)
+var _ engine2.StorageEngineInterface = (*MockStorageEngine)(nil)
 
 // ReplaceWithSnapshot is a stub for testing purposes.
 func (m *MockStorageEngine) ReplaceWithSnapshot(snapshotDir string) error {
@@ -141,14 +141,14 @@ func (m *MockStorageEngine) CreateIncrementalSnapshot(snapshotsBaseDir string) e
 	return args.Error(0)
 }
 
-func (m *MockStorageEngine) GetPubSub() (engine.PubSubInterface, error) {
+func (m *MockStorageEngine) GetPubSub() (engine2.PubSubInterface, error) {
 	args := m.Called()
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 	// Return the interface type directly.
 	// The test will provide a mock that satisfies this interface.
-	return args.Get(0).(engine.PubSubInterface), nil
+	return args.Get(0).(engine2.PubSubInterface), nil
 }
 
 func (m *MockStorageEngine) GetHookManager() hooks.HookManager {
@@ -191,12 +191,12 @@ func (m *MockStorageEngine) VerifyDataConsistency() []error {
 	}
 	return args.Get(0).([]error)
 }
-func (m *MockStorageEngine) Metrics() (*engine.EngineMetrics, error) {
+func (m *MockStorageEngine) Metrics() (*engine2.EngineMetrics, error) {
 	args := m.Called()
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*engine.EngineMetrics), nil
+	return args.Get(0).(*engine2.EngineMetrics), nil
 }
 func (m *MockStorageEngine) GetMetrics() ([]string, error) {
 	args := m.Called()
