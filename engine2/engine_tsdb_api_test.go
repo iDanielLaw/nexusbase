@@ -533,7 +533,6 @@ func TestStorageEngine_Query_RelativeTime_And_Downsampling(t *testing.T) {
 	iter, err := engine.Query(ctx, params)
 	require.NoError(t, err)
 	require.NotNil(t, iter)
-	defer iter.Close()
 
 	var results []*core.QueryResultItem
 	for iter.Next() {
@@ -542,6 +541,9 @@ func TestStorageEngine_Query_RelativeTime_And_Downsampling(t *testing.T) {
 		results = append(results, it)
 	}
 	require.NoError(t, iter.Error())
+	// Close the iterator now to release any memtable read-locks before performing
+	// further writes. Using defer would hold locks until the end of the test.
+	require.NoError(t, iter.Close())
 	require.Len(t, results, 1)
 	assert.Equal(t, tsInside, results[0].Timestamp)
 
