@@ -88,27 +88,58 @@ func (s *storageEngineShim) Put(ctx context.Context, point core.DataPoint) error
 }
 
 func (s *storageEngineShim) PutBatch(ctx context.Context, points []core.DataPoint) error {
+	// Run PrePutBatch hook which may modify the slice or cancel the operation.
+	if hm := s.GetHookManager(); hm != nil {
+		ev := hooks.NewPrePutBatchEvent(hooks.PrePutBatchPayload{Points: &points})
+		if err := hm.Trigger(ctx, ev); err != nil {
+			return err
+		}
+	}
+
+	// Prepare WAL entries (simple emulation) and attempt to append atomically.
+	// If WAL append fails, the batch should not be applied.
+	walEntries := make([]core.WALEntry, 0, len(points))
+	for _, p := range points {
+		key := core.EncodeTSDBKeyWithString(p.Metric, p.Tags, p.Timestamp)
+		buf, _ := p.Fields.Encode()
+		walEntries = append(walEntries, core.WALEntry{EntryType: core.EntryTypePutEvent, Key: key, Value: buf})
+	}
+	if w := s.wal; w != nil {
+		if err := w.AppendBatch(walEntries); err != nil {
+			return err
+		}
+	}
+
+	// If WAL append succeeded, write to in-memory store
 	for _, p := range points {
 		if err := s.Put(ctx, p); err != nil {
 			return err
 		}
 	}
+
+	// Fire PostPutBatch hook asynchronously (mimic real engine behavior)
+	if hm := s.GetHookManager(); hm != nil {
+		payload := hooks.PostPutBatchPayload{Points: points, Error: nil}
+		go func() { _ = hm.Trigger(ctx, hooks.NewPostPutBatchEvent(payload)) }()
+	}
 	return nil
 }
 
 func (s *storageEngineShim) Get(ctx context.Context, metric string, tags map[string]string, timestamp int64) (core.FieldValues, error) {
+	// Allow pre-get hooks to modify metric/tags/timestamp before lookup
+	if hm := s.GetHookManager(); hm != nil {
+		p := hooks.NewPreGetPointEvent(hooks.PreGetPointPayload{Metric: &metric, Tags: &tags, Timestamp: &timestamp})
+		if err := hm.Trigger(ctx, p); err != nil {
+			return nil, err
+		}
+	}
+
 	key := string(core.EncodeSeriesKeyWithString(metric, tags))
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if series, ok := s.data[key]; ok {
+	series, ok := s.data[key]
+	s.mu.RUnlock()
+	if ok {
 		if fv, ok2 := series[timestamp]; ok2 {
-			// fire pre-get hooks
-			if hm := s.GetHookManager(); hm != nil {
-				p := hooks.NewPreGetPointEvent(hooks.PreGetPointPayload{Metric: &metric, Tags: &tags, Timestamp: &timestamp})
-				if err := hm.Trigger(ctx, p); err != nil {
-					return nil, err
-				}
-			}
 			// post-get
 			if hm := s.GetHookManager(); hm != nil {
 				payload := hooks.NewPostGetPointEvent(hooks.PostGetPointPayload{Metric: metric, Tags: tags, Timestamp: timestamp, Result: &fv})
@@ -121,12 +152,20 @@ func (s *storageEngineShim) Get(ctx context.Context, metric string, tags map[str
 }
 
 func (s *storageEngineShim) Delete(ctx context.Context, metric string, tags map[string]string, timestamp int64) error {
+	// Allow pre-delete hooks to modify metric/tags/timestamp or cancel
+	if hm := s.GetHookManager(); hm != nil {
+		p := hooks.NewPreDeletePointEvent(hooks.PreDeletePointPayload{Metric: &metric, Tags: &tags, Timestamp: &timestamp})
+		if err := hm.Trigger(ctx, p); err != nil {
+			return err
+		}
+	}
+
 	key := string(core.EncodeSeriesKeyWithString(metric, tags))
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if series, ok := s.data[key]; ok {
 		delete(series, timestamp)
 	}
+	s.mu.Unlock()
 	if hm := s.GetHookManager(); hm != nil {
 		payload := hooks.NewPostDeletePointEvent(hooks.PostDeletePointPayload{Metric: metric, Tags: tags, Timestamp: timestamp})
 		_ = hm.Trigger(ctx, payload)
@@ -316,6 +355,24 @@ func (w *testWAL) SetTestingOnlyInjectAppendError(err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.injected = err
+}
+
+func (w *testWAL) AppendBatch(entries []core.WALEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.injected != nil {
+		return w.injected
+	}
+	return nil
+}
+
+func (w *testWAL) Append(entry core.WALEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.injected != nil {
+		return w.injected
+	}
+	return nil
 }
 
 func (s *storageEngineShim) GetWAL() interface{}   { return s.wal }
