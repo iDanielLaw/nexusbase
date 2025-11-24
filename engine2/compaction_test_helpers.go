@@ -200,9 +200,11 @@ func encodeTags(_ StorageEngineInterface, tags map[string]string) []core.Encoded
 // testEngine implements StorageEngineInterface with minimal behavior
 // required by compaction tests. Methods not used by tests are no-ops.
 type testEngine struct {
-	dataDir string
-	nextID  atomic.Uint64
-	clk     clock.Clock
+	dataDir     string
+	nextID      atomic.Uint64
+	clk         clock.Clock
+	hookManager hooks.HookManager
+	logger      *slog.Logger
 }
 
 func (t *testEngine) GetNextSSTableID() uint64                                    { return t.nextID.Add(1) }
@@ -240,15 +242,23 @@ func (t *testEngine) RestoreFromSnapshot(ctx context.Context, path string, overw
 func (t *testEngine) ApplyReplicatedEntry(ctx context.Context, entry *proto.WALEntry) error {
 	return nil
 }
-func (t *testEngine) GetLatestAppliedSeqNum() uint64                { return 0 }
-func (t *testEngine) ReplaceWithSnapshot(snapshotDir string) error  { return nil }
-func (t *testEngine) CleanupEngine()                                {}
-func (t *testEngine) Start() error                                  { return nil }
-func (t *testEngine) Close() error                                  { return nil }
-func (t *testEngine) GetPubSub() (PubSubInterface, error)           { return nil, nil }
-func (t *testEngine) GetSnapshotsBaseDir() string                   { return filepath.Join(t.dataDir, "snapshots") }
-func (t *testEngine) Metrics() (*EngineMetrics, error)              { return nil, nil }
-func (t *testEngine) GetHookManager() hooks.HookManager             { return nil }
+func (t *testEngine) GetLatestAppliedSeqNum() uint64               { return 0 }
+func (t *testEngine) ReplaceWithSnapshot(snapshotDir string) error { return nil }
+func (t *testEngine) CleanupEngine()                               {}
+func (t *testEngine) Start() error                                 { return nil }
+func (t *testEngine) Close() error                                 { return nil }
+func (t *testEngine) GetPubSub() (PubSubInterface, error)          { return nil, nil }
+func (t *testEngine) GetSnapshotsBaseDir() string                  { return filepath.Join(t.dataDir, "snapshots") }
+func (t *testEngine) Metrics() (*EngineMetrics, error)             { return nil, nil }
+func (t *testEngine) GetHookManager() hooks.HookManager {
+	if t.hookManager == nil {
+		if t.logger == nil {
+			t.logger = slog.Default()
+		}
+		t.hookManager = hooks.NewHookManager(t.logger.With("component", "testEngineHookManager"))
+	}
+	return t.hookManager
+}
 func (t *testEngine) GetDLQDir() string                             { return filepath.Join(t.dataDir, "dlq") }
 func (t *testEngine) GetDataDir() string                            { return t.dataDir }
 func (t *testEngine) GetWALPath() string                            { return filepath.Join(t.dataDir, "wal") }

@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"testing"
 
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/index"
 )
 
@@ -158,4 +160,55 @@ func findSeriesByLabels(series []index.SeriesEntry, syms []string, expected map[
 		}
 	}
 	return nil
+}
+
+// HelperFieldValueValidateFloat64 retrieves a float64 field and fails the test if not found or wrong type.
+func HelperFieldValueValidateFloat64(t *testing.T, fields core.FieldValues, selected string) float64 {
+	t.Helper()
+	if fields == nil {
+		t.Fatalf("expected FieldValues, got nil")
+	}
+	pv, ok := fields[selected]
+	if !ok {
+		t.Fatalf("field '%s' not found in FieldValues", selected)
+	}
+	v, ok := pv.ValueFloat64()
+	if !ok {
+		t.Fatalf("field '%s' is not float64", selected)
+	}
+	return v
+}
+
+// HelperFieldValueValidateInt64 retrieves an int64 field and fails the test if not found or wrong type.
+func HelperFieldValueValidateInt64(t *testing.T, fields core.FieldValues, selected string) int64 {
+	t.Helper()
+	if fields == nil {
+		t.Fatalf("expected FieldValues, got nil")
+	}
+	pv, ok := fields[selected]
+	if !ok {
+		t.Fatalf("field '%s' not found in FieldValues", selected)
+	}
+	v, ok := pv.ValueInt64()
+	if !ok {
+		t.Fatalf("field '%s' is not int64", selected)
+	}
+	return v
+}
+
+// HelperFieldValueValidateString retrieves a string field and fails the test if not found or wrong type.
+func HelperFieldValueValidateString(t *testing.T, fields core.FieldValues, selected string) string {
+	t.Helper()
+	if fields == nil {
+		t.Fatalf("expected FieldValues, got nil")
+	}
+	pv, ok := fields[selected]
+	if !ok {
+		t.Fatalf("field '%s' not found in FieldValues", selected)
+	}
+	v, ok := pv.ValueString()
+	if !ok {
+		t.Fatalf("field '%s' is not string", selected)
+	}
+	return v
 }
