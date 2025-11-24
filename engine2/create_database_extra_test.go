@@ -83,7 +83,7 @@ func TestConcurrentCreate(t *testing.T) {
 				alreadyCount++
 			} else {
 				// unexpected error
-				t.Logf("unexpected error from CreateDatabase: %v", err)
+				// avoid transient debug logging in tests
 			}
 		}()
 	}

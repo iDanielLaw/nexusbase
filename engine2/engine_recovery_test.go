@@ -17,7 +17,7 @@ func TestWALRecovery_Successful(t *testing.T) {
 		tempDir = filepath.Join(os.TempDir(), "nexus_test_wal")
 		_ = os.RemoveAll(tempDir)
 		require.NoError(t, os.MkdirAll(tempDir, 0755))
-		t.Logf("PRESERVE_TEST_DIR enabled, using tempDir=%s", tempDir)
+		// PRESERVE_TEST_DIR enabled - using a stable temp dir for diagnostics.
 	} else {
 		tempDir = t.TempDir()
 	}

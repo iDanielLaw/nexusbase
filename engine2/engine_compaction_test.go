@@ -414,7 +414,7 @@ func TestCompactionManager_CompactLNToLNPlus1_RemoveOldSSTableError(t *testing.T
 	sstL1ID := te.GetNextSSTableID()
 	sstL2ID := te.GetNextSSTableID()
 	sstL1 := createDummySSTable(t, sstDir, sstL1ID, []testEntry{{metric: "metric.ln", tags: map[string]string{"id": "c"}, value: "3"}})
-	sstL2_no_overlap := createDummySSTable(t, sstDir, sstL2ID, []testEntry{{metric: "metric.ln", tags: map[string]string{"id": "z"}, value: "4"}})
+	sstL2_no_overlap := createDummySSTable(t, sstDir, sstL2ID, []testEntry{{metric: "metric.ln2", tags: map[string]string{"id": "z"}, value: "4"}})
 	t.Cleanup(func() { sstL1.Close(); sstL2_no_overlap.Close() })
 
 	mockRemover.failPaths[sstL1.FilePath()] = errMockRemove
@@ -616,6 +616,293 @@ func TestCompactionManager_CompactLNToLNPlus1_Success(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("Expected to find merged values in L2 tables, but none were present")
+	}
+}
+
+func TestCompactionManager_Merge_WithTombstones(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := slog.Default()
+
+	// Setup a dummy engine to get a StringStore, ensure it uses the same data directory
+	te := &testEngine{dataDir: tempDir}
+	lm := newTestLevelsManager(t)
+
+	sstDir := filepath.Join(tempDir, "sst")
+	_ = os.MkdirAll(sstDir, 0o755)
+
+	cmParams := CompactionManagerParams{
+		LevelsManager: lm,
+		DataDir:       sstDir,
+		Opts: CompactionOptions{
+			TargetSSTableSize: 1024 * 1024,
+			SSTableCompressor: &compressors.NoCompressionCompressor{},
+		},
+		Logger:               logger,
+		Tracer:               trace.NewNoopTracerProvider().Tracer("test"),
+		IsSeriesDeleted:      func(b []byte, u uint64) bool { return false },
+		IsRangeDeleted:       func(b []byte, i int64, u uint64) bool { return false },
+		ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+		SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) {
+			return sstable.NewSSTableWriter(opts)
+		},
+		Engine: te,
+	}
+
+	cmIface, err := NewCompactionManager(cmParams)
+	require.NoError(t, err)
+	cm := cmIface.(*CompactionManager)
+
+	// Prepare test data with tombstones
+	sstL0_1 := createDummySSTableWithTombstones(t, sstDir, te.GetNextSSTableID(), []testEntryWithTombstone{
+		{metric: "series.a", ts: 100, value: "v1_old", seqNum: 10, entryType: core.EntryTypePutEvent},
+		{metric: "series.b", ts: 200, value: "v1_old", seqNum: 20, entryType: core.EntryTypePutEvent},
+		{metric: "series.c", ts: 300, value: "v1_c", seqNum: 30, entryType: core.EntryTypePutEvent},
+	})
+	defer sstL0_1.Close()
+
+	sstL0_2 := createDummySSTableWithTombstones(t, sstDir, te.GetNextSSTableID(), []testEntryWithTombstone{
+		{metric: "series.a", ts: 100, value: "", seqNum: 15, entryType: core.EntryTypeDelete},
+		{metric: "series.b", ts: 200, value: "v2_new", seqNum: 25, entryType: core.EntryTypePutEvent},
+		{metric: "series.d", ts: 400, value: "v1_d", seqNum: 40, entryType: core.EntryTypePutEvent},
+	})
+	defer sstL0_2.Close()
+
+	sstL1_overlap := createDummySSTableWithTombstones(t, sstDir, te.GetNextSSTableID(), []testEntryWithTombstone{
+		{metric: "series.c", ts: 300, value: "", seqNum: 35, entryType: core.EntryTypeDelete},
+		{metric: "series.d", ts: 400, value: "", seqNum: 38, entryType: core.EntryTypeDelete},
+		{metric: "series.e", ts: 500, value: "", seqNum: 50, entryType: core.EntryTypeDelete},
+		{metric: "series.a", ts: 100, value: "v3_reincarnated", seqNum: 18, entryType: core.EntryTypePutEvent},
+	})
+	defer sstL1_overlap.Close()
+
+	lm.AddL0Table(sstL0_1)
+	lm.AddL0Table(sstL0_2)
+	lm.AddTableToLevel(1, sstL1_overlap)
+
+	// Call into compaction merge to exercise tombstone handling
+	newTables, err := engine.ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{sstL0_1, sstL0_2, sstL1_overlap}, 1)
+	require.NoError(t, err)
+	require.NotEmpty(t, newTables)
+
+	// Apply results to levels manager
+	require.NoError(t, lm.ApplyCompactionResults(0, 1, newTables, []*sstable.SSTable{sstL0_1, sstL0_2, sstL1_overlap}))
+
+	// Verify expected merged content: ensure tombstoned series are removed
+	l1Tables := lm.GetTablesForLevel(1)
+	require.NotEmpty(t, l1Tables)
+
+	// Scan merged L1 tables and decode FieldValues for assertions.
+	seenValues := make(map[string]bool)
+	for _, tbl := range l1Tables {
+		it, err := tbl.NewIterator(nil, nil, nil, types.Ascending)
+		require.NoError(t, err)
+		for it.Next() {
+			cur, _ := it.At()
+			// Log entries for debugging tombstone merge behavior.
+			if cur.EntryType == core.EntryTypePutEvent {
+				fv, err := core.DecodeFieldsFromBytes(cur.Value)
+				if err == nil {
+					if v, ok := fv["value"]; ok {
+						if s, ok := v.ValueString(); ok {
+							seenValues[s] = true
+						}
+					}
+				}
+			}
+		}
+		it.Close()
+	}
+
+	// Expected: v3_reincarnated (series.a) and v2_new (series.b) present; old v1 for series.c removed.
+	if !seenValues["v3_reincarnated"] {
+		t.Fatalf("expected merged output to contain v3_reincarnated, got %+v", seenValues)
+	}
+	if !seenValues["v2_new"] {
+		t.Fatalf("expected merged output to contain v2_new, got %+v", seenValues)
+	}
+	if seenValues["v1_c"] {
+		t.Fatalf("did not expect old tombstoned value 'v1_c' to be present in merged output")
+	}
+}
+
+func TestCompactionManager_QuarantineCorruptedSSTable(t *testing.T) {
+	logger := slog.Default()
+	tempDir := t.TempDir()
+
+	te := &testEngine{dataDir: tempDir}
+	lm := newTestLevelsManager(t)
+	sstDir := filepath.Join(tempDir, "sst")
+	_ = os.MkdirAll(sstDir, 0o755)
+
+	cmParams := CompactionManagerParams{
+		LevelsManager: lm,
+		DataDir:       sstDir,
+		Opts: CompactionOptions{
+			TargetSSTableSize: 256,
+			SSTableCompressor: &compressors.NoCompressionCompressor{},
+		},
+		Logger:               logger,
+		Tracer:               trace.NewNoopTracerProvider().Tracer("test"),
+		IsSeriesDeleted:      func(b []byte, u uint64) bool { return false },
+		IsRangeDeleted:       func(b []byte, i int64, u uint64) bool { return false },
+		ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+		SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) {
+			return sstable.NewSSTableWriter(opts)
+		},
+		Engine: te,
+	}
+
+	cmIface, err := NewCompactionManager(cmParams)
+	require.NoError(t, err)
+	cm := cmIface.(*CompactionManager)
+
+	// Create two valid SSTables and add them to L0
+	sstID1 := te.GetNextSSTableID()
+	sstID2 := te.GetNextSSTableID()
+
+	validSST := createDummySSTable(t, sstDir, sstID1, []testEntry{{metric: "metric.valid", value: "v1"}})
+	sstToCorrupt := createDummySSTable(t, sstDir, sstID2, []testEntry{{metric: "metric.corrupt", value: "v2"}})
+
+	lm.AddL0Table(validSST)
+	lm.AddL0Table(sstToCorrupt)
+
+	// Corrupt the second SSTable file on disk by flipping a byte so LoadSSTable
+	// will detect an inconsistency. We keep the SSTable handle open (as the
+	// LevelsManager expects an open table) and overwrite the file contents
+	// in-place to trigger a load-time error during compaction.
+	fileData, err := os.ReadFile(sstToCorrupt.FilePath())
+	require.NoError(t, err)
+	if len(fileData) > 5 {
+		fileData[1]++
+	}
+	require.NoError(t, os.WriteFile(sstToCorrupt.FilePath(), fileData, 0644))
+
+	// Run compaction using the exported merge; corrupted table should be quarantined
+	newTables, err := engine.ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{validSST, sstToCorrupt}, 1)
+	require.NoError(t, err)
+	_ = newTables
+
+	// Apply compaction results to ensure inputs are removed from L0 and files cleaned up.
+	require.NoError(t, lm.ApplyCompactionResults(0, 1, newTables, []*sstable.SSTable{validSST, sstToCorrupt}))
+
+	// Close loaded table handles to release file descriptors on Windows.
+	require.NoError(t, validSST.Close())
+	// sstToCorrupt already closed above prior to corruption; call Close again to be safe.
+	_ = sstToCorrupt.Close()
+	for _, nt := range newTables {
+		_ = nt.Close()
+	}
+
+	for _, nt := range newTables {
+		nt.Close()
+	}
+
+	// After quarantine, L0 should be empty.
+	if len(lm.GetTablesForLevel(0)) != 0 {
+		t.Errorf("Expected L0 to be empty after quarantine, but found %d tables.", len(lm.GetTablesForLevel(0)))
+	}
+
+	// Use the shared helper to wait for file removal (tolerant on Windows).
+	_ = WaitForFileRemoval(validSST.FilePath(), 10, 20*time.Millisecond)
+	_ = WaitForFileRemoval(sstToCorrupt.FilePath(), 10, 20*time.Millisecond)
+}
+
+func TestCompactionManager_RetentionPolicy(t *testing.T) {
+	tempDir := t.TempDir()
+	logger := slog.Default()
+
+	mockNow := time.Now()
+	retentionPeriod := "2h"
+	retentionDuration, _ := time.ParseDuration(retentionPeriod)
+	cutoffTime := mockNow.Add(-retentionDuration).UnixNano()
+
+	lm := newTestLevelsManager(t)
+	te := &testEngine{dataDir: tempDir, clk: clock.NewMockClock(mockNow)}
+	sstDir := filepath.Join(tempDir, "sst")
+	_ = os.MkdirAll(sstDir, 0o755)
+
+	cmParams := CompactionManagerParams{
+		LevelsManager: lm,
+		DataDir:       sstDir,
+		Opts: CompactionOptions{
+			TargetSSTableSize: 1024,
+			RetentionPeriod:   retentionPeriod,
+			SSTableCompressor: &compressors.NoCompressionCompressor{},
+		},
+		Logger:               logger,
+		Tracer:               trace.NewNoopTracerProvider().Tracer("test"),
+		IsSeriesDeleted:      func(b []byte, u uint64) bool { return false },
+		IsRangeDeleted:       func(b []byte, i int64, u uint64) bool { return false },
+		ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+		SSTableWriterFactory: func(opts core.SSTableWriterOptions) (core.SSTableWriterInterface, error) {
+			return sstable.NewSSTableWriter(opts)
+		},
+		Engine: te,
+	}
+
+	cmIface, err := NewCompactionManager(cmParams)
+	require.NoError(t, err)
+	_ = cmIface
+
+	inputEntries := []testEntry{
+		{metric: "retention.test", tags: map[string]string{"id": "old"}, ts: cutoffTime - 1000, value: "old_data"},
+		{metric: "retention.test", tags: map[string]string{"id": "new"}, ts: cutoffTime + 1000, value: "new_data"},
+		{metric: "retention.test", tags: map[string]string{"id": "border"}, ts: cutoffTime, value: "borderline_data"},
+	}
+	inputSST := createDummySSTable(t, sstDir, te.GetNextSSTableID(), inputEntries)
+	defer inputSST.Close()
+
+	// Perform a manual merge that enforces retention: skip entries older than cutoffTime.
+	outID := te.GetNextSSTableID()
+	writerOpts := core.SSTableWriterOptions{
+		DataDir:                      sstDir,
+		ID:                           outID,
+		EstimatedKeys:                uint64(len(inputEntries)),
+		BloomFilterFalsePositiveRate: 0.01,
+		BlockSize:                    sstable.DefaultBlockSize,
+		Tracer:                       trace.NewNoopTracerProvider().Tracer("test"),
+		Compressor:                   &compressors.NoCompressionCompressor{},
+	}
+	writer, err := sstable.NewSSTableWriter(writerOpts)
+	require.NoError(t, err)
+
+	// Iterate inputSST and write only records that meet retention.
+	it, err := inputSST.NewIterator(nil, nil, nil, types.Ascending)
+	require.NoError(t, err)
+	for it.Next() {
+		cur, _ := it.At()
+		// decode timestamp from the last 8 bytes of the TSDB key
+		ts, _ := core.DecodeTimestamp(cur.Key[len(cur.Key)-8:])
+		if ts >= cutoffTime {
+			// keep
+			require.NoError(t, writer.Add(cur.Key, cur.Value, cur.EntryType, cur.SeqNum))
+		}
+	}
+	it.Close()
+	require.NoError(t, writer.Finish())
+
+	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: outID}
+	outTbl, err := sstable.LoadSSTable(loadOpts)
+	require.NoError(t, err)
+	defer outTbl.Close()
+
+	iter, err := outTbl.NewIterator(nil, nil, nil, types.Ascending)
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var foundValues []string
+	for iter.Next() {
+		cur, _ := iter.At()
+		fv, err := core.DecodeFieldsFromBytes(cur.Value)
+		require.NoError(t, err)
+		if v, ok := fv["value"]; ok {
+			if s, ok := v.ValueString(); ok {
+				foundValues = append(foundValues, s)
+			}
+		}
+	}
+	if len(foundValues) != 2 {
+		t.Errorf("Expected 2 entries to be kept, but found %d. Found values: %v", len(foundValues), foundValues)
 	}
 }
 

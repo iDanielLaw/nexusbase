@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
@@ -40,6 +43,23 @@ type testEntryWithTombstone struct {
 	value     string
 	seqNum    uint64
 	entryType core.EntryType
+}
+
+var (
+	metricNameMu   sync.Mutex
+	metricNameToID = make(map[string]uint64)
+	metricBaseID   = uint64(1000)
+)
+
+func metricIDForName(name string) uint64 {
+	metricNameMu.Lock()
+	defer metricNameMu.Unlock()
+	if id, ok := metricNameToID[name]; ok {
+		return id
+	}
+	id := metricBaseID + uint64(len(metricNameToID)+1)
+	metricNameToID[name] = id
+	return id
 }
 
 // createTestSSTableForCleanup creates a simple SSTable for cleanup tests.
@@ -107,13 +127,13 @@ func createDummySSTable(t *testing.T, dir string, id uint64, entries []testEntry
 	writer, err := sstable.NewSSTableWriter(writerOpts)
 	require.NoError(t, err)
 
-	// Simple deterministic id assignment
-	nextMetricID := uint64(1000 + id*100)
-	for i, e := range entries {
-		metricID := nextMetricID + uint64(i)
+	// Deterministic metric id assignment based on metric name
+	for _, e := range entries {
+		metricID := metricIDForName(e.metric)
 		var pairs []core.EncodedSeriesTagPair
 		j := uint64(1)
 		for range e.tags {
+			// Tag key/value ids are derived from the metric id for determinism
 			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: metricID + j, ValueID: metricID + j + 1})
 			j += 2
 		}
@@ -151,9 +171,8 @@ func createDummySSTableWithTombstones(t *testing.T, dir string, id uint64, entri
 	writer, err := sstable.NewSSTableWriter(writerOpts)
 	require.NoError(t, err)
 
-	nextMetricID := uint64(2000 + id*100)
-	for i, e := range entries {
-		metricID := nextMetricID + uint64(i)
+	for _, e := range entries {
+		metricID := metricIDForName(e.metric)
 		var pairs []core.EncodedSeriesTagPair
 		j := uint64(1)
 		for range e.tags {
@@ -197,6 +216,20 @@ func encodeTags(_ StorageEngineInterface, tags map[string]string) []core.Encoded
 	return pairs
 }
 
+// WaitForFileRemoval retries checking for file non-existence. It returns true
+// if the file is confirmed removed within the given attempts, otherwise false.
+// Use this helper in tests that need to be tolerant of OS-level file handle
+// release timing (Windows).
+func WaitForFileRemoval(path string, attempts int, delay time.Duration) bool {
+	for i := 0; i < attempts; i++ {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return true
+		}
+		time.Sleep(delay)
+	}
+	return false
+}
+
 // testEngine implements StorageEngineInterface with minimal behavior
 // required by compaction tests. Methods not used by tests are no-ops.
 type testEngine struct {
@@ -205,6 +238,7 @@ type testEngine struct {
 	clk         clock.Clock
 	hookManager hooks.HookManager
 	logger      *slog.Logger
+	stringStore *StringStore
 }
 
 func (t *testEngine) GetNextSSTableID() uint64                                    { return t.nextID.Add(1) }
@@ -259,11 +293,16 @@ func (t *testEngine) GetHookManager() hooks.HookManager {
 	}
 	return t.hookManager
 }
-func (t *testEngine) GetDLQDir() string                             { return filepath.Join(t.dataDir, "dlq") }
-func (t *testEngine) GetDataDir() string                            { return t.dataDir }
-func (t *testEngine) GetWALPath() string                            { return filepath.Join(t.dataDir, "wal") }
-func (t *testEngine) GetClock() clock.Clock                         { return t.clk }
-func (t *testEngine) GetWAL() wal.WALInterface                      { return nil }
-func (t *testEngine) GetStringStore() indexer.StringStoreInterface  { return nil }
+func (t *testEngine) GetDLQDir() string        { return filepath.Join(t.dataDir, "dlq") }
+func (t *testEngine) GetDataDir() string       { return t.dataDir }
+func (t *testEngine) GetWALPath() string       { return filepath.Join(t.dataDir, "wal") }
+func (t *testEngine) GetClock() clock.Clock    { return t.clk }
+func (t *testEngine) GetWAL() wal.WALInterface { return nil }
+func (t *testEngine) GetStringStore() indexer.StringStoreInterface {
+	if t.stringStore == nil {
+		t.stringStore = NewStringStore()
+	}
+	return t.stringStore
+}
 func (t *testEngine) GetSnapshotManager() snapshot.ManagerInterface { return nil }
 func (t *testEngine) GetSequenceNumber() uint64                     { return 0 }

@@ -73,40 +73,23 @@ func TestReplaceWithSnapshot_E2E(t *testing.T) {
 	if len(sstEntries) == 0 {
 		t.Fatalf("expected at least one sstable file in %s after restore", sstDir)
 	}
-	for _, e := range sstEntries {
-		t.Logf("restored sstable: %s", filepath.Join(sstDir, e.Name()))
-	}
+	// list restored sstables (no debug logs)
 
 	// WAL presence: configurable via internal test helper
 	if testutil.WALStrictEnabled() {
 		testutil.RequireWALPresent(t, leaderDir)
 	} else {
-		// permissive: log WAL contents if present
-		walDir := filepath.Join(leaderDir, "wal")
-		if walEntries, err := os.ReadDir(walDir); err == nil {
-			if len(walEntries) == 0 {
-				t.Logf("wal directory exists but is empty: %s", walDir)
-			}
-			for _, e := range walEntries {
-				t.Logf("restored wal file: %s", filepath.Join(walDir, e.Name()))
-			}
-		} else {
-			t.Logf("wal directory not present after restore (permissive): %v", err)
-		}
+		// permissive: do not assert WAL presence; skip debug logging.
 	}
 
 	// private mapping logs should be present
 	strMap := filepath.Join(leaderDir, "string_mapping.log")
-	if _, err := os.Stat(strMap); err == nil {
-		t.Logf("restored file: %s", strMap)
-	} else {
+	if _, err := os.Stat(strMap); err != nil {
 		t.Fatalf("expected string_mapping.log after restore, stat error: %v", err)
 	}
 
 	seriesMap := filepath.Join(leaderDir, "series_mapping.log")
-	if _, err := os.Stat(seriesMap); err == nil {
-		t.Logf("restored file: %s", seriesMap)
-	} else {
+	if _, err := os.Stat(seriesMap); err != nil {
 		t.Fatalf("expected series_mapping.log after restore, stat error: %v", err)
 	}
 
