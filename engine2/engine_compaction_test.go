@@ -13,7 +13,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/sstable"
@@ -254,7 +253,7 @@ func TestCompactionManager_Merge_WriterAddError(t *testing.T) {
 	})
 	t.Cleanup(func() { inputSST.Close(); sys.Remove(inputSST.FilePath()) })
 
-	_, err := engine.ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{inputSST}, 1)
+	_, err := ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{inputSST}, 1)
 	if err == nil {
 		t.Fatal("Expected an error from mergeMultipleSSTables due to writer.Add failure, got nil")
 	}
@@ -680,7 +679,7 @@ func TestCompactionManager_Merge_WithTombstones(t *testing.T) {
 	lm.AddTableToLevel(1, sstL1_overlap)
 
 	// Call into compaction merge to exercise tombstone handling
-	newTables, err := engine.ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{sstL0_1, sstL0_2, sstL1_overlap}, 1)
+	newTables, err := ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{sstL0_1, sstL0_2, sstL1_overlap}, 1)
 	require.NoError(t, err)
 	require.NotEmpty(t, newTables)
 
@@ -778,7 +777,7 @@ func TestCompactionManager_QuarantineCorruptedSSTable(t *testing.T) {
 	require.NoError(t, os.WriteFile(sstToCorrupt.FilePath(), fileData, 0644))
 
 	// Run compaction using the exported merge; corrupted table should be quarantined
-	newTables, err := engine.ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{validSST, sstToCorrupt}, 1)
+	newTables, err := ExportMergeMultipleSSTables(cm, context.Background(), []*sstable.SSTable{validSST, sstToCorrupt}, 1)
 	require.NoError(t, err)
 	_ = newTables
 
