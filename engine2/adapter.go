@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -81,6 +82,9 @@ type Engine2Adapter struct {
 	// deleted series tracking used by tag index manager
 	deletedSeries   map[string]uint64
 	deletedSeriesMu sync.RWMutex
+	// Testing-only: number of FlushMemtableToL0 calls to fail before succeeding.
+	// Tests can set this to simulate transient flush failures.
+	TestingOnlyFailFlushCount *atomic.Int32
 }
 
 // NewEngine2Adapter wraps an existing Engine2.
@@ -984,6 +988,14 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable, parentCtx con
 		return nil
 	}
 
+	// Testing-only failure injection: allow tests to simulate transient flush errors.
+	if a.TestingOnlyFailFlushCount != nil {
+		if a.TestingOnlyFailFlushCount.Load() > 0 {
+			a.TestingOnlyFailFlushCount.Add(-1)
+			return fmt.Errorf("simulated flush error")
+		}
+	}
+
 	// Use memtable's FlushToSSTable if available: create a writer and delegate.
 	id := a.GetNextSSTableID()
 	sstDir := filepath.Join(a.dataRoot, "sstables")
@@ -1137,6 +1149,49 @@ func (a *Engine2Adapter) GetDeletedSeries() map[string]uint64 {
 
 func (a *Engine2Adapter) GetRangeTombstones() map[string][]core.RangeTombstone {
 	return map[string][]core.RangeTombstone{}
+}
+
+// MoveToDLQ writes the contents of a memtable to the engine's DLQ directory.
+// This mirrors the behavior of the legacy engine.moveToDLQ helper and is
+// intended for tests that need to verify DLQ behavior.
+func (a *Engine2Adapter) MoveToDLQ(mem *memtable.Memtable) error {
+	// Consider DLQ not configured if engine backing data root is empty.
+	if a.Engine2 == nil || (a.Engine2 != nil && a.Engine2.GetDataRoot() == "") {
+		return fmt.Errorf("DLQ directory not configured")
+	}
+	dlqDir := a.GetDLQDir()
+	if err := os.MkdirAll(dlqDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create DLQ dir: %w", err)
+	}
+	dlqFileName := fmt.Sprintf("memtable-failed-%d.dlq", a.clk.Now().UnixNano())
+	dlqFilePath := filepath.Join(dlqDir, dlqFileName)
+	f, err := os.Create(dlqFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create DLQ file %s: %w", dlqFilePath, err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	iter := mem.NewIterator(nil, nil, types.Ascending)
+	defer iter.Close()
+	for iter.Next() {
+		cur, err := iter.At()
+		if err != nil {
+			return fmt.Errorf("error iterating memtable for DLQ: %w", err)
+		}
+		entry := struct {
+			Key       []byte
+			Value     []byte
+			EntryType core.EntryType
+			SeqNum    uint64
+		}{cur.Key, cur.Value, cur.EntryType, cur.SeqNum}
+		if err := enc.Encode(entry); err != nil {
+			return fmt.Errorf("failed to encode memtable entry to DLQ file %s: %w", dlqFilePath, err)
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("error iterating memtable for DLQ: %w", err)
+	}
+	return nil
 }
 
 func (a *Engine2Adapter) GetSnapshotManager() snapshot.ManagerInterface {
@@ -1349,6 +1404,30 @@ func (a *Engine2Adapter) GetWAL() wal.WALInterface {
 		return &engine2WALWrapper{w: a.wal}
 	}
 	return &noopWAL{}
+}
+
+// PurgeWALSegments purges WAL segments up to a computed index based on
+// the last flushed segment and a safety keep count. It mirrors the
+// logic used by the legacy engine to determine a safe purge index.
+func (a *Engine2Adapter) PurgeWALSegments(lastFlushed uint64, keepSegments int) error {
+	if lastFlushed == 0 {
+		return nil
+	}
+
+	keepCount := uint64(keepSegments)
+	if keepSegments < 1 {
+		keepCount = 1
+	}
+
+	if lastFlushed <= keepCount {
+		return nil
+	}
+
+	purgeUpToIndex := lastFlushed - keepCount
+	if err := a.GetWAL().Purge(purgeUpToIndex); err != nil {
+		return fmt.Errorf("failed to purge old WAL segments: %w", err)
+	}
+	return nil
 }
 
 // engine2WALWrapper adapts the engine2.WAL (file-based append-only wal)
