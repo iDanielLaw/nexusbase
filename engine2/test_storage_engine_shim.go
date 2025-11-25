@@ -28,15 +28,22 @@ type storageEngineShim struct {
 	stringStore indexer.StringStoreInterface
 	clk         clock.Clock
 	wal         *testWAL
+	// Tombstone state for tests
+	deletedSeries     map[string]uint64
+	deletedSeriesMu   sync.RWMutex
+	rangeTombstones   map[string][]core.RangeTombstone
+	rangeTombstonesMu sync.RWMutex
 }
 
 func newStorageEngineShim(baseDir string) *storageEngineShim {
 	s := &storageEngineShim{
-		data:    make(map[string]map[int64]core.FieldValues),
-		dataDir: filepath.Join(baseDir, "shim"),
-		nextID:  1000,
-		clk:     clock.SystemClockDefault,
-		wal:     &testWAL{},
+		data:            make(map[string]map[int64]core.FieldValues),
+		dataDir:         filepath.Join(baseDir, "shim"),
+		nextID:          1000,
+		clk:             clock.SystemClockDefault,
+		wal:             &testWAL{},
+		deletedSeries:   make(map[string]uint64),
+		rangeTombstones: make(map[string][]core.RangeTombstone),
 	}
 	s.hookManager = hooks.NewHookManager(nil)
 	s.stringStore = NewStringStore()
@@ -174,23 +181,51 @@ func (s *storageEngineShim) Delete(ctx context.Context, metric string, tags map[
 }
 
 func (s *storageEngineShim) DeleteSeries(ctx context.Context, metric string, tags map[string]string) error {
+	// Pre-delete-series hook: allow modification or cancellation
+	if hm := s.GetHookManager(); hm != nil {
+		p := hooks.NewPreDeleteSeriesEvent(hooks.PreDeleteSeriesPayload{Metric: &metric, Tags: &tags})
+		if err := hm.Trigger(ctx, p); err != nil {
+			return err
+		}
+	}
+
 	key := string(core.EncodeSeriesKeyWithString(metric, tags))
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.data, key)
+	s.mu.Unlock()
+
+	// Post-delete-series hook
+	if hm := s.GetHookManager(); hm != nil {
+		payload := hooks.PostDeleteSeriesPayload{Metric: metric, Tags: tags, SeriesKey: key}
+		_ = hm.Trigger(ctx, hooks.NewPostDeleteSeriesEvent(payload))
+	}
 	return nil
 }
 
 func (s *storageEngineShim) DeletesByTimeRange(ctx context.Context, metric string, tags map[string]string, startTime, endTime int64) error {
+	// Pre-delete-range hook
+	if hm := s.GetHookManager(); hm != nil {
+		p := hooks.NewPreDeleteRangeEvent(hooks.PreDeleteRangePayload{Metric: &metric, Tags: &tags, StartTime: &startTime, EndTime: &endTime})
+		if err := hm.Trigger(ctx, p); err != nil {
+			return err
+		}
+	}
+
 	key := string(core.EncodeSeriesKeyWithString(metric, tags))
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if series, ok := s.data[key]; ok {
 		for ts := range series {
 			if ts >= startTime && ts <= endTime {
 				delete(series, ts)
 			}
 		}
+	}
+	s.mu.Unlock()
+
+	// Post-delete-range hook (include SeriesKey and times)
+	if hm := s.GetHookManager(); hm != nil {
+		payload := hooks.PostDeleteRangePayload{Metric: metric, Tags: tags, SeriesKey: key, StartTime: startTime, EndTime: endTime}
+		_ = hm.Trigger(ctx, hooks.NewPostDeleteRangeEvent(payload))
 	}
 	return nil
 }
@@ -377,3 +412,56 @@ func (w *testWAL) Append(entry core.WALEntry) error {
 
 func (s *storageEngineShim) GetWAL() interface{}   { return s.wal }
 func (s *storageEngineShim) GetClock() clock.Clock { return s.clk }
+
+// Tombstone helpers for tests
+func (s *storageEngineShim) SetDeletedSeries(seriesKey []byte, seq uint64) {
+	s.deletedSeriesMu.Lock()
+	defer s.deletedSeriesMu.Unlock()
+	s.deletedSeries[string(seriesKey)] = seq
+}
+
+func (s *storageEngineShim) IsSeriesDeleted(seriesKey []byte, dataPointSeq uint64) bool {
+	s.deletedSeriesMu.RLock()
+	defer s.deletedSeriesMu.RUnlock()
+	dseq, ok := s.deletedSeries[string(seriesKey)]
+	if !ok {
+		return false
+	}
+	if dataPointSeq == 0 {
+		return true
+	}
+	return dataPointSeq <= dseq
+}
+
+func (s *storageEngineShim) SetRangeTombstones(seriesKey []byte, tombs []core.RangeTombstone) {
+	s.rangeTombstonesMu.Lock()
+	defer s.rangeTombstonesMu.Unlock()
+	s.rangeTombstones[string(seriesKey)] = tombs
+}
+
+func (s *storageEngineShim) IsCoveredByRangeTombstone(seriesKey []byte, ts int64, dataPointSeq uint64) bool {
+	s.rangeTombstonesMu.RLock()
+	tombs, ok := s.rangeTombstones[string(seriesKey)]
+	s.rangeTombstonesMu.RUnlock()
+	if !ok || len(tombs) == 0 {
+		return false
+	}
+	// Find the tombstone with the highest SeqNum that covers ts
+	var maxSeq uint64
+	found := false
+	for _, rt := range tombs {
+		if ts >= rt.MinTimestamp && ts <= rt.MaxTimestamp {
+			if !found || rt.SeqNum > maxSeq {
+				maxSeq = rt.SeqNum
+				found = true
+			}
+		}
+	}
+	if !found {
+		return false
+	}
+	if dataPointSeq == 0 {
+		return true
+	}
+	return dataPointSeq <= maxSeq
+}
