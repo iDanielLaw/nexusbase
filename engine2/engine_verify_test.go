@@ -138,4 +138,75 @@ func TestStorageEngine_VerifyDataConsistency_Port(t *testing.T) {
 		errs := a.GetLevelsManager().VerifyConsistency()
 		require.NotEmpty(t, errs)
 	})
+
+	t.Run("corrupted_sstable_index_firstkey_mismatch_in_memory", func(t *testing.T) {
+		tempDir := t.TempDir()
+		localOpts := GetBaseOptsForTest(t, "verify_corrupted_index_")
+		localOpts.DataDir = tempDir
+		localOpts.Metrics = NewEngineMetrics(false, "verify_corrupted_index_")
+		localOpts.ErrorOnSSTableLoadFailure = false
+		localOpts.CompactionIntervalSeconds = 3600
+		localOpts.SSTableDefaultBlockSize = 32
+
+		// Create a temporary engine to produce an SSTable with multiple blocks
+		setupOpts := localOpts
+		setupOpts.DataDir = t.TempDir()
+		setupOpts.Metrics = NewEngineMetrics(false, "verify_corrupted_index_setup_")
+		eng1, err := NewStorageEngine(setupOpts)
+		require.NoError(t, err)
+		require.NoError(t, eng1.Start())
+		// Add points to create multiple blocks
+		require.NoError(t, eng1.Put(context.Background(), HelperDataPoint(t, "index.corrupt.metric", map[string]string{"id": "A"}, 100, map[string]interface{}{"value": 1.0})))
+		require.NoError(t, eng1.Put(context.Background(), HelperDataPoint(t, "index.corrupt.metric", map[string]string{"id": "B"}, 200, map[string]interface{}{"value": 2.0})))
+		require.NoError(t, eng1.Put(context.Background(), HelperDataPoint(t, "index.corrupt.metric", map[string]string{"id": "C"}, 300, map[string]interface{}{"value": 3.0})))
+		require.NoError(t, eng1.Put(context.Background(), HelperDataPoint(t, "index.corrupt.metric", map[string]string{"id": "X"}, 400, map[string]interface{}{"value": 4.0})))
+		require.NoError(t, eng1.Put(context.Background(), HelperDataPoint(t, "index.corrupt.metric", map[string]string{"id": "Y"}, 500, map[string]interface{}{"value": 5.0})))
+		require.NoError(t, eng1.Put(context.Background(), HelperDataPoint(t, "index.corrupt.metric", map[string]string{"id": "Z"}, 600, map[string]interface{}{"value": 6.0})))
+		require.NoError(t, eng1.Close())
+
+		// Locate the created SSTable file
+		sstDir := filepath.Join(setupOpts.DataDir, "sst")
+		files, err := os.ReadDir(sstDir)
+		require.NoError(t, err)
+		require.NotEmpty(t, files)
+		var validSSTPath string
+		for _, f := range files {
+			if strings.HasSuffix(f.Name(), ".sst") {
+				validSSTPath = filepath.Join(sstDir, f.Name())
+				break
+			}
+		}
+		require.NotEmpty(t, validSSTPath)
+
+		// Load SSTable and corrupt the in-memory index first key
+		sst, err := sstable.LoadSSTable(sstable.LoadSSTableOptions{FilePath: validSSTPath, ID: 1})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(sst.GetIndex().GetEntries()), 2)
+		// Corrupt the first key of the second index entry
+		sst.GetIndex().GetEntries()[1].FirstKey = []byte("corrupted_first_key")
+		defer sst.Close()
+
+		// Start a fresh engine and add the corrupted SSTable into its levels manager
+		// Use the engine2 runtime so we can access LevelsManager to inject the corrupted SSTable
+		e2, err := NewEngine2(localOpts.DataDir)
+		require.NoError(t, err)
+		a := NewEngine2AdapterWithHooks(e2, nil)
+		require.NoError(t, a.Start())
+		defer a.Close()
+
+		lm := a.GetLevelsManager()
+		require.NotNil(t, lm)
+		require.NoError(t, lm.AddTableToLevel(1, sst))
+
+		errs := lm.VerifyConsistency()
+		require.NotEmpty(t, errs)
+		found := false
+		for _, e := range errs {
+			if strings.Contains(e.Error(), "mismatch with actual block first key") {
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "expected index-first-key mismatch error in VerifyDataConsistency errors")
+	})
 }
