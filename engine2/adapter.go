@@ -1248,6 +1248,30 @@ func (a *Engine2Adapter) Start() error {
 			return err
 		}
 	}
+	// After manifest reload, attempt to load known SSTables and register them
+	// into the LevelsManager so the engine startup path mirrors runtime state
+	// when manifest entries exist. We place manifest-discovered tables into
+	// L1 by default to match expected semantics for recovered tables.
+	if a.manifestMgr != nil {
+		entries := a.manifestMgr.ListEntries()
+		if len(entries) > 0 {
+			lm := a.GetLevelsManager()
+			for _, me := range entries {
+				loadOpts := sstable.LoadSSTableOptions{FilePath: me.FilePath, ID: me.ID}
+				tbl, lerr := sstable.LoadSSTable(loadOpts)
+				if lerr != nil {
+					slog.Default().Warn("failed to load sstable from manifest", "path", me.FilePath, "err", lerr)
+					continue
+				}
+				if err := lm.AddTableToLevel(1, tbl); err != nil {
+					slog.Default().Warn("failed to add sstable to level from manifest", "id", tbl.ID(), "err", err)
+					_ = tbl.Close()
+				} else {
+					slog.Default().Info("registered SSTable from manifest into level 1", "id", tbl.ID(), "path", tbl.FilePath())
+				}
+			}
+		}
+	}
 	// Create/open leader WAL (wal package) for replication/snapshot features
 	if a.leaderWal == nil && a.Engine2 != nil {
 		lw, err := openLeaderWAL(a.Engine2.GetDataRoot())

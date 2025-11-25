@@ -1,0 +1,141 @@
+package engine2
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/INLOpen/nexusbase/compressors"
+	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/sstable"
+	"github.com/stretchr/testify/require"
+)
+
+// Ported focused subtests from engine/engine_test.go that exercise indexer
+// helpers and LevelsManager consistency checks.
+func TestStorageEngine_VerifyDataConsistency_Port(t *testing.T) {
+	t.Run("corrupted_sstable_checksum_detected_on_verify", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := GetBaseOptsForTest(t, "verify_corrupted_checksum_")
+		opts.DataDir = tempDir
+		opts.ErrorOnSSTableLoadFailure = false
+
+		// Create an engine, write some data and close to generate an SSTable
+		setupOpts := opts
+		setupOpts.CompactionIntervalSeconds = 3600
+		eng, err := NewStorageEngine(setupOpts)
+		require.NoError(t, err)
+		require.NoError(t, eng.Start())
+
+		eng.Put(context.Background(), HelperDataPoint(t, "corrupt.metric", map[string]string{"id": "1"}, 100, map[string]interface{}{"value": 1.0}))
+		eng.Put(context.Background(), HelperDataPoint(t, "corrupt.metric", map[string]string{"id": "2"}, 200, map[string]interface{}{"value": 2.0}))
+		require.NoError(t, eng.Close())
+
+		// Find created SSTable file
+		sstDir := filepath.Join(tempDir, "sst")
+		files, err := os.ReadDir(sstDir)
+		require.NoError(t, err)
+		require.NotEmpty(t, files)
+		var validSSTPath string
+		for _, f := range files {
+			if strings.HasSuffix(f.Name(), ".sst") {
+				validSSTPath = filepath.Join(sstDir, f.Name())
+				break
+			}
+		}
+		require.NotEmpty(t, validSSTPath)
+
+		// Load SSTable to inspect blocks, then corrupt one byte in file
+		sst, err := sstable.LoadSSTable(sstable.LoadSSTableOptions{FilePath: validSSTPath, ID: 1})
+		require.NoError(t, err)
+		require.NotEmpty(t, sst.GetIndex().GetEntries())
+		firstBlockMeta := sst.GetIndex().GetEntries()[0]
+		sst.Close()
+
+		fileData, err := os.ReadFile(validSSTPath)
+		require.NoError(t, err)
+		offset := int(firstBlockMeta.BlockOffset) + 1
+		if offset < len(fileData) {
+			fileData[offset]++
+		}
+		require.NoError(t, os.WriteFile(validSSTPath, fileData, 0644))
+
+		// Start engine and run VerifyDataConsistency
+		engine, err := NewStorageEngine(opts)
+		require.NoError(t, err)
+		require.NoError(t, engine.Start())
+		defer engine.Close()
+
+		errs := engine.VerifyDataConsistency()
+		require.NotEmpty(t, errs)
+	})
+
+	t.Run("inconsistent_l1_overlap_detected_by_levels_manager", func(t *testing.T) {
+		tempDir := t.TempDir()
+		opts := GetBaseOptsForTest(t, "verify_inconsistent_l1_")
+		opts.DataDir = tempDir
+		opts.ErrorOnSSTableLoadFailure = false
+
+		// Create three sstables (A,B,C) using separate temporary engines so
+		// each flush produces an independent .sst file with desired keys.
+		// A: keys "apple" -> "banana"
+		// B: keys "banana" -> "cherry" (overlaps A)
+		// C: keys "date" -> "elderberry" (no overlap)
+		prefixes := [][]string{{"apple", "banana"}, {"banana", "cherry"}, {"date", "elderberry"}}
+		dstSstDir := filepath.Join(opts.DataDir, "sst")
+		require.NoError(t, os.MkdirAll(dstSstDir, 0o755))
+		totalCopied := 0
+		for i, pair := range prefixes {
+			// create an sstable directly with simple literal keys so Min/Max
+			// reflect the human-friendly strings and are deterministic.
+			id := uint64(time.Now().UnixNano()) + uint64(i)
+			writerOpts := core.SSTableWriterOptions{
+				DataDir:                      dstSstDir,
+				ID:                           id,
+				EstimatedKeys:                2,
+				BloomFilterFalsePositiveRate: 0.01,
+				BlockSize:                    32 * 1024,
+				Compressor:                   &compressors.NoCompressionCompressor{},
+				Logger:                       nil,
+			}
+			writer, werr := sstable.NewSSTableWriter(writerOpts)
+			require.NoError(t, werr)
+			// add two keys to establish min/max range
+			require.NoError(t, writer.Add([]byte(pair[0]), []byte("v1"), core.EntryTypePutEvent, 0))
+			require.NoError(t, writer.Add([]byte(pair[1]), []byte("v2"), core.EntryTypePutEvent, 0))
+			require.NoError(t, writer.Finish())
+			// Append manifest entry so engine startup can discover this SSTable
+			manifestPath := filepath.Join(opts.DataDir, "sstables", "manifest.json")
+			// Ensure manifest directory exists before appending entries.
+			if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+				t.Fatalf("failed to create manifest directory: %v", err)
+			}
+			// Writer interface does not expose ID; derive the ID from the final filename (<id>.sst).
+			base := filepath.Base(writer.FilePath())
+			base = strings.TrimSuffix(base, filepath.Ext(base))
+			id, perr := strconv.ParseUint(base, 10, 64)
+			if perr != nil {
+				t.Fatalf("failed to parse sstable id from filename %s: %v", base, perr)
+			}
+			entry := SSTableManifestEntry{ID: id, FilePath: writer.FilePath(), KeyCount: uint64(2), CreatedAt: time.Now().UTC()}
+			require.NoError(t, AppendManifestEntry(manifestPath, entry))
+			totalCopied++
+		}
+		require.Greater(t, totalCopied, 0)
+
+		// Now open the target engine adapter and Start it so the startup path
+		// will reload the manifest and register discovered SSTables into L1.
+		e2, err := NewEngine2(opts.DataDir)
+		require.NoError(t, err)
+		a := NewEngine2AdapterWithHooks(e2, nil)
+		require.NoError(t, a.Start())
+		defer a.Close()
+
+		errs := a.GetLevelsManager().VerifyConsistency()
+		require.NotEmpty(t, errs)
+	})
+}
