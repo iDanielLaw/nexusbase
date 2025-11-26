@@ -86,6 +86,15 @@ type Engine2Adapter struct {
 	// Testing-only: number of FlushMemtableToL0 calls to fail before succeeding.
 	// Tests can set this to simulate transient flush failures.
 	TestingOnlyFailFlushCount *atomic.Int32
+	// Testing-only: optional notify channel used by tests to coordinate when
+	// a simulated flush failure is returned. Tests can set this channel and
+	// wait for a signal instead of relying on timing sleeps.
+	TestingOnlyFlushNotify chan struct{}
+	// Testing-only: optional block channel. When set, the adapter will block
+	// after notifying `TestingOnlyFlushNotify` and before returning the
+	// simulated flush error. Tests can close this channel to allow the
+	// adapter to proceed, enabling deterministic coordination.
+	TestingOnlyFlushBlock chan struct{}
 }
 
 // NewEngine2Adapter wraps an existing Engine2.
@@ -155,7 +164,6 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	// Encode datapoint and write into memtable via central API.
 	if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
 		_ = a.mem.PutRaw(entry.Key, entry.Value, entry.EntryType, 0)
-		slog.Default().Debug("Engine2Adapter.Put: used id-encoded key", "mem_key_len", len(entry.Key), "entry_type", entry.EntryType)
 	} else {
 		// Fallback: string-key encoding
 		key := core.EncodeTSDBKeyWithString(point.Metric, point.Tags, point.Timestamp)
@@ -168,7 +176,7 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 			}
 			_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, 0)
 		}
-		slog.Default().Debug("Engine2Adapter.Put: used string-encoded key (fallback)", "mem_key_len", len(key))
+		// intentionally silent for normal operation
 	}
 	// Also append a core.WALEntry to leader WAL so replication can stream it.
 	if a.leaderWal != nil {
@@ -218,7 +226,6 @@ func (a *Engine2Adapter) Get(ctx context.Context, metric string, tags map[string
 		dp := core.DataPoint{Metric: metric, Tags: tags, Timestamp: timestamp, Fields: nil}
 		if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
 			key := entry.Key
-			slog.Default().Debug("Engine2Adapter.Get: trying id-encoded key", "mem_key_len", len(key))
 			if v, et, ok := a.mem.Get(key); ok {
 				if et == core.EntryTypeDelete || len(v) == 0 {
 					return nil, sstable.ErrNotFound
@@ -234,7 +241,6 @@ func (a *Engine2Adapter) Get(ctx context.Context, metric string, tags map[string
 
 	// Fallback to string-key and query Memtable2
 	key := core.EncodeTSDBKeyWithString(metric, tags, timestamp)
-	slog.Default().Debug("Engine2Adapter.Get: trying string-encoded key", "mem_key_len", len(key))
 	if v, et, ok := a.mem.Get(key); ok {
 		if et == core.EntryTypeDelete || len(v) == 0 {
 			return nil, sstable.ErrNotFound
@@ -814,10 +820,24 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	// Testing-only failure injection: allow tests to simulate transient flush errors.
 	if a.TestingOnlyFailFlushCount != nil {
 		cnt := a.TestingOnlyFailFlushCount.Load()
-		slog.Default().Info("FlushMemtableToL0: testing-only fail count", "count", cnt, "mem_ptr", fmt.Sprintf("%p", mem), "mem_len", mem.Len(), "mem_size", mem.Size())
+		slog.Default().Debug("FlushMemtableToL0: testing-only fail count", "count", cnt, "mem_ptr", fmt.Sprintf("%p", mem), "mem_len", mem.Len(), "mem_size", mem.Size())
 		if cnt > 0 {
 			a.TestingOnlyFailFlushCount.Add(-1)
-			slog.Default().Info("FlushMemtableToL0: returning simulated flush error", "remaining", a.TestingOnlyFailFlushCount.Load())
+			slog.Default().Debug("FlushMemtableToL0: returning simulated flush error", "remaining", a.TestingOnlyFailFlushCount.Load())
+			// Notify any test waiter that a simulated failure is being returned.
+			// Use a non-blocking send to avoid hanging when tests do not set the
+			// channel.
+			if a.TestingOnlyFlushNotify != nil {
+				select {
+				case a.TestingOnlyFlushNotify <- struct{}{}:
+				default:
+				}
+			}
+			// If a test provided a block channel, wait until the test closes it
+			// so the test can coordinate shutdown timing deterministically.
+			if a.TestingOnlyFlushBlock != nil {
+				<-a.TestingOnlyFlushBlock
+			}
 			return fmt.Errorf("simulated flush error")
 		}
 	}
@@ -840,13 +860,13 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	}
 
 	// Use mem.FlushToSSTable when available on top-level memtable implementation.
-	slog.Default().Info("FlushMemtableToL0: calling mem.FlushToSSTable", "mem_ptr", fmt.Sprintf("%p", mem), "mem_len", mem.Len(), "mem_size", mem.Size(), "writer_path", writer.FilePath())
+	slog.Default().Debug("FlushMemtableToL0: calling mem.FlushToSSTable", "mem_ptr", fmt.Sprintf("%p", mem), "mem_len", mem.Len(), "mem_size", mem.Size(), "writer_path", writer.FilePath())
 	if err := mem.FlushToSSTable(writer); err != nil {
 		writer.Abort()
 		slog.Default().Warn("FlushMemtableToL0: mem.FlushToSSTable returned error", "err", err)
 		return fmt.Errorf("failed to flush memtable to sstable: %w", err)
 	}
-	slog.Default().Info("FlushMemtableToL0: mem.FlushToSSTable succeeded", "mem_ptr", fmt.Sprintf("%p", mem), "entries_len", mem.Len(), "entries_size", mem.Size(), "writer_path", writer.FilePath())
+	slog.Default().Debug("FlushMemtableToL0: mem.FlushToSSTable succeeded", "mem_ptr", fmt.Sprintf("%p", mem), "entries_len", mem.Len(), "entries_size", mem.Size(), "writer_path", writer.FilePath())
 	if err := writer.Finish(); err != nil {
 		writer.Abort()
 		return fmt.Errorf("failed to finish sstable writer: %w", err)
@@ -877,8 +897,8 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 		if err := a.GetLevelsManager().AddL0Table(sst); err != nil {
 			slog.Default().Warn("levels manager AddL0Table failed", "err", err)
 		}
-		// Log successful registration for debugging snapshot inclusion.
-		slog.Default().Info("registered SSTable with levels manager", "id", sst.ID(), "path", sst.FilePath())
+		// Debug: registration logged at debug level
+		slog.Default().Debug("registered SSTable with levels manager", "id", sst.ID(), "path", sst.FilePath())
 	}
 
 	// Write a minimal block index alongside the new SSTable so tools can

@@ -90,7 +90,25 @@ func (e *storageEngine) processImmutableMemtables(writeCheckpoint bool) {
 		// Failure
 		memToFlush.FlushRetries++
 		if memToFlush.FlushRetries >= maxFlushRetries {
-			e.logger.Error("Memtable flush failed after max retries. Attempting to move to DLQ.", "memtable_size", memToFlush.Size(), "retries", memToFlush.FlushRetries, "error", err)
+			// We've exhausted retries. Instead of immediately giving up and
+			// moving to DLQ, wait briefly for a possible shutdown signal so
+			// the memtable can be re-queued for final synchronous processing.
+			e.logger.Error("Memtable flush failed after max retries; will wait briefly for shutdown to allow requeue.", "memtable_size", memToFlush.Size(), "retries", memToFlush.FlushRetries, "error", err)
+			// Wait up to a short timeout for shutdown signal; if received,
+			// requeue the memtable at the front and return. Otherwise proceed
+			// to move it to the DLQ.
+			select {
+			case <-time.After(100 * time.Millisecond):
+				// timeout expired, proceed to DLQ below
+			case <-e.shutdownChan:
+				// requeue at front and return so shutdown path can flush it.
+				e.logger.Info("Shutdown detected while memtable exceeded max retries; re-queuing memtable.", "memtable_size", memToFlush.Size())
+				e.mu.Lock()
+				e.immutableMemtables = append([]*memtable.Memtable2{memToFlush}, e.immutableMemtables...)
+				e.mu.Unlock()
+				return
+			}
+			// If we reach here, the short wait expired and we should move to DLQ.
 			if dlqErr := e.moveToDLQ(memToFlush); dlqErr != nil {
 				e.logger.Error("CRITICAL: Failed to move memtable to DLQ. Data might be lost.", "error", dlqErr, "memtable_size", memToFlush.Size())
 			}

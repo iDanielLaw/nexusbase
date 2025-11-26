@@ -200,7 +200,7 @@ func (m *Memtable2) FlushToSSTable(writer core.SSTableWriterInterface) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	slog.Default().Info("Memtable2.FlushToSSTable: start", "mem_ptr", fmt.Sprintf("%p", m), "len", m.Len(), "size", m.Size())
+	slog.Default().Debug("Memtable2.FlushToSSTable: start", "mem_ptr", fmt.Sprintf("%p", m), "len", m.Len(), "size", m.Size())
 
 	iter := m.data.NewIterator()
 	entriesWritten := 0
@@ -213,7 +213,7 @@ func (m *Memtable2) FlushToSSTable(writer core.SSTableWriterInterface) error {
 		}
 		entriesWritten++
 	}
-	slog.Default().Info("Memtable2.FlushToSSTable: done", "entries_written", entriesWritten)
+	slog.Default().Debug("Memtable2.FlushToSSTable: done", "entries_written", entriesWritten)
 	return nil
 }
 

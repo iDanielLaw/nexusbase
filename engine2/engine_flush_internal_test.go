@@ -176,6 +176,12 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 		a.TestingOnlyFailFlushCount = new(atomic.Int32)
 		a.TestingOnlyFailFlushCount.Store(5) // fail more than max
 
+		// Add notify + block channels so the test can deterministically wait
+		// for the adapter to attempt a flush and then control when it returns
+		// the simulated error. This avoids timing races.
+		a.TestingOnlyFlushNotify = make(chan struct{}, 1)
+		a.TestingOnlyFlushBlock = make(chan struct{})
+
 		mem := memtable.NewMemtable2(1024, a.clk)
 		pv, _ := core.NewPointValue("v")
 		dp := &core.DataPoint{Metric: "metric.shutdown", Tags: nil, Timestamp: 22222, Fields: core.FieldValues{"v": pv}}
@@ -210,9 +216,20 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 			}
 		}()
 
-		// Wait a little to ensure first failure occurs, then signal shutdown
-		time.Sleep(10 * time.Millisecond)
+		// Wait for the adapter to signal that a simulated flush failure was
+		// returned, then signal shutdown to exercise the requeue-on-shutdown
+		// path deterministically.
+		select {
+		case <-a.TestingOnlyFlushNotify:
+			// signal shutdown while the adapter is blocked
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("timed out waiting for adapter flush attempt")
+		}
+		// signal shutdown and then allow the adapter to return its simulated
+		// failure so the background goroutine can observe the shutdown and
+		// requeue the memtable.
 		close(shutdownCh)
+		close(a.TestingOnlyFlushBlock)
 		wg.Wait()
 
 		require.Len(t, requeue, 1)
