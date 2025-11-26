@@ -155,6 +155,7 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	// Encode datapoint and write into memtable via central API.
 	if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
 		_ = a.mem.PutRaw(entry.Key, entry.Value, entry.EntryType, 0)
+		slog.Default().Debug("Engine2Adapter.Put: used id-encoded key", "mem_key_len", len(entry.Key), "entry_type", entry.EntryType)
 	} else {
 		// Fallback: string-key encoding
 		key := core.EncodeTSDBKeyWithString(point.Metric, point.Tags, point.Timestamp)
@@ -167,6 +168,7 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 			}
 			_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, 0)
 		}
+		slog.Default().Debug("Engine2Adapter.Put: used string-encoded key (fallback)", "mem_key_len", len(key))
 	}
 	// Also append a core.WALEntry to leader WAL so replication can stream it.
 	if a.leaderWal != nil {
@@ -211,8 +213,28 @@ func (a *Engine2Adapter) Get(ctx context.Context, metric string, tags map[string
 	if a.mem == nil {
 		return nil, fmt.Errorf("engine2 not initialized")
 	}
-	// Build string-key and query Memtable2
+	// First try id-encoded key when a.stringStore is available (this matches Put when IDs were used)
+	if a.stringStore != nil {
+		dp := core.DataPoint{Metric: metric, Tags: tags, Timestamp: timestamp, Fields: nil}
+		if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
+			key := entry.Key
+			slog.Default().Debug("Engine2Adapter.Get: trying id-encoded key", "mem_key_len", len(key))
+			if v, et, ok := a.mem.Get(key); ok {
+				if et == core.EntryTypeDelete || len(v) == 0 {
+					return nil, sstable.ErrNotFound
+				}
+				fv, derr := core.DecodeFieldsFromBytes(v)
+				if derr != nil {
+					return nil, derr
+				}
+				return fv, nil
+			}
+		}
+	}
+
+	// Fallback to string-key and query Memtable2
 	key := core.EncodeTSDBKeyWithString(metric, tags, timestamp)
+	slog.Default().Debug("Engine2Adapter.Get: trying string-encoded key", "mem_key_len", len(key))
 	if v, et, ok := a.mem.Get(key); ok {
 		if et == core.EntryTypeDelete || len(v) == 0 {
 			return nil, sstable.ErrNotFound
@@ -789,9 +811,13 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	}
 
 	// Testing-only failure injection: allow tests to simulate transient flush errors.
+	// Testing-only failure injection: allow tests to simulate transient flush errors.
 	if a.TestingOnlyFailFlushCount != nil {
-		if a.TestingOnlyFailFlushCount.Load() > 0 {
+		cnt := a.TestingOnlyFailFlushCount.Load()
+		slog.Default().Info("FlushMemtableToL0: testing-only fail count", "count", cnt, "mem_ptr", fmt.Sprintf("%p", mem), "mem_len", mem.Len(), "mem_size", mem.Size())
+		if cnt > 0 {
 			a.TestingOnlyFailFlushCount.Add(-1)
+			slog.Default().Info("FlushMemtableToL0: returning simulated flush error", "remaining", a.TestingOnlyFailFlushCount.Load())
 			return fmt.Errorf("simulated flush error")
 		}
 	}
@@ -814,10 +840,13 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	}
 
 	// Use mem.FlushToSSTable when available on top-level memtable implementation.
+	slog.Default().Info("FlushMemtableToL0: calling mem.FlushToSSTable", "mem_ptr", fmt.Sprintf("%p", mem), "mem_len", mem.Len(), "mem_size", mem.Size(), "writer_path", writer.FilePath())
 	if err := mem.FlushToSSTable(writer); err != nil {
 		writer.Abort()
+		slog.Default().Warn("FlushMemtableToL0: mem.FlushToSSTable returned error", "err", err)
 		return fmt.Errorf("failed to flush memtable to sstable: %w", err)
 	}
+	slog.Default().Info("FlushMemtableToL0: mem.FlushToSSTable succeeded", "mem_ptr", fmt.Sprintf("%p", mem), "entries_len", mem.Len(), "entries_size", mem.Size(), "writer_path", writer.FilePath())
 	if err := writer.Finish(); err != nil {
 		writer.Abort()
 		return fmt.Errorf("failed to finish sstable writer: %w", err)

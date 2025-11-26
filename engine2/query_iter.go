@@ -2,6 +2,8 @@ package engine2
 
 import (
 	"encoding/binary"
+	"fmt"
+	"strings"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/memtable"
@@ -37,7 +39,17 @@ func getPooledIterator(m *memtable.Memtable2, params core.QueryParams, decs ...K
 			}
 			// assume string-encoded series key
 			if s, tags, err := core.ExtractMetricAndTagsFromSeriesKeyWithString(seriesKey); err == nil {
-				return s, tags, 0, true
+				// Trim any trailing NUL bytes that may be present in the encoded
+				// seriesKey components so comparisons against query tag values
+				// (which do not include NUL terminators) succeed.
+				cleanTags := make(map[string]string, len(tags))
+				for k, v := range tags {
+					cleanK := strings.TrimRight(k, "\x00")
+					cleanV := strings.TrimRight(v, "\x00")
+					cleanTags[cleanK] = cleanV
+				}
+				cleanMetric := strings.TrimRight(s, "\x00")
+				return cleanMetric, cleanTags, 0, true
 			}
 			return "", nil, 0, false
 		}
@@ -78,6 +90,7 @@ func (it *memQueryIterator) Next() bool {
 		match := true
 		for qk, qv := range it.params.Tags {
 			if tv, ok := tags[qk]; !ok || tv != qv {
+				fmt.Printf("[DBG memQuery] tag compare qk=%s qv=%q(len=%d) tv=%q(len=%d) ok=%v\n", qk, qv, len(qv), tv, len(tv), ok)
 				match = false
 				break
 			}

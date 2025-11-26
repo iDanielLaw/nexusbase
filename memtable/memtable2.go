@@ -3,6 +3,7 @@ package memtable
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -199,16 +200,20 @@ func (m *Memtable2) FlushToSSTable(writer core.SSTableWriterInterface) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	slog.Default().Info("Memtable2.FlushToSSTable: start", "mem_ptr", fmt.Sprintf("%p", m), "len", m.Len(), "size", m.Size())
+
 	iter := m.data.NewIterator()
 	entriesWritten := 0
 	for iter.Next() {
 		memKey := iter.Key()
 		memEntry := iter.Value()
 		if err := writer.Add(memEntry.Key, memEntry.Value, memEntry.EntryType, memKey.PointID); err != nil {
+			slog.Default().Warn("Memtable2.FlushToSSTable: writer.Add error", "key", string(memEntry.Key), "entries_written", entriesWritten, "err", err)
 			return fmt.Errorf("failed to add memtable entry to sstable (key=%s, entries_written=%d): %w", string(memEntry.Key), entriesWritten, err)
 		}
 		entriesWritten++
 	}
+	slog.Default().Info("Memtable2.FlushToSSTable: done", "entries_written", entriesWritten)
 	return nil
 }
 
