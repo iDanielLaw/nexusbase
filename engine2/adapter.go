@@ -2180,13 +2180,11 @@ func (a *Engine2Adapter) Start() error {
 		}
 
 		// Decide whether to treat manifest entries as authoritative (load into
-		// L1) or to ignore them and perform a fallback scan. Tests exercise
-		// both behaviors: when manifest entries point to legacy `sst/` files
-		// (or when legacy CURRENT/MANIFEST files are present) we should load
-		// manifest entries into L1. When legacy CURRENT/MANIFEST files were
-		// explicitly removed by tests (but `sstables/manifest.json` remains)
-		// we should fallback-scan the `sstables/` directory instead.
-		shouldLoadManifest := false
+		// L1) or to ignore them and perform a fallback scan. By default, if
+		// the manifest lists entries we should trust it and load those tables.
+		// Only when the manifest has no entries do we consult legacy markers
+		// and the presence of `sstables/` files to decide on a fallback scan.
+		shouldLoadManifest := len(entries) > 0
 		// Diagnostic: report candidate manifest load decision inputs
 		fmt.Fprintf(os.Stderr, "[engine2] manifest decision adapter_id=%d entries=%d data_root=%s\n", a.adapterID, len(entries), dataRoot)
 		// Also report whether legacy CURRENT/MANIFEST files exist under data root
@@ -2195,28 +2193,11 @@ func (a *Engine2Adapter) Start() error {
 		} else {
 			fmt.Fprintf(os.Stderr, "[engine2] legacy CURRENT absent adapter_id=%d\n", a.adapterID)
 		}
-		if len(entries) > 0 {
-			// If any manifest entry references the legacy `sst/` path, prefer
-			// loading the manifest (this covers tests that create sst files
-			// then append manifest entries pointing at `sst/`).
-			for _, me := range entries {
-				if dataRoot != "" {
-					legacyPrefix := filepath.Clean(filepath.Join(dataRoot, "sst"))
-					entryDir := filepath.Clean(filepath.Dir(me.FilePath))
-					// Ensure we only treat entries under the exact legacy
-					// `sst/` directory as a signal to load the manifest.
-					// Using a plain HasPrefix matched `sstables/` incorrectly
-					// because it starts with `sst`.
-					if entryDir == legacyPrefix || strings.HasPrefix(entryDir, legacyPrefix+string(os.PathSeparator)) {
-						shouldLoadManifest = true
-						break
-					}
-				}
-			}
-			// If we haven't decided yet, check for legacy CURRENT/MANIFEST
-			// files; their presence indicates the canonical legacy state and
-			// we should load the manifest entries.
-			if !shouldLoadManifest && dataRoot != "" {
+		if !shouldLoadManifest {
+			// If we haven't decided to load the manifest (no entries), check
+			// for legacy CURRENT/MANIFEST files; their presence indicates the
+			// canonical legacy state and we should load the manifest entries.
+			if dataRoot != "" {
 				if _, err := os.Stat(filepath.Join(dataRoot, core.CurrentFileName)); err == nil {
 					shouldLoadManifest = true
 				} else {
@@ -2276,6 +2257,7 @@ func (a *Engine2Adapter) Start() error {
 			} else {
 				var maxID uint64 = 0
 				lm := a.GetLevelsManager()
+				foundAny := false
 				for _, e := range entriesFS {
 					if e.IsDir() || !strings.HasSuffix(e.Name(), ".sst") {
 						continue
@@ -2296,23 +2278,31 @@ func (a *Engine2Adapter) Start() error {
 						slog.Default().Warn("failed to load sstable during fallback scan", "adapter_id", a.adapterID, "path", filePath, "err", lerr)
 						continue
 					}
+					foundAny = true
 					if lm != nil {
 						_ = lm.AddL0Table(tbl)
 						slog.Default().Info("fallback-scan: added SSTable to L0", "adapter_id", a.adapterID, "id", tbl.ID(), "path", tbl.FilePath())
 					}
 				}
-				// Update nextSSTableID so future allocations don't collide
-				if maxID > 0 {
-					atomic.StoreUint64(&a.nextSSTableID, maxID)
-					slog.Default().Info("Next SSTable ID set from fallback scan", "next_id", maxID+1)
+				// Only consider this a fallback-initialized startup when we actually
+				// discovered at least one SSTable file. Avoid treating an empty
+				// `sstables/` directory as a fallback indicator (it may exist
+				// for other reasons) — doing so previously caused WAL recovery
+				// to be masked by a forced sequence reset to 0.
+				if foundAny {
+					// Update nextSSTableID so future allocations don't collide
+					if maxID > 0 {
+						atomic.StoreUint64(&a.nextSSTableID, maxID)
+						slog.Default().Info("Next SSTable ID set from fallback scan", "next_id", maxID+1)
+					}
+					// Reset sequence number to 0 as fallback initialization
+					a.sequenceNumber.Store(0)
+					// persist fallback-scanned state so other callers (GetSequenceNumber)
+					// can observe the fallback semantics even if WAL recovery runs later.
+					a.fallbackScanned.Store(true)
+					didFallbackScanLocal = true
+					slog.Default().Info("Database state initialized by scanning sstables directory. Sequence number reset to 0.", "adapter_id", a.adapterID, "sequence", a.sequenceNumber.Load())
 				}
-				// Reset sequence number to 0 as fallback initialization
-				a.sequenceNumber.Store(0)
-				// persist fallback-scanned state so other callers (GetSequenceNumber)
-				// can observe the fallback semantics even if WAL recovery runs later.
-				a.fallbackScanned.Store(true)
-				didFallbackScanLocal = true
-				slog.Default().Info("Database state initialized by scanning sstables directory. Sequence number reset to 0.", "adapter_id", a.adapterID, "sequence", a.sequenceNumber.Load())
 			}
 		}
 	}
@@ -2482,6 +2472,12 @@ func (a *Engine2Adapter) Start() error {
 	if a.tagIndexManager != nil {
 		a.tagIndexManager.Start()
 	}
+
+	// Diagnostic: emit a concise start-complete line to stderr so test logs
+	// can correlate the adapter instance that finished startup/WAL replay
+	// with any later GetSequenceNumber calls. Include adapter pointer so
+	// we can tell if different instances are involved in test assertions.
+	fmt.Fprintf(os.Stderr, "[engine2] START COMPLETE adapter_id=%d addr=%p seq=%d fallback=%v\n", a.adapterID, a, a.sequenceNumber.Load(), didFallbackScanLocal)
 
 	// mark started for snapshot provider
 	a.started.Store(true)
@@ -2686,7 +2682,14 @@ func (a *Engine2Adapter) GetSequenceNumber() uint64 {
 	// startup/fallback semantics. Include adapter id so we can correlate
 	// which adapter instance is being queried in parallel test runs.
 	slog.Default().Info("GetSequenceNumber called", "adapter_id", a.adapterID, "fallbackScanned", fb, "sequence", seq)
-	if fb {
+	// If WAL recovery already set a non-zero sequence, prefer that value
+	// (this avoids masking recovered state when legacy fallback heuristics
+	// would otherwise return 0). Only if the sequence is zero do we consult
+	// fallback/manifest heuristics to decide whether to report 0.
+	if seq > 0 {
+		return seq
+	}
+	if fb && seq == 0 {
 		return 0
 	}
 	// If manifest exists but contains no entries, and there are SST files
