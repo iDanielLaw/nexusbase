@@ -152,19 +152,16 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 			// from background processes that run during Start().
 			validator := core.NewValidator()
 			vErr := core.ValidateMetricAndTags(validator, tc.metric, tc.tags)
-			t.Logf("[debug test] vErr=%v", vErr)
 
 			err = engine.Start()
 			require.NoError(t, err)
 			defer engine.Close()
 			if tc.wantErr {
-				t.Logf("[debug test] vErr before assert: %T %#v", vErr, vErr)
 				require.Error(t, vErr)
 				if tc.wantErrType != nil {
 					assert.ErrorAs(t, vErr, &tc.wantErrType)
 				}
 			} else {
-				t.Logf("[debug test] vErr before assert (expect nil): %T %#v", vErr, vErr)
 				require.NoError(t, vErr)
 			}
 

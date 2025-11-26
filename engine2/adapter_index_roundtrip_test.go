@@ -2,6 +2,7 @@ package engine2
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,10 @@ import (
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/index"
 )
+
+func init() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+}
 
 // TestAdapterFlushWritesReadableIndex exercises the adapter flush path to
 // ensure it writes an `index.idx` that the `index` package can read.
