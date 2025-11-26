@@ -181,6 +181,12 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 		// the simulated error. This avoids timing races.
 		a.TestingOnlyFlushNotify = make(chan struct{}, 1)
 		a.TestingOnlyFlushBlock = make(chan struct{})
+		// Ensure test hooks are cleared when the test finishes to avoid
+		// accidental interference with other tests.
+		defer func() {
+			a.TestingOnlyFlushNotify = nil
+			a.TestingOnlyFlushBlock = nil
+		}()
 
 		mem := memtable.NewMemtable2(1024, a.clk)
 		pv, _ := core.NewPointValue("v")

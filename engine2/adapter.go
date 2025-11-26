@@ -83,17 +83,22 @@ type Engine2Adapter struct {
 	// deleted series tracking used by tag index manager
 	deletedSeries   map[string]uint64
 	deletedSeriesMu sync.RWMutex
-	// Testing-only: number of FlushMemtableToL0 calls to fail before succeeding.
-	// Tests can set this to simulate transient flush failures.
+
+	// Testing-only hooks
+	// NOTE: The fields below are only intended for use by tests. They are
+	// nil in normal operation. Tests may set these to coordinate timing or
+	// to inject simulated failures; production code should not rely on
+	// these fields.
+	// number of FlushMemtableToL0 calls to fail before succeeding.
 	TestingOnlyFailFlushCount *atomic.Int32
-	// Testing-only: optional notify channel used by tests to coordinate when
-	// a simulated flush failure is returned. Tests can set this channel and
-	// wait for a signal instead of relying on timing sleeps.
+	// Optional notify channel used by tests to coordinate when a simulated
+	// flush failure is returned. Tests can set this channel and wait for a
+	// signal instead of relying on timing sleeps.
 	TestingOnlyFlushNotify chan struct{}
-	// Testing-only: optional block channel. When set, the adapter will block
-	// after notifying `TestingOnlyFlushNotify` and before returning the
-	// simulated flush error. Tests can close this channel to allow the
-	// adapter to proceed, enabling deterministic coordination.
+	// Optional block channel. When set, the adapter will block after
+	// notifying `TestingOnlyFlushNotify` and before returning the simulated
+	// flush error. Tests can close this channel to allow the adapter to
+	// proceed, enabling deterministic coordination.
 	TestingOnlyFlushBlock chan struct{}
 }
 
