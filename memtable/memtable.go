@@ -2,6 +2,7 @@ package memtable
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -318,4 +319,85 @@ func (m *Memtable) Close() {
 	// Clear references
 	m.data = nil
 	m.sizeBytes = 0
+}
+
+// PutDataPoint is a compatibility helper that accepts a core.DataPoint and
+// writes it into the memtable using string-based key encoding. This mirrors
+// the legacy engine2 memtable surface expected by engine2 code and tests.
+func (m *Memtable) PutDataPoint(dp *core.DataPoint) error {
+	if dp == nil {
+		return fmt.Errorf("nil datapoint")
+	}
+	key := core.EncodeTSDBKeyWithString(dp.Metric, dp.Tags, dp.Timestamp)
+	if len(dp.Fields) == 0 {
+		return m.Put(key, nil, core.EntryTypeDelete, 0)
+	}
+	vb, err := dp.Fields.Encode()
+	if err != nil {
+		return err
+	}
+	return m.Put(key, vb, core.EntryTypePutEvent, 0)
+}
+
+// DeleteSeries removes an entire series by writing a tombstone with
+// timestamp -1 using string-based series key encoding.
+func (m *Memtable) DeleteSeries(metric string, tags map[string]string) error {
+	key := core.EncodeTSDBKeyWithString(metric, tags, -1)
+	return m.Put(key, nil, core.EntryTypeDelete, 0)
+}
+
+// Delete writes a tombstone for a specific timestamp for the provided metric+tags.
+func (m *Memtable) Delete(metric string, tags map[string]string, timestamp int64) error {
+	key := core.EncodeTSDBKeyWithString(metric, tags, timestamp)
+	return m.Put(key, nil, core.EntryTypeDelete, 0)
+}
+
+// Query performs a simple in-memory scan over the memtable and returns
+// results that match the provided QueryParams. This is a convenience for
+// tests and the legacy engine2 usage patterns.
+func (m *Memtable) Query(params core.QueryParams) []core.QueryResultItem {
+	out := make([]core.QueryResultItem, 0)
+	iter := m.NewIterator(nil, nil, types.Ascending)
+	defer iter.Close()
+	for iter.Next() {
+		node, err := iter.At()
+		if err != nil {
+			continue
+		}
+		k := node.Key
+		if len(k) < 8 {
+			continue
+		}
+		seriesKey := k[:len(k)-8]
+		ts := int64(binary.BigEndian.Uint64(k[len(k)-8:]))
+		if ts < params.StartTime || ts > params.EndTime {
+			continue
+		}
+		metric, tags, derr := core.ExtractMetricAndTagsFromSeriesKeyWithString(seriesKey)
+		if derr != nil {
+			continue
+		}
+		if metric != params.Metric {
+			continue
+		}
+		match := true
+		for qk, qv := range params.Tags {
+			if tv, ok := tags[qk]; !ok || tv != qv {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		if node.EntryType != core.EntryTypePutEvent || len(node.Value) == 0 {
+			continue
+		}
+		fv, derr := core.DecodeFieldsFromBytes(node.Value)
+		if derr != nil {
+			continue
+		}
+		out = append(out, core.QueryResultItem{Metric: metric, Tags: tags, Timestamp: ts, Fields: fv})
+	}
+	return out
 }

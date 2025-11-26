@@ -495,7 +495,7 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 			}
 			switch entry.EntryType {
 			case core.EntryTypePutEvent:
-				if err := sl.engine.mutableMemtable.Put(entry.Key, entry.Value, entry.EntryType, entry.SeqNum); err != nil {
+				if err := sl.engine.mutableMemtable.PutRaw(entry.Key, entry.Value, entry.EntryType, entry.SeqNum); err != nil {
 					return fmt.Errorf("failed to apply PUT entry from WAL to memtable: %w", err)
 				}
 				seriesKeyBytes, extractErr := core.ExtractSeriesKeyFromInternalKeyWithErr(entry.Key)
@@ -529,7 +529,7 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 
 				sl.engine.addActiveSeries(seriesKeyStr)
 			case core.EntryTypeDelete:
-				if err := sl.engine.mutableMemtable.Put(entry.Key, nil, entry.EntryType, entry.SeqNum); err != nil {
+				if err := sl.engine.mutableMemtable.PutRaw(entry.Key, nil, entry.EntryType, entry.SeqNum); err != nil {
 					return fmt.Errorf("failed to apply DELETE entry from WAL to memtable: %w", err)
 				}
 			case core.EntryTypeDeleteSeries:
@@ -571,7 +571,7 @@ func (sl *StateLoader) initializeWALAndRecover(lastSafeSegmentIndex uint64) erro
 		sl.logger.Info("Memtable is full after WAL recovery, rotating for flush.", "size_bytes", sl.engine.mutableMemtable.Size(), "threshold_bytes", sl.engine.opts.MemtableThreshold)
 		sl.engine.mutableMemtable.LastWALSegmentIndex = sl.engine.wal.ActiveSegmentIndex()
 		sl.engine.immutableMemtables = append(sl.engine.immutableMemtables, sl.engine.mutableMemtable)
-		sl.engine.mutableMemtable = memtable.NewMemtable(sl.engine.opts.MemtableThreshold, sl.engine.clock)
+		sl.engine.mutableMemtable = memtable.NewMemtable2(sl.engine.opts.MemtableThreshold, sl.engine.clock)
 		// We don't need to signal the flushChan here, as the background service loop
 		// will start right after this and process the immutable queue.
 	}

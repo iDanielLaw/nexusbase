@@ -103,7 +103,7 @@ func (sm *ServiceManager) startFlushLoop() {
 					// This is the correct place to set the LastWALSegmentIndex
 					sm.engine.mutableMemtable.LastWALSegmentIndex = sm.engine.wal.ActiveSegmentIndex()
 					sm.engine.immutableMemtables = append(sm.engine.immutableMemtables, sm.engine.mutableMemtable)
-					sm.engine.mutableMemtable = memtable.NewMemtable(sm.engine.opts.MemtableThreshold, sm.engine.clock)
+					sm.engine.mutableMemtable = memtable.NewMemtable2(sm.engine.opts.MemtableThreshold, sm.engine.clock)
 				}
 				sm.engine.mu.Unlock()
 

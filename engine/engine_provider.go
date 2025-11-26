@@ -82,24 +82,27 @@ func (e *storageEngine) Unlock() {
 	e.mu.Unlock()
 }
 
-func (e *storageEngine) GetMemtablesForFlush() (memtables []*memtable.Memtable, newMemtable *memtable.Memtable) {
+func (e *storageEngine) GetMemtablesForFlush() (memtables []*memtable.Memtable2, newMemtable *memtable.Memtable2) {
 	// NOTE: This method MUST be called while holding e.mu.Lock().
 	// The snapshot manager is responsible for acquiring and releasing the lock.
-	memtablesToFlush := make([]*memtable.Memtable, 0, len(e.immutableMemtables)+1)
-	memtablesToFlush = append(memtablesToFlush, e.immutableMemtables...)
+	memtablesToFlush := make([]*memtable.Memtable2, 0, len(e.immutableMemtables)+1)
+	// Append existing immutable memtables and the mutable memtable (if non-empty).
+	for _, im := range e.immutableMemtables {
+		memtablesToFlush = append(memtablesToFlush, im)
+	}
 	if e.mutableMemtable != nil && e.mutableMemtable.Size() > 0 {
 		memtablesToFlush = append(memtablesToFlush, e.mutableMemtable)
 	}
 
 	// Reset the engine's memtables so it can continue accepting writes.
-	e.immutableMemtables = make([]*memtable.Memtable, 0)
-	newMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+	e.immutableMemtables = make([]*memtable.Memtable2, 0)
+	newMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock)
 	e.mutableMemtable = newMemtable
 
 	return memtablesToFlush, newMemtable
 }
 
-func (e *storageEngine) FlushMemtableToL0(memToFlush *memtable.Memtable, parentCtx context.Context) error {
+func (e *storageEngine) FlushMemtableToL0(memToFlush *memtable.Memtable2, parentCtx context.Context) error {
 	// This method is specifically for the snapshot process to synchronously flush memtables.
 	if memToFlush == nil || memToFlush.Size() == 0 {
 		return nil

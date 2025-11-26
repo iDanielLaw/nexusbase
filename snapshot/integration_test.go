@@ -190,11 +190,11 @@ func (m *testE2EProvider) GetDataDir() string {
 func (m *testE2EProvider) GetSequenceNumber() uint64 { return m.sequenceNumber }
 func (m *testE2EProvider) Lock()                     { m.lockMu.Lock() }
 func (m *testE2EProvider) Unlock()                   { m.lockMu.Unlock() }
-func (m *testE2EProvider) GetMemtablesForFlush() ([]*memtable.Memtable, *memtable.Memtable) {
+func (m *testE2EProvider) GetMemtablesForFlush() ([]*memtable.Memtable2, *memtable.Memtable2) {
 	// For this E2E test, we assume memtables are already flushed and we are snapshotting a stable state.
 	return nil, nil
 }
-func (m *testE2EProvider) FlushMemtableToL0(mem *memtable.Memtable, parentCtx context.Context) error {
+func (m *testE2EProvider) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx context.Context) error {
 	// No-op for this test, as we manually create SSTables.
 	return nil
 }

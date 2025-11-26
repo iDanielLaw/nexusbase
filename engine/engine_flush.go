@@ -118,7 +118,7 @@ func (e *storageEngine) processImmutableMemtables(writeCheckpoint bool) {
 			// Re-queue the memtable so the final synchronous flush in Close() can handle it.
 			e.logger.Warn("Shutdown signaled during flush retry. Re-queuing memtable for final flush.", "memtable_size", memToFlush.Size())
 			e.mu.Lock()
-			e.immutableMemtables = append([]*memtable.Memtable{memToFlush}, e.immutableMemtables...)
+			e.immutableMemtables = append([]*memtable.Memtable2{memToFlush}, e.immutableMemtables...)
 			e.mu.Unlock()
 			return
 		}
@@ -145,7 +145,7 @@ func (e *storageEngine) triggerPeriodicFlush() {
 		e.mutableMemtable.LastWALSegmentIndex = e.wal.ActiveSegmentIndex()
 
 		e.immutableMemtables = append(e.immutableMemtables, e.mutableMemtable)
-		e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+		e.mutableMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock)
 		e.mu.Unlock()
 
 		// Signal the flush loop to process the newly added immutable memtable.
@@ -169,7 +169,7 @@ func (e *storageEngine) hasImmutableMemtables() bool {
 }
 
 // moveToDLQ attempts to write the contents of a memtable to a Dead Letter Queue file.
-func (e *storageEngine) moveToDLQ(mem *memtable.Memtable) error {
+func (e *storageEngine) moveToDLQ(mem *memtable.Memtable2) error {
 	if e.dlqDir == "" {
 		e.logger.Error("DLQ directory path is empty in engine state. Cannot save problematic memtable.", "memtable_size", mem.Size())
 		return fmt.Errorf("DLQ directory not configured in engine state")
@@ -215,7 +215,7 @@ func (e *storageEngine) moveToDLQ(mem *memtable.Memtable) error {
 // flushMemtableToSSTable flushes a given memtable to a new SSTable on disk.
 // It handles the creation of the SSTable, writing entries, and adding it to L0.
 // This method is called by background flush processes and during shutdown.
-func (e *storageEngine) flushMemtableToSSTable(parentCtx context.Context, memToFlush *memtable.Memtable) error {
+func (e *storageEngine) flushMemtableToSSTable(parentCtx context.Context, memToFlush *memtable.Memtable2) error {
 	ctx, span := e.tracer.Start(parentCtx, "StorageEngine.flushMemtableToSSTable")
 	defer span.End()
 	span.SetAttributes(attribute.Int64("memtable.size_bytes", memToFlush.Size()), attribute.Int("memtable.len", memToFlush.Len()))
@@ -270,7 +270,7 @@ func (e *storageEngine) flushMemtableToSSTable(parentCtx context.Context, memToF
 // _flushMemtableToL0SSTable is the core logic for flushing a memtable to a new L0 SSTable.
 // It handles writer creation, flushing, and loading the new table.
 // It does NOT handle metrics, hooks, or adding the table to the levels manager.
-func (e *storageEngine) _flushMemtableToL0SSTable(memToFlush *memtable.Memtable, parentCtx context.Context) (*sstable.SSTable, error) {
+func (e *storageEngine) _flushMemtableToL0SSTable(memToFlush *memtable.Memtable2, parentCtx context.Context) (*sstable.SSTable, error) {
 	if memToFlush == nil || memToFlush.Size() == 0 {
 		return nil, nil
 	}
@@ -429,7 +429,7 @@ func (e *storageEngine) flushRemainingMemtables() error {
 			// Release resources on successful flush before creating a new one.
 			memToFlush.Close()
 		}
-		e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock) // Create a new empty one
+		e.mutableMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock) // Create a new empty one
 	}
 	e.logger.Info("All remaining memtables processed.")
 	if err := e.persistManifest(); err != nil { // Persist manifest after all remaining memtables are flushed

@@ -23,6 +23,7 @@ import (
 	"github.com/INLOpen/nexusbase/index"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/internal"
+	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexusbase/memtable"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
@@ -151,7 +152,22 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	if err := a.wal.Append(&point); err != nil {
 		return fmt.Errorf("wal append failed: %w", err)
 	}
-	a.mem.Put(&point)
+	// Encode datapoint and write into memtable via central API.
+	if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
+		_ = a.mem.PutRaw(entry.Key, entry.Value, entry.EntryType, 0)
+	} else {
+		// Fallback: string-key encoding
+		key := core.EncodeTSDBKeyWithString(point.Metric, point.Tags, point.Timestamp)
+		if len(point.Fields) == 0 {
+			_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
+		} else {
+			vb, e := point.Fields.Encode()
+			if e != nil {
+				return fmt.Errorf("failed to encode fields: %w", e)
+			}
+			_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, 0)
+		}
+	}
 	// Also append a core.WALEntry to leader WAL so replication can stream it.
 	if a.leaderWal != nil {
 		if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
@@ -169,7 +185,20 @@ func (a *Engine2Adapter) PutBatch(ctx context.Context, points []core.DataPoint) 
 		if err := a.wal.Append(&p); err != nil {
 			return fmt.Errorf("wal append failed: %w", err)
 		}
-		a.mem.Put(&p)
+		if entry, encErr := a.encodeDataPointToWALEntry(&p); encErr == nil {
+			_ = a.mem.PutRaw(entry.Key, entry.Value, entry.EntryType, 0)
+		} else {
+			key := core.EncodeTSDBKeyWithString(p.Metric, p.Tags, p.Timestamp)
+			if len(p.Fields) == 0 {
+				_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
+			} else {
+				vb, e := p.Fields.Encode()
+				if e != nil {
+					return fmt.Errorf("failed to encode fields: %w", e)
+				}
+				_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, 0)
+			}
+		}
 		if a.leaderWal != nil {
 			if entry, encErr := a.encodeDataPointToWALEntry(&p); encErr == nil {
 				_ = a.leaderWal.Append(*entry)
@@ -182,9 +211,15 @@ func (a *Engine2Adapter) Get(ctx context.Context, metric string, tags map[string
 	if a.mem == nil {
 		return nil, fmt.Errorf("engine2 not initialized")
 	}
-	if fv, ok := a.mem.Get(metric, tags, timestamp); ok {
-		if len(fv) == 0 {
+	// Build string-key and query Memtable2
+	key := core.EncodeTSDBKeyWithString(metric, tags, timestamp)
+	if v, et, ok := a.mem.Get(key); ok {
+		if et == core.EntryTypeDelete || len(v) == 0 {
 			return nil, sstable.ErrNotFound
+		}
+		fv, derr := core.DecodeFieldsFromBytes(v)
+		if derr != nil {
+			return nil, derr
 		}
 		return fv, nil
 	}
@@ -199,7 +234,13 @@ func (a *Engine2Adapter) Delete(ctx context.Context, metric string, tags map[str
 	if err := a.wal.Append(&dp); err != nil {
 		return fmt.Errorf("wal append failed: %w", err)
 	}
-	a.mem.Delete(metric, tags, timestamp)
+	// Represent delete as memtable tombstone put
+	if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
+		_ = a.mem.PutRaw(entry.Key, nil, core.EntryTypeDelete, 0)
+	} else {
+		key := core.EncodeTSDBKeyWithString(metric, tags, timestamp)
+		_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
+	}
 	if a.leaderWal != nil {
 		// build delete WALEntry
 		if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
@@ -219,7 +260,32 @@ func (a *Engine2Adapter) DeleteSeries(ctx context.Context, metric string, tags m
 	if err := a.wal.Append(&dp); err != nil {
 		return fmt.Errorf("wal append failed: %w", err)
 	}
-	a.mem.DeleteSeries(metric, tags)
+	// Use a single tombstone key for timestamp -1 to mark series deletion
+	if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
+		_ = a.mem.PutRaw(entry.Key, nil, core.EntryTypeDelete, 0)
+		// For ID-encoded keys, seriesKey is the entry.Key without the
+		// trailing timestamp (last 8 bytes). Use that form when marking
+		// the series as deleted so it matches iterator-extracted keys.
+		if len(entry.Key) >= 8 {
+			seriesKeyBytes := make([]byte, len(entry.Key)-8)
+			copy(seriesKeyBytes, entry.Key[:len(entry.Key)-8])
+			seq := a.sequenceNumber.Load() + 1
+			a.sequenceNumber.Store(seq)
+			a.deletedSeriesMu.Lock()
+			a.deletedSeries[string(seriesKeyBytes)] = seq
+			a.deletedSeriesMu.Unlock()
+		}
+	} else {
+		key := core.EncodeTSDBKeyWithString(metric, tags, -1)
+		_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
+		// string-encoded series key
+		seq := a.sequenceNumber.Load() + 1
+		a.sequenceNumber.Store(seq)
+		seriesKeyStr := string(core.EncodeSeriesKeyWithString(metric, tags))
+		a.deletedSeriesMu.Lock()
+		a.deletedSeries[seriesKeyStr] = seq
+		a.deletedSeriesMu.Unlock()
+	}
 	if a.leaderWal != nil {
 		if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
 			entry.EntryType = core.EntryTypeDelete
@@ -238,7 +304,12 @@ func (a *Engine2Adapter) DeletesByTimeRange(ctx context.Context, metric string, 
 		if err := a.wal.Append(&dp); err != nil {
 			return fmt.Errorf("wal append failed: %w", err)
 		}
-		a.mem.Delete(metric, tags, ts)
+		if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
+			_ = a.mem.PutRaw(entry.Key, nil, core.EntryTypeDelete, 0)
+		} else {
+			key := core.EncodeTSDBKeyWithString(metric, tags, ts)
+			_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
+		}
 		if a.leaderWal != nil {
 			if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
 				entry.EntryType = core.EntryTypeDelete
@@ -254,7 +325,45 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 	if a.mem == nil {
 		return nil, fmt.Errorf("engine2 not initialized")
 	}
-	return getPooledIterator(a.mem, params), nil
+	// decoder uses the adapter's string store to resolve numeric IDs to strings.
+	dec := func(seriesKey []byte) (string, map[string]string, int64, bool) {
+		// try ID-based series key first
+		metricID, pairs, err := core.DecodeSeriesKey(seriesKey)
+		if err == nil {
+			if a.stringStore == nil {
+				return "", nil, 0, false
+			}
+			metricName, _ := a.stringStore.GetString(metricID)
+			lbls := make(map[string]string, len(pairs))
+			for _, p := range pairs {
+				kstr, _ := a.stringStore.GetString(p.KeyID)
+				vstr, _ := a.stringStore.GetString(p.ValueID)
+				lbls[kstr] = vstr
+			}
+			return metricName, lbls, 0, true
+		}
+		// fallback: try string-encoded series key
+		if m, tags, err2 := core.ExtractMetricAndTagsFromSeriesKeyWithString(seriesKey); err2 == nil {
+			return m, tags, 0, true
+		}
+		return "", nil, 0, false
+	}
+	mi := getPooledIterator(a.mem, params, dec)
+	// Wrap iterator to skip deleted series entries using adapter's deletedSeries map.
+	// Use a lightweight extractor that returns the seriesKey (data point key without timestamp).
+	if mi != nil {
+		extractor := func(dataPointKey []byte) ([]byte, error) {
+			if len(dataPointKey) < 8 {
+				return nil, fmt.Errorf("invalid data point key")
+			}
+			// seriesKey is everything except the last 8 bytes (timestamp)
+			seriesKey := make([]byte, len(dataPointKey)-8)
+			copy(seriesKey, dataPointKey[:len(dataPointKey)-8])
+			return seriesKey, nil
+		}
+		mi.iter = iterator.NewSkippingDeletedSeriesIterator(mi.iter, a.isSeriesDeleted, extractor)
+	}
+	return mi, nil
 }
 func (a *Engine2Adapter) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
 	return nil, fmt.Errorf("GetSeriesByTags not implemented in engine2 adapter")
@@ -271,257 +380,21 @@ func (a *Engine2Adapter) GetTagValues(metric, tagKey string) ([]string, error) {
 
 // Administration & Maintenance
 func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
-	if a.mem == nil {
-		return fmt.Errorf("engine2 not initialized")
-	}
-
-	// Create sstable directory
-	sstDir := filepath.Join(a.dataRoot, "sstables")
-
-	// Gather entries from memtable into an in-memory slice (so we can estimate keys)
-	type encEntry struct {
-		key       []byte
-		val       []byte
-		entryType core.EntryType
-	}
-	var entries []encEntry
-	// Collect named series for index population and per-series samples for chunk payloads
-	namedMap := make(map[string]NamedSeries)
-	samples := make(map[string]*bytes.Buffer)
-	// First pass: collect all unique strings that may need IDs so we can
-	// assign them in a single batched write. This reduces many small
-	// write+sync operations when flushing large memtables.
-	unique := make(map[string]struct{})
-	a.mem.mu.RLock()
-	for metric, tagMap := range a.mem.data {
-		unique[metric] = struct{}{}
-		for tagKey := range tagMap {
-			tags := parseTagsFromKey(tagKey)
-			for k, v := range tags {
-				unique[k] = struct{}{}
-				unique[v] = struct{}{}
-			}
-		}
-	}
-	a.mem.mu.RUnlock()
-
-	// Batch create any missing IDs in the string store.
-	var idMap map[string]uint64
-	if a.stringStore != nil && len(unique) > 0 {
-		list := make([]string, 0, len(unique))
-		for s := range unique {
-			list = append(list, s)
-		}
-		// Attempt to use the concrete implementation's batch API when available.
-		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
-			ids, err := ss.AddStringsBatch(list)
-			if err == nil {
-				idMap = make(map[string]uint64, len(list))
-				for i, s := range list {
-					idMap[s] = ids[i]
-				}
-			} else {
-				idMap = make(map[string]uint64)
-			}
-		} else {
-			// Fall back to per-call creation if batch API isn't available.
-			idMap = make(map[string]uint64)
-		}
-	} else {
-		idMap = make(map[string]uint64)
-	}
-
-	a.mem.mu.RLock()
-	for metric, tagMap := range a.mem.data {
-		for tagKey, tsMap := range tagMap {
-			tags := parseTagsFromKey(tagKey)
-			// attempt to ensure IDs for metric and all tag strings in a batch
-			strs := make([]string, 0, len(tags)+1)
-			strs = append(strs, metric)
-			for k, v := range tags {
-				strs = append(strs, k, v)
-			}
-			a.ensureIDs(idMap, strs)
-			// convert metric and tags to IDs using the string store (use idMap when available)
-			var metricID uint64
-			metricID, _ = a.getOrCreateIDFromMap(idMap, metric)
-			// build encoded tag pairs
-			var pairs []core.EncodedSeriesTagPair
-			for k, v := range tags {
-				var kid, vid uint64
-				kid, _ = a.getOrCreateIDFromMap(idMap, k)
-				vid, _ = a.getOrCreateIDFromMap(idMap, v)
-				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
-			}
-			// sort by KeyID for canonical ordering
-			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
-
-			// track min/max timestamps for this series in order to emit a single
-			// ChunkMeta entry covering the flushed timestamps (DataRef is a
-			// placeholder 0 here; chunk payload management lives elsewhere).
-			var minTs int64 = 0
-			var maxTs int64 = 0
-			first := true
-			for ts, fv := range tsMap {
-				var e encEntry
-				e.key = core.EncodeTSDBKey(metricID, pairs, ts)
-				if len(fv) == 0 {
-					e.entryType = core.EntryTypeDelete
-					e.val = nil
-				} else {
-					vb, encErr := fv.Encode()
-					if encErr != nil {
-						a.mem.mu.RUnlock()
-						return fmt.Errorf("failed to encode FieldValues during flush preparation: %w", encErr)
-					}
-					e.entryType = core.EntryTypePutEvent
-					e.val = vb
-					// append sample bytes to per-series buffer (timestamp + length + payload)
-					seriesKey := metric + "|" + tagKey
-					sb := samples[seriesKey]
-					if sb == nil {
-						sb = &bytes.Buffer{}
-						samples[seriesKey] = sb
-					}
-					// write timestamp (big-endian uint64) then length (uvarint) then payload
-					tsb := make([]byte, 8)
-					binary.BigEndian.PutUint64(tsb, uint64(ts))
-					sb.Write(tsb)
-					tmp := make([]byte, binary.MaxVarintLen64)
-					n := binary.PutUvarint(tmp, uint64(len(vb)))
-					sb.Write(tmp[:n])
-					sb.Write(vb)
-				}
-				entries = append(entries, e)
-				// update min/max
-				if first {
-					minTs = ts
-					maxTs = ts
-					first = false
-				} else {
-					if ts < minTs {
-						minTs = ts
-					}
-					if ts > maxTs {
-						maxTs = ts
-					}
-				}
-			}
-			// after collecting timestamps for this series, record NamedSeries
-			seriesKey := metric + "|" + tagKey
-			if _, ok := namedMap[seriesKey]; !ok {
-				lbls := make(map[string]string, len(tags)+1)
-				lbls["__name__"] = metric
-				for kk, vv := range tags {
-					lbls[kk] = vv
-				}
-				var chunks []index.ChunkMeta
-				if !first {
-					// DataRef will be populated after writing chunk payloads
-					chunks = []index.ChunkMeta{{Mint: minTs, Maxt: maxTs, DataRef: 0}}
-				}
-				namedMap[seriesKey] = NamedSeries{Labels: lbls, Chunks: chunks}
-			}
-		}
-	}
-	a.mem.mu.RUnlock()
-
-	if len(entries) == 0 {
-		// Nothing to flush
+	// Delegate to snapshot helper which swaps active memtable and returns
+	// immutable memtables suitable for flushing. This avoids accessing
+	// internal memtable maps/locks directly and reuses existing Flush logic.
+	mems, _ := a.GetMemtablesForFlush()
+	if len(mems) == 0 {
 		return nil
 	}
 
-	id := a.GetNextSSTableID()
-	estimatedKeys := uint64(len(entries))
-
-	writerOpts := core.SSTableWriterOptions{
-		DataDir:                      sstDir,
-		ID:                           id,
-		EstimatedKeys:                estimatedKeys,
-		BloomFilterFalsePositiveRate: 0.01,
-		BlockSize:                    32 * 1024,
-		Compressor:                   &compressors.NoCompressionCompressor{},
-		Logger:                       nil,
-	}
-
-	writer, err := sstable.NewSSTableWriter(writerOpts)
-	if err != nil {
-		return fmt.Errorf("failed to create sstable writer: %w", err)
-	}
-
-	// Write all entries
-	for _, e := range entries {
-		if addErr := writer.Add(e.key, e.val, e.entryType, 0); addErr != nil {
-			writer.Abort()
-			return fmt.Errorf("failed to add entry to sstable: %w", addErr)
+	for _, m := range mems {
+		if err := a.FlushMemtableToL0(m, ctx); err != nil {
+			// attempt to close memtable to free resources before returning
+			m.Close()
+			return err
 		}
-	}
-
-	if err := writer.Finish(); err != nil {
-		writer.Abort()
-		return fmt.Errorf("failed to finish sstable writer: %w", err)
-	}
-
-	// Validate by loading the SSTable
-	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: id}
-	_, loadErr := sstable.LoadSSTable(loadOpts)
-	if loadErr != nil {
-		// remove corrupted file
-		_ = sys.Remove(writer.FilePath())
-		return fmt.Errorf("failed to load newly created sstable %s: %w", writer.FilePath(), loadErr)
-	}
-
-	// Append manifest entry
-	manifestPath := filepath.Join(sstDir, "manifest.json")
-	entry := SSTableManifestEntry{
-		ID:        id,
-		FilePath:  writer.FilePath(),
-		KeyCount:  uint64(len(entries)),
-		CreatedAt: time.Now().UTC(),
-	}
-	// Persist manifest entry and update in-memory manager if available.
-	if a.manifestMgr != nil {
-		if err := a.manifestMgr.AddEntry(entry); err != nil {
-			return fmt.Errorf("failed to persist manifest entry: %w", err)
-		}
-	} else {
-		if err := AppendManifestEntry(manifestPath, entry); err != nil {
-			return fmt.Errorf("failed to append sstable manifest: %w", err)
-		}
-	}
-
-	// Success — clear memtable now
-	a.mem.Flush()
-
-	// Write a minimal block index alongside the new SSTable so tools and
-	// other components can discover a per-block index even when the engine
-	// does not yet populate it with real symbol/series data.
-	blockDir := filepath.Join(a.dataRoot, "blocks", fmt.Sprintf("%d", id))
-	if err := os.MkdirAll(blockDir, 0o755); err == nil {
-		// If we collected samples, write chunk payload file and obtain chunk metas
-		var refs map[string][]index.ChunkMeta
-		if len(samples) > 0 {
-			var werr error
-			refs, werr = writeChunksFile(blockDir, samples, a.maxChunkBytes)
-			if werr != nil {
-				// best-effort: log but continue with DataRef=0
-				slog.Default().Warn("failed to write chunks file for block", "err", werr)
-				refs = nil
-			}
-		}
-
-		// Convert namedMap to slice for writer, populate Chunks from refs if available
-		named := make([]NamedSeries, 0, len(namedMap))
-		for k, v := range namedMap {
-			if refs != nil {
-				if r, ok := refs[k]; ok {
-					// assign the slice of chunk metas produced for this series
-					v.Chunks = r
-				}
-			}
-			named = append(named, v)
-		}
-		_ = WriteBlockIndexNamed(blockDir, named)
+		m.Close()
 	}
 	return nil
 }
@@ -632,7 +505,12 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 		}
 
 		dp := core.DataPoint{Metric: entry.GetMetric(), Tags: entry.GetTags(), Timestamp: entry.GetTimestamp(), Fields: fv}
-		a.mem.Put(&dp)
+		if we, err := a.encodeDataPointToWALEntry(&dp); err == nil {
+			_ = a.mem.PutRaw(we.Key, nil, core.EntryTypeDelete, 0)
+		} else {
+			key := core.EncodeTSDBKeyWithString(dp.Metric, dp.Tags, dp.Timestamp)
+			_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
+		}
 
 	case pb.WALEntry_DELETE_SERIES:
 		// For replicated series delete, update memtable and index state without writing to local WAL.
@@ -688,12 +566,15 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 				}
 			}
 		}
-		a.mem.DeleteSeries(entry.GetMetric(), entry.GetTags())
+		// Represent series delete as a tombstone in Memtable2 via PutRaw
+		keySeries := core.EncodeTSDBKeyWithString(entry.GetMetric(), entry.GetTags(), -1)
+		_ = a.mem.PutRaw(keySeries, nil, core.EntryTypeDelete, 0)
 
 	case pb.WALEntry_DELETE_RANGE:
 		// Apply range delete directly to memtable without writing to WAL.
 		for ts := entry.GetStartTime(); ts <= entry.GetEndTime(); ts++ {
-			a.mem.Delete(entry.GetMetric(), entry.GetTags(), ts)
+			key := core.EncodeTSDBKeyWithString(entry.GetMetric(), entry.GetTags(), ts)
+			_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
 		}
 
 	default:
@@ -880,7 +761,7 @@ func (a *Engine2Adapter) SetMaxChunkBytes(n int) {
 func (a *Engine2Adapter) Lock()   { a.providerLock.Lock() }
 func (a *Engine2Adapter) Unlock() { a.providerLock.Unlock() }
 
-func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable, newMemtable *memtable.Memtable) {
+func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable2, newMemtable *memtable.Memtable2) {
 	// Called while provider lock is held. Swap engine2's active memtable with
 	// a fresh one and return a top-level memtable snapshot suitable for the
 	// snapshot manager.
@@ -891,99 +772,18 @@ func (a *Engine2Adapter) GetMemtablesForFlush() (memtables []*memtable.Memtable,
 	// Swap engine2's memtable under its own lock to keep invariants.
 	a.Engine2.mu.Lock()
 	old := a.Engine2.mem
-	a.Engine2.mem = NewMemtable()
+	a.Engine2.mem = memtable.NewMemtable2(a.memtableThreshold, a.clk)
 	a.Engine2.mu.Unlock()
 
 	if old == nil {
 		return nil, nil
 	}
 
-	// Convert engine2.Memtable -> top-level memtable.Memtable
-	// Use configured threshold and clock so the resulting memtable doesn't
-	// immediately trigger IsFull during snapshot operations.
-	top := memtable.NewMemtable(a.memtableThreshold, a.clk)
-
-	// First pass: collect unique strings to batch-create IDs and avoid
-	// many small write+sync operations during snapshot conversion.
-	unique := make(map[string]struct{})
-	old.mu.RLock()
-	for metric, tagMap := range old.data {
-		unique[metric] = struct{}{}
-		for tagKey := range tagMap {
-			tags := parseTagsFromKey(tagKey)
-			for k, v := range tags {
-				unique[k] = struct{}{}
-				unique[v] = struct{}{}
-			}
-		}
-	}
-	old.mu.RUnlock()
-
-	idMap := make(map[string]uint64)
-	if a.stringStore != nil && len(unique) > 0 {
-		// Build slice of unique strings
-		list := make([]string, 0, len(unique))
-		for s := range unique {
-			list = append(list, s)
-		}
-		// Use concrete batch API when available
-		if ss, ok := a.stringStore.(*indexer.StringStore); ok {
-			ids, err := ss.AddStringsBatch(list)
-			if err == nil {
-				for i, s := range list {
-					idMap[s] = ids[i]
-				}
-			} else {
-				idMap = make(map[string]uint64)
-			}
-		}
-	}
-
-	// Second pass: build keys using the idMap (fall back to per-call creation).
-	old.mu.RLock()
-	for metric, tagMap := range old.data {
-		for tagKey, tsMap := range tagMap {
-			tags := parseTagsFromKey(tagKey)
-			// attempt to ensure IDs for metric and tag strings in batch
-			strs := make([]string, 0, len(tags)+1)
-			strs = append(strs, metric)
-			for k, v := range tags {
-				strs = append(strs, k, v)
-			}
-			a.ensureIDs(idMap, strs)
-			var metricID uint64
-			metricID, _ = a.getOrCreateIDFromMap(idMap, metric)
-			var pairs []core.EncodedSeriesTagPair
-			for k, v := range tags {
-				var kid, vid uint64
-				kid, _ = a.getOrCreateIDFromMap(idMap, k)
-				vid, _ = a.getOrCreateIDFromMap(idMap, v)
-				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
-			}
-			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
-
-			for ts, fv := range tsMap {
-				key := core.EncodeTSDBKey(metricID, pairs, ts)
-				if len(fv) == 0 {
-					// tombstone
-					_ = top.Put(key, nil, core.EntryTypeDelete, 0)
-				} else {
-					vb, encErr := fv.Encode()
-					if encErr != nil {
-						old.mu.RUnlock()
-						return nil, nil
-					}
-					_ = top.Put(key, vb, core.EntryTypePutEvent, 0)
-				}
-			}
-		}
-	}
-	old.mu.RUnlock()
-
-	return []*memtable.Memtable{top}, nil
+	// Return the Memtable2 instance for flushing.
+	return []*memtable.Memtable2{old}, nil
 }
 
-func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable, parentCtx context.Context) error {
+func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx context.Context) error {
 	if mem == nil {
 		return nil
 	}
@@ -1059,36 +859,87 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable, parentCtx con
 	blockDir := filepath.Join(a.dataRoot, "blocks", fmt.Sprintf("%d", id))
 	if err := os.MkdirAll(blockDir, 0o755); err == nil {
 		// Build named series by iterating the memtable so index contains real data
-		namedMap := make(map[string]NamedSeries)
-		samples := make(map[string]*bytes.Buffer)
-		mins := make(map[string]int64)
-		maxs := make(map[string]int64)
+		// We must NOT call into `a.stringStore` while holding the memtable's
+		// read lock because other code paths acquire string-store locks first
+		// and then try to write into the memtable (PutRaw). Acquiring locks in
+		// the opposite order causes lock-order inversion and deadlocks. To
+		// avoid that, collect lightweight decoded metadata while holding the
+		// memtable RLock, then release the iterator and perform string-store
+		// lookups afterward.
+		type collectedEntry struct {
+			seriesKey []byte
+			metricID  uint64
+			pairs     []core.EncodedSeriesTagPair
+			ts        int64
+			value     []byte
+			entryType core.EntryType
+		}
+
+		collected := make([]collectedEntry, 0)
 		iter := mem.NewIterator(nil, nil, types.Ascending)
-		defer iter.Close()
 		for iter.Next() {
 			node, _ := iter.At()
 			k := node.Key
 			if len(k) < 8 {
 				continue
 			}
-			seriesKey := k[:len(k)-8] // strip timestamp
+			seriesKey := make([]byte, len(k)-8)
+			copy(seriesKey, k[:len(k)-8]) // copy to retain after iterator close
 			// decode timestamp from key (last 8 bytes, big-endian)
 			ts := int64(binary.BigEndian.Uint64(k[len(k)-8:]))
 			metricID, pairs, derr := core.DecodeSeriesKey(seriesKey)
 			if derr != nil {
 				continue
 			}
-			metricName, _ := a.stringStore.GetString(metricID)
+			// copy value if present
+			var valCopy []byte
+			if len(node.Value) > 0 {
+				valCopy = make([]byte, len(node.Value))
+				copy(valCopy, node.Value)
+			}
+			// copy pairs slice
+			pairsCopy := make([]core.EncodedSeriesTagPair, len(pairs))
+			copy(pairsCopy, pairs)
+
+			collected = append(collected, collectedEntry{
+				seriesKey: seriesKey,
+				metricID:  metricID,
+				pairs:     pairsCopy,
+				ts:        ts,
+				value:     valCopy,
+				entryType: node.EntryType,
+			})
+		}
+		// release memtable read lock by closing iterator before calling string-store
+		_ = iter.Close()
+
+		namedMap := make(map[string]NamedSeries)
+		samples := make(map[string]*bytes.Buffer)
+		mins := make(map[string]int64)
+		maxs := make(map[string]int64)
+
+		// Now that we're no longer holding the memtable read lock, resolve
+		// string IDs to strings and populate the namedMap/samples structures.
+		for _, e := range collected {
+			seriesKey := e.seriesKey
+			metricID := e.metricID
+			pairs := e.pairs
+			metricName := ""
+			if a.stringStore != nil {
+				metricName, _ = a.stringStore.GetString(metricID)
+			}
 			lbls := make(map[string]string, len(pairs)+1)
 			lbls["__name__"] = metricName
 			for _, p := range pairs {
-				kstr, _ := a.stringStore.GetString(p.KeyID)
-				vstr, _ := a.stringStore.GetString(p.ValueID)
+				var kstr, vstr string
+				if a.stringStore != nil {
+					kstr, _ = a.stringStore.GetString(p.KeyID)
+					vstr, _ = a.stringStore.GetString(p.ValueID)
+				}
 				lbls[kstr] = vstr
 			}
 			keyStr := string(seriesKey)
-			// append sample to per-series buffer if this is a Put event
-			if node.EntryType == core.EntryTypePutEvent && len(node.Value) > 0 {
+			if e.entryType == core.EntryTypePutEvent && len(e.value) > 0 {
 				sb := samples[keyStr]
 				if sb == nil {
 					sb = &bytes.Buffer{}
@@ -1096,16 +947,16 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable, parentCtx con
 				}
 				// write timestamp + length + payload
 				tsb := make([]byte, 8)
-				binary.BigEndian.PutUint64(tsb, uint64(ts))
+				binary.BigEndian.PutUint64(tsb, uint64(e.ts))
 				sb.Write(tsb)
 				tmp := make([]byte, binary.MaxVarintLen64)
-				n := binary.PutUvarint(tmp, uint64(len(node.Value)))
+				n := binary.PutUvarint(tmp, uint64(len(e.value)))
 				sb.Write(tmp[:n])
-				sb.Write(node.Value)
+				sb.Write(e.value)
 				if _, ok := mins[keyStr]; !ok {
-					mins[keyStr] = ts
+					mins[keyStr] = e.ts
 				}
-				maxs[keyStr] = ts
+				maxs[keyStr] = e.ts
 			}
 			if _, ok := namedMap[keyStr]; !ok {
 				namedMap[keyStr] = NamedSeries{Labels: lbls, Chunks: nil}
@@ -1154,7 +1005,7 @@ func (a *Engine2Adapter) GetRangeTombstones() map[string][]core.RangeTombstone {
 // MoveToDLQ writes the contents of a memtable to the engine's DLQ directory.
 // This mirrors the behavior of the legacy engine.moveToDLQ helper and is
 // intended for tests that need to verify DLQ behavior.
-func (a *Engine2Adapter) MoveToDLQ(mem *memtable.Memtable) error {
+func (a *Engine2Adapter) MoveToDLQ(mem *memtable.Memtable2) error {
 	// Consider DLQ not configured if engine backing data root is empty.
 	if a.Engine2 == nil || (a.Engine2 != nil && a.Engine2.GetDataRoot() == "") {
 		return fmt.Errorf("DLQ directory not configured")
@@ -1617,6 +1468,21 @@ func (a *Engine2Adapter) GetKnownSSTables() ([]SSTableManifestEntry, error) {
 		return nil, nil
 	}
 	return a.manifestMgr.ListEntries(), nil
+}
+
+// isSeriesDeleted checks whether the given seriesKey has been marked as deleted
+// at or before the provided dataPointSeq number.
+func (a *Engine2Adapter) isSeriesDeleted(seriesKey []byte, dataPointSeq uint64) bool {
+	a.deletedSeriesMu.RLock()
+	defer a.deletedSeriesMu.RUnlock()
+	dseq, ok := a.deletedSeries[string(seriesKey)]
+	if !ok {
+		return false
+	}
+	if dataPointSeq == 0 {
+		return true
+	}
+	return dataPointSeq <= dseq
 }
 
 // addActiveSeries tracks a new active time series in-memory.

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/memtable"
 	"github.com/INLOpen/nexusbase/sys"
+	"github.com/INLOpen/nexuscore/utils/clock"
 )
 
 var (
@@ -26,7 +28,7 @@ type Engine2 struct {
 	dataRoot string
 	mu       sync.Mutex
 	wal      *WAL
-	mem      *Memtable
+	mem      *memtable.Memtable2
 }
 
 // NewEngine2 constructs a new Engine2 rooted at dataRoot.
@@ -43,11 +45,13 @@ func NewEngine2(dataRoot string) (*Engine2, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WAL: %w", err)
 	}
-	m := NewMemtable()
+	m := memtable.NewMemtable2(1<<30, clock.SystemClockDefault)
 
-	// replay WAL into memtable
+	// replay WAL into memtable (Memtable2 expects DataPoint-centric Put)
 	if err := w.Replay(func(dp *core.DataPoint) error {
-		m.Put(dp)
+		if err := m.Put(dp); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to replay WAL: %w", err)

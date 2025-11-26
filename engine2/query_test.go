@@ -3,6 +3,7 @@ package engine2
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 )
@@ -16,18 +17,21 @@ func TestQueryAndDeletes(t *testing.T) {
 	ad := NewEngine2Adapter(eng)
 	defer ad.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
 	// insert points
 	for i := int64(0); i < 5; i++ {
 		fv, _ := core.NewFieldValuesFromMap(map[string]interface{}{"v": i})
 		dp := core.DataPoint{Metric: "m", Tags: map[string]string{"k": "v"}, Timestamp: 1000 + i, Fields: fv}
-		if err := ad.Put(context.Background(), dp); err != nil {
+		if err := ad.Put(ctx, dp); err != nil {
 			t.Fatalf("Put failed: %v", err)
 		}
 	}
 
 	// Query time range
 	qp := core.QueryParams{Metric: "m", StartTime: 1000, EndTime: 1004, Tags: map[string]string{"k": "v"}}
-	it, err := ad.Query(context.Background(), qp)
+	it, err := ad.Query(ctx, qp)
 	if err != nil {
 		t.Fatalf("Query failed: %v", err)
 	}
@@ -47,11 +51,11 @@ func TestQueryAndDeletes(t *testing.T) {
 	}
 
 	// delete a point
-	if err := ad.Delete(context.Background(), "m", map[string]string{"k": "v"}, 1002); err != nil {
+	if err := ad.Delete(ctx, "m", map[string]string{"k": "v"}, 1002); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	// query again
-	it2, _ := ad.Query(context.Background(), qp)
+	it2, _ := ad.Query(ctx, qp)
 	cnt2 := 0
 	for it2.Next() {
 		itm, _ := it2.At()
@@ -65,10 +69,10 @@ func TestQueryAndDeletes(t *testing.T) {
 	}
 
 	// delete series
-	if err := ad.DeleteSeries(context.Background(), "m", map[string]string{"k": "v"}); err != nil {
+	if err := ad.DeleteSeries(ctx, "m", map[string]string{"k": "v"}); err != nil {
 		t.Fatalf("DeleteSeries failed: %v", err)
 	}
-	it3, _ := ad.Query(context.Background(), qp)
+	it3, _ := ad.Query(ctx, qp)
 	if it3.Next() {
 		t.Fatalf("expected no results after DeleteSeries")
 	}

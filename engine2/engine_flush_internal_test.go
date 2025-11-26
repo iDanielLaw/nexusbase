@@ -27,11 +27,11 @@ func Test_MoveToDLQ(t *testing.T) {
 		require.NoError(t, a.Start())
 		defer a.Close()
 
-		mem := memtable.NewMemtable(1024, a.clk)
-		// Use adapter string store to create a realistic key
-		metricID, _ := a.stringStore.GetOrCreateID("dlq.metric.1")
-		key := core.EncodeTSDBKey(metricID, nil, 100)
-		mem.Put(key, []byte("value1"), core.EntryTypePutEvent, 10)
+		mem := memtable.NewMemtable2(1024, a.clk)
+		// Use DataPoint-centric API for Memtable2
+		pv, _ := core.NewPointValue("value1")
+		dp := &core.DataPoint{Metric: "dlq.metric.1", Tags: nil, Timestamp: 100, Fields: core.FieldValues{"v": pv}}
+		mem.Put(dp)
 
 		err = a.MoveToDLQ(mem)
 		require.NoError(t, err)
@@ -54,7 +54,7 @@ func Test_MoveToDLQ(t *testing.T) {
 		require.NoError(t, a.Start())
 		defer a.Close()
 
-		mem := memtable.NewMemtable(1024, a.clk)
+		mem := memtable.NewMemtable2(1024, a.clk)
 
 		err = a.MoveToDLQ(mem)
 		require.NoError(t, err)
@@ -79,8 +79,10 @@ func Test_MoveToDLQ(t *testing.T) {
 		// Simulate not configured by clearing engine data root
 		a.Engine2 = &Engine2{} // zero-value Engine2 -> GetDataRoot() should be empty
 
-		mem := memtable.NewMemtable(1024, a.clk)
-		mem.Put([]byte("key"), []byte("val"), core.EntryTypePutEvent, 1)
+		mem := memtable.NewMemtable2(1024, a.clk)
+		pv, _ := core.NewPointValue("val")
+		dp := &core.DataPoint{Metric: "metric.key", Tags: nil, Timestamp: 1, Fields: core.FieldValues{"f": pv}}
+		mem.Put(dp)
 
 		err = a.MoveToDLQ(mem)
 		require.Error(t, err)
@@ -97,10 +99,10 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 		require.NoError(t, a.Start())
 		defer a.Close()
 
-		mem := memtable.NewMemtable(1024, a.clk)
-		metricID, _ := a.stringStore.GetOrCreateID("metric.test")
-		key := core.EncodeTSDBKey(metricID, nil, 12345)
-		mem.Put(key, []byte("v"), core.EntryTypePutEvent, 1)
+		mem := memtable.NewMemtable2(1024, a.clk)
+		pv, _ := core.NewPointValue("v")
+		dp := &core.DataPoint{Metric: "metric.test", Tags: nil, Timestamp: 12345, Fields: core.FieldValues{"v": pv}}
+		mem.Put(dp)
 
 		// Attempt flush: should succeed on first try
 		err = processImmutableUsingAdapter(a, mem, localMaxFlushRetries)
@@ -124,10 +126,10 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 		a.TestingOnlyFailFlushCount = new(atomic.Int32)
 		a.TestingOnlyFailFlushCount.Store(1)
 
-		mem := memtable.NewMemtable(1024, a.clk)
-		metricID, _ := a.stringStore.GetOrCreateID("metric.retry")
-		key := core.EncodeTSDBKey(metricID, nil, 67890)
-		mem.Put(key, []byte("v"), core.EntryTypePutEvent, 1)
+		mem := memtable.NewMemtable2(1024, a.clk)
+		pv, _ := core.NewPointValue("val")
+		dp := &core.DataPoint{Metric: "metric.key", Tags: nil, Timestamp: 1, Fields: core.FieldValues{"f": pv}}
+		mem.Put(dp)
 
 		err = processImmutableUsingAdapter(a, mem, localMaxFlushRetries)
 		require.NoError(t, err)
@@ -146,10 +148,10 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 		a.TestingOnlyFailFlushCount = new(atomic.Int32)
 		a.TestingOnlyFailFlushCount.Store(int32(localMaxFlushRetries))
 
-		mem := memtable.NewMemtable(1024, a.clk)
-		metricID, _ := a.stringStore.GetOrCreateID("metric.dlq")
-		key := core.EncodeTSDBKey(metricID, nil, 11111)
-		mem.Put(key, []byte("v"), core.EntryTypePutEvent, 1)
+		mem := memtable.NewMemtable2(1024, a.clk)
+		pv, _ := core.NewPointValue("v")
+		dp := &core.DataPoint{Metric: "metric.dlq", Tags: nil, Timestamp: 11111, Fields: core.FieldValues{"v": pv}}
+		mem.Put(dp)
 
 		err = processImmutableUsingAdapter(a, mem, localMaxFlushRetries)
 		// Should return error after exhausting retries
@@ -174,13 +176,13 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 		a.TestingOnlyFailFlushCount = new(atomic.Int32)
 		a.TestingOnlyFailFlushCount.Store(5) // fail more than max
 
-		mem := memtable.NewMemtable(1024, a.clk)
-		metricID, _ := a.stringStore.GetOrCreateID("metric.shutdown")
-		key := core.EncodeTSDBKey(metricID, nil, 22222)
-		mem.Put(key, []byte("v"), core.EntryTypePutEvent, 1)
+		mem := memtable.NewMemtable2(1024, a.clk)
+		pv, _ := core.NewPointValue("v")
+		dp := &core.DataPoint{Metric: "metric.shutdown", Tags: nil, Timestamp: 22222, Fields: core.FieldValues{"v": pv}}
+		mem.Put(dp)
 
 		// Simulate background processing with shutdown requeue
-		var requeue []*memtable.Memtable
+		var requeue []*memtable.Memtable2
 		shutdownCh := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -202,7 +204,7 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 					// continue retrying (no delay for test)
 				case <-shutdownCh:
 					// requeue at front
-					requeue = append([]*memtable.Memtable{mem}, requeue...)
+					requeue = append([]*memtable.Memtable2{mem}, requeue...)
 					return
 				}
 			}
@@ -220,7 +222,7 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 
 // processImmutableUsingAdapter attempts to flush the memtable using the adapter
 // and performs retries up to maxRetries. It increments mem.FlushRetries on each failure.
-func processImmutableUsingAdapter(a *Engine2Adapter, mem *memtable.Memtable, maxRetries int) error {
+func processImmutableUsingAdapter(a *Engine2Adapter, mem *memtable.Memtable2, maxRetries int) error {
 	for {
 		if err := a.FlushMemtableToL0(mem, context.Background()); err == nil {
 			return nil

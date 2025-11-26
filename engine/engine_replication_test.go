@@ -113,7 +113,7 @@ func (m *mockStorageEngine) applyDeleteRange(ctx context.Context, entry *proto.W
 func TestApplyReplicatedEntry_PutEvent(t *testing.T) {
 	se := &storageEngine{
 		metrics:         &EngineMetrics{},
-		mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+		mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 		stringStore:     &mockStringStore{},
 		seriesIDStore:   &mockSeriesIDStore{},
 		tagIndexManager: &mockTagIndexManager{},
@@ -132,7 +132,7 @@ func TestApplyReplicatedEntry_PutEvent(t *testing.T) {
 func TestApplyReplicatedEntry_DeleteSeries(t *testing.T) {
 	se := &storageEngine{
 		metrics:         &EngineMetrics{},
-		mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+		mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 		stringStore:     &mockStringStore{},
 		seriesIDStore:   &mockSeriesIDStore{},
 		tagIndexManager: &mockTagIndexManager{},
@@ -152,7 +152,7 @@ func TestApplyReplicatedEntry_DeleteSeries(t *testing.T) {
 func TestApplyReplicatedEntry_DeleteRange(t *testing.T) {
 	se := &storageEngine{
 		metrics:         &EngineMetrics{},
-		mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+		mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 		stringStore:     &mockStringStore{},
 		seriesIDStore:   &mockSeriesIDStore{},
 		tagIndexManager: &mockTagIndexManager{},
@@ -172,7 +172,7 @@ func TestApplyReplicatedEntry_DeleteRange(t *testing.T) {
 func TestApplyReplicatedEntry_NonFollower(t *testing.T) {
 	se := &storageEngine{
 		metrics:         &EngineMetrics{},
-		mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+		mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 		stringStore:     &mockStringStore{},
 		seriesIDStore:   &mockSeriesIDStore{},
 		tagIndexManager: &mockTagIndexManager{},
@@ -191,7 +191,7 @@ func TestApplyReplicatedEntry_NonFollower(t *testing.T) {
 func TestApplyReplicatedEntry_UnknownType(t *testing.T) {
 	se := &storageEngine{
 		metrics:         &EngineMetrics{},
-		mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+		mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 		stringStore:     &mockStringStore{},
 		seriesIDStore:   &mockSeriesIDStore{},
 		tagIndexManager: &mockTagIndexManager{},
@@ -280,7 +280,7 @@ func TestReplication_Integrated(t *testing.T) {
 	leader := &mockStorageEngine{
 		storageEngine: &storageEngine{
 			metrics:         &EngineMetrics{},
-			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 			stringStore:     &mockStringStore{},
 			seriesIDStore:   &mockSeriesIDStore{},
 			tagIndexManager: &mockTagIndexManager{},
@@ -294,7 +294,7 @@ func TestReplication_Integrated(t *testing.T) {
 	follower := &mockStorageEngine{
 		storageEngine: &storageEngine{
 			metrics:         &EngineMetrics{},
-			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 			stringStore:     &mockStringStore{},
 			seriesIDStore:   &mockSeriesIDStore{},
 			tagIndexManager: &mockTagIndexManager{},
@@ -334,7 +334,7 @@ func TestReplication_E2E(t *testing.T) {
 	leader := &mockStorageEngine{
 		storageEngine: &storageEngine{
 			metrics:         &EngineMetrics{},
-			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 			stringStore:     &mockStringStore{},
 			seriesIDStore:   &mockSeriesIDStore{},
 			tagIndexManager: &mockTagIndexManager{},
@@ -348,7 +348,7 @@ func TestReplication_E2E(t *testing.T) {
 	follower := &mockStorageEngine{
 		storageEngine: &storageEngine{
 			metrics:         &EngineMetrics{},
-			mutableMemtable: memtable.NewMemtable(1000, clock.SystemClockDefault),
+			mutableMemtable: memtable.NewMemtable2(1000, clock.SystemClockDefault),
 			stringStore:     &mockStringStore{},
 			seriesIDStore:   &mockSeriesIDStore{},
 			tagIndexManager: &mockTagIndexManager{},

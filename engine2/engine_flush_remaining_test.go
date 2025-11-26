@@ -106,9 +106,9 @@ func TestAdapter_FlushRemainingMemtables_Equivalent(t *testing.T) {
 	defer a.Close()
 
 	// Create one immutable-like memtable (flush directly) and one mutable (put+swap)
-	imm := memtable.NewMemtable(1<<20, a.clk)
+	imm := memtable.NewMemtable2(1<<20, a.clk)
 	metricID, _ := a.stringStore.GetOrCreateID("imm.metric")
-	imm.Put(core.EncodeTSDBKey(metricID, nil, 100), []byte("imm_val"), core.EntryTypePutEvent, 1)
+	imm.PutRaw(core.EncodeTSDBKey(metricID, nil, 100), []byte("imm_val"), core.EntryTypePutEvent, 1)
 
 	// Flush immutable memtable
 	require.NoError(t, a.FlushMemtableToL0(imm, context.Background()))

@@ -117,11 +117,11 @@ type storageEngine struct {
 	replicationMode               string
 	stateLoader                   *StateLoader
 	serviceManager                *ServiceManager
-	mutableMemtable               *memtable.Memtable
+	mutableMemtable               *memtable.Memtable2
 	processImmutableMemtablesFunc func(writeCheckpoint bool)
 	triggerPeriodicFlushFunc      func()
 	syncMetadataFunc              func()
-	immutableMemtables            []*memtable.Memtable
+	immutableMemtables            []*memtable.Memtable2
 
 	wal           wal.WALInterface
 	levelsManager levels.Manager
@@ -207,7 +207,7 @@ func initializeStorageEngine(opts StorageEngineOptions) (engine *storageEngine, 
 		validator:          core.NewValidator(),
 		opts:               opts,
 		replicationMode:    opts.ReplicationMode,
-		immutableMemtables: make([]*memtable.Memtable, 0),
+		immutableMemtables: make([]*memtable.Memtable2, 0),
 		flushChan:          make(chan struct{}, 1),
 		forceFlushChan:     make(chan chan error),
 		shutdownChan:       make(chan struct{}),
@@ -710,7 +710,7 @@ func (e *storageEngine) initializeMetrics() {
 }
 
 func (e *storageEngine) initializeLSMTreeComponents() error {
-	e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+	e.mutableMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock)
 	onEvictedWithHook := func(key string, value interface{}) {
 		if buf, ok := value.(*bytes.Buffer); ok {
 			core.BufferPool.Put(buf)

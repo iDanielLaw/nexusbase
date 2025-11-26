@@ -365,7 +365,7 @@ func (e *storageEngine) delete(ctx context.Context, key []byte) error {
 	}
 
 	e.mu.Lock()
-	if err := e.mutableMemtable.Put(keyCopy, nil, core.EntryTypeDelete, currentSeqNum); err != nil {
+	if err := e.mutableMemtable.PutRaw(keyCopy, nil, core.EntryTypeDelete, currentSeqNum); err != nil {
 		e.mu.Unlock()
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "memtable_delete_failed")
@@ -374,7 +374,7 @@ func (e *storageEngine) delete(ctx context.Context, key []byte) error {
 
 	if e.mutableMemtable.IsFull() {
 		e.immutableMemtables = append(e.immutableMemtables, e.mutableMemtable)
-		e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+		e.mutableMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock)
 		select {
 		case e.flushChan <- struct{}{}:
 		default:
@@ -738,7 +738,7 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 	defer e.mu.Unlock()
 
 	for i, entry := range walEntries {
-		if err := e.mutableMemtable.Put(entry.Key, entry.Value, entry.EntryType, entry.SeqNum); err != nil {
+		if err := e.mutableMemtable.PutRaw(entry.Key, entry.Value, entry.EntryType, entry.SeqNum); err != nil {
 			// This is a critical, unrecoverable state. The WAL contains entries that are not in the memtable.
 			// The application should probably panic to force a restart, where it will recover from the WAL.
 			e.logger.Error("CRITICAL: In-memory state is now inconsistent with WAL. A memtable write failed after a successful batch WAL write. Manual intervention or a restart is required.", "key", string(entry.Key), "error", err)
@@ -755,7 +755,7 @@ func (e *storageEngine) PutBatch(ctx context.Context, points []core.DataPoint) (
 		e.mutableMemtable.LastWALSegmentIndex = e.wal.ActiveSegmentIndex()
 
 		e.immutableMemtables = append(e.immutableMemtables, e.mutableMemtable)
-		e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+		e.mutableMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock)
 		select {
 		case e.flushChan <- struct{}{}:
 		default:
@@ -1565,7 +1565,7 @@ func (e *storageEngine) ForceFlush(ctx context.Context, wait bool) error {
 			// Before moving the memtable, record which WAL segment it belongs to.
 			e.mutableMemtable.LastWALSegmentIndex = e.wal.ActiveSegmentIndex()
 			e.immutableMemtables = append(e.immutableMemtables, e.mutableMemtable)
-			e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+			e.mutableMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock)
 
 			// Signal the background flush loop to process the queue.
 			// This is non-blocking.

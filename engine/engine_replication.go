@@ -58,7 +58,7 @@ func (e *storageEngine) ApplyReplicatedEntry(ctx context.Context, entry *pb.WALE
 			e.mutableMemtable.LastWALSegmentIndex = e.wal.ActiveSegmentIndex()
 		}
 		e.immutableMemtables = append(e.immutableMemtables, e.mutableMemtable)
-		e.mutableMemtable = memtable.NewMemtable(e.opts.MemtableThreshold, e.clock)
+		e.mutableMemtable = memtable.NewMemtable2(e.opts.MemtableThreshold, e.clock)
 		select {
 		case e.flushChan <- struct{}{}:
 		default:
@@ -164,7 +164,7 @@ func (e *storageEngine) applyPutEvent(ctx context.Context, entry *pb.WALEntry) e
 	valueCopy := make([]byte, len(valueBytes))
 	copy(valueCopy, valueBytes)
 
-	if err := e.mutableMemtable.Put(keyCopy, valueCopy, core.EntryTypePutEvent, entry.GetSequenceNumber()); err != nil {
+	if err := e.mutableMemtable.PutRaw(keyCopy, valueCopy, core.EntryTypePutEvent, entry.GetSequenceNumber()); err != nil {
 		e.logger.Error("CRITICAL: Failed to put replicated entry into mutable memtable.", "key", string(keyCopy), "error", err)
 		return fmt.Errorf("CRITICAL INCONSISTENCY: failed to put replicated data into memtable: %w", err)
 	}
