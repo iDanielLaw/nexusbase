@@ -2151,33 +2151,23 @@ func (a *Engine2Adapter) Start() error {
 		}
 	}
 
-	// Early detection: if legacy CURRENT/MANIFEST files are absent in the
-	// data root, many tests expect the engine to behave as if a fallback
-	// initialization occurred (sequence 0). Force the fallback-scanned
-	// marker early so WAL replay cannot cause the engine to report a
-	// non-zero sequence for these test scenarios.
-	if a.Engine2 != nil {
+	// Diagnostic: log manifest entries and data root to help debug fallback
+	// decision without forcing behavior. This is intentionally informational
+	// so we can observe why certain tests see different startup paths.
+	if a.manifestMgr != nil && a.Engine2 != nil {
+		entries := a.manifestMgr.ListEntries()
 		dataRoot := a.Engine2.GetDataRoot()
-		// If CURRENT file is missing and no files starting with MANIFEST
-		// exist in the data root, set fallback semantics.
-		if _, err := os.Stat(filepath.Join(dataRoot, core.CurrentFileName)); os.IsNotExist(err) {
-			hasManifest := false
-			if files, err := os.ReadDir(dataRoot); err == nil {
-				for _, f := range files {
-					if strings.HasPrefix(f.Name(), "MANIFEST") {
-						hasManifest = true
-						break
-					}
-				}
-			}
-			if !hasManifest {
-				a.fallbackScanned.Store(true)
-				a.sequenceNumber.Store(0)
-				didFallbackScanLocal = true
-				slog.Default().Info("Forcing fallback semantics: legacy manifest absent", "adapter_id", a.adapterID, "data_root", dataRoot)
-			}
+		// Print minimal diagnostic info to stderr so test runs capture it even
+		// when the global slog level is set to WARN. This is temporary
+		// diagnostic instrumentation to help debug fallback/startup paths.
+		fmt.Fprintf(os.Stderr, "[engine2] manifest reload summary adapter_id=%d manifest_entries=%d data_root=%s\n", a.adapterID, len(entries), dataRoot)
+		for _, me := range entries {
+			fmt.Fprintf(os.Stderr, "[engine2] manifest entry adapter_id=%d id=%d path=%s\n", a.adapterID, me.ID, me.FilePath)
 		}
 	}
+
+	// (no early forced fallback here) manifest/reload and later fallback
+	// scan logic below will decide whether to treat startup as fallback.
 	// After manifest reload, attempt to load known SSTables and register them
 	// into the LevelsManager so the engine startup path mirrors runtime state
 	// when manifest entries exist. We place manifest-discovered tables into
@@ -2197,6 +2187,14 @@ func (a *Engine2Adapter) Start() error {
 		// explicitly removed by tests (but `sstables/manifest.json` remains)
 		// we should fallback-scan the `sstables/` directory instead.
 		shouldLoadManifest := false
+		// Diagnostic: report candidate manifest load decision inputs
+		fmt.Fprintf(os.Stderr, "[engine2] manifest decision adapter_id=%d entries=%d data_root=%s\n", a.adapterID, len(entries), dataRoot)
+		// Also report whether legacy CURRENT/MANIFEST files exist under data root
+		if _, err := os.Stat(filepath.Join(dataRoot, core.CurrentFileName)); err == nil {
+			fmt.Fprintf(os.Stderr, "[engine2] legacy CURRENT present adapter_id=%d\n", a.adapterID)
+		} else {
+			fmt.Fprintf(os.Stderr, "[engine2] legacy CURRENT absent adapter_id=%d\n", a.adapterID)
+		}
 		if len(entries) > 0 {
 			// If any manifest entry references the legacy `sst/` path, prefer
 			// loading the manifest (this covers tests that create sst files
@@ -2205,7 +2203,11 @@ func (a *Engine2Adapter) Start() error {
 				if dataRoot != "" {
 					legacyPrefix := filepath.Clean(filepath.Join(dataRoot, "sst"))
 					entryDir := filepath.Clean(filepath.Dir(me.FilePath))
-					if strings.HasPrefix(entryDir, legacyPrefix) {
+					// Ensure we only treat entries under the exact legacy
+					// `sst/` directory as a signal to load the manifest.
+					// Using a plain HasPrefix matched `sstables/` incorrectly
+					// because it starts with `sst`.
+					if entryDir == legacyPrefix || strings.HasPrefix(entryDir, legacyPrefix+string(os.PathSeparator)) {
 						shouldLoadManifest = true
 						break
 					}
@@ -2229,6 +2231,8 @@ func (a *Engine2Adapter) Start() error {
 				}
 			}
 		}
+		// Diagnostic: report final decision
+		fmt.Fprintf(os.Stderr, "[engine2] shouldLoadManifest=%v adapter_id=%d\n", shouldLoadManifest, a.adapterID)
 
 		if shouldLoadManifest {
 			lm := a.GetLevelsManager()
@@ -2331,7 +2335,10 @@ func (a *Engine2Adapter) Start() error {
 		// Annotate start of WAL replay with adapter id for tracing
 		slog.Default().Info("Starting WAL replay", "adapter_id", a.adapterID)
 		// record sequence before replay so we can detect whether any WAL
-		// entries were applied. (legacy fallback enforcement handled below)
+		// entries were applied. We'll log pre/post sequence to aid
+		// diagnostics without changing behavior.
+		preSeq := a.sequenceNumber.Load()
+		fmt.Fprintf(os.Stderr, "[engine2] WAL replay pre-sequence adapter_id=%d pre_seq=%d\n", a.adapterID, preSeq)
 		// best-effort: ignore replay errors but log them via slog
 		_ = a.Engine2.wal.Replay(func(dp *core.DataPoint) error {
 			// increment sequence count
@@ -2459,10 +2466,11 @@ func (a *Engine2Adapter) Start() error {
 			}
 			return nil
 		})
+		postSeq := a.sequenceNumber.Load()
+		fmt.Fprintf(os.Stderr, "[engine2] WAL replay post-sequence adapter_id=%d post_seq=%d applied=%d\n", a.adapterID, postSeq, postSeq-preSeq)
 		// If we performed a fallback scan, enforce the legacy fallback behavior
-		// of reporting sequence number 0 regardless of WAL contents. Tests rely
-		// on this behavior when manifest files are intentionally removed to
-		// simulate legacy state recovery via fallback scanning of SSTables.
+		// of reporting sequence number 0 only when fallback scan path was taken
+		// (this preserves the less-aggressive behavior we prefer).
 		if didFallbackScanLocal {
 			a.fallbackScanned.Store(true)
 			a.sequenceNumber.Store(0)
@@ -2507,6 +2515,9 @@ func (a *Engine2Adapter) Close() error {
 	}
 	// drop memtable reference
 	a.mem = nil
+
+	// reset sequence number
+	a.sequenceNumber.Store(0)
 
 	// mark stopped
 	a.started.Store(false)
