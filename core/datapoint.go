@@ -1,7 +1,5 @@
 package core
 
-import "fmt"
-
 // DataPoint represents a single structured data point or event.
 // It is the canonical representation of data within the system,
 // consolidating the previously separate DataPoint and PushStatement concepts.
@@ -43,22 +41,16 @@ func (dp *DataPoint) GetField(key string) (PointValue, bool) {
 }
 
 func ValidateMetricAndTags(validator *Validator, metric string, tags map[string]string) error {
-	// DEBUG: print inputs to help diagnose unexpected validation behavior in tests
-	fmt.Printf("[debug ValidateMetricAndTags] metric='%s' tags=%v\n", metric, tags)
 	if err := validator.ValidateMetricName(metric); err != nil {
-		fmt.Printf("[debug ValidateMetricAndTags] metric validation error: %v\n", err)
 		return err
 	}
 	for k, v := range tags {
 		if err := validator.ValidateLabelName(k); err != nil {
-			fmt.Printf("[debug ValidateMetricAndTags] label name validation error for '%s': %v\n", k, err)
 			return err
 		}
 		if err := ValidateLabelValue(v); err != nil {
-			fmt.Printf("[debug ValidateMetricAndTags] label value validation error for '%s': %v\n", k, err)
 			return err
 		}
 	}
-	fmt.Printf("[debug ValidateMetricAndTags] validation passed\n")
 	return nil
 }
