@@ -176,6 +176,11 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	if a.wal == nil || a.mem == nil {
 		return fmt.Errorf("engine2 not initialized")
 	}
+	// Validate metric and tag names to mirror legacy engine behavior.
+	// Do this before writing to WAL or memtable so invalid points are rejected.
+	if vErr := core.ValidateMetricAndTags(core.NewValidator(), point.Metric, point.Tags); vErr != nil {
+		return vErr
+	}
 	if err := a.wal.Append(&point); err != nil {
 		return fmt.Errorf("wal append failed: %w", err)
 	}
@@ -242,6 +247,13 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 func (a *Engine2Adapter) PutBatch(ctx context.Context, points []core.DataPoint) error {
 	if a.wal == nil || a.mem == nil {
 		return fmt.Errorf("engine2 not initialized")
+	}
+	// Validate each datapoint's metric and tag names before mutating state.
+	for i := range points {
+		p := points[i]
+		if vErr := core.ValidateMetricAndTags(core.NewValidator(), p.Metric, p.Tags); vErr != nil {
+			return vErr
+		}
 	}
 	for i := range points {
 		p := points[i]
@@ -603,18 +615,11 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 					continue
 				}
 			}
-			// skip deleted series
-			a.deletedSeriesMu.RLock()
-			_, del := a.deletedSeries[sk]
-			a.deletedSeriesMu.RUnlock()
-			if del {
-				continue
-			}
-			res = append(res, []byte(sk))
+			// include matching series
+			res = append(res, b)
 		}
 		return res, nil
 	}
-
 	binarySeriesKeys, err := getBinarySeriesKeys()
 	if err != nil {
 		return nil, fmt.Errorf("failed to find matching series: %w", err)
@@ -1574,8 +1579,8 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 
 	// Use memtable's FlushToSSTable if available: create a writer and delegate.
 	id := a.GetNextSSTableID()
-	// Write SST files into `sst/` (tests and helpers expect SST files there)
-	sstDir := filepath.Join(a.dataRoot, "sst")
+	// Write SST files into `sstables/` (tests and helpers expect SST files there)
+	sstDir := filepath.Join(a.dataRoot, "sstables")
 	blockSize := sstable.DefaultBlockSize
 	if a.sstableDefaultBlockSize > 0 {
 		blockSize = a.sstableDefaultBlockSize
@@ -1609,6 +1614,29 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 
 	// Load SSTable to get *sstable.SSTable for levels manager
 	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: id}
+	// Diagnostic logging: show writer path, manifest path and dir contents to help
+	// debug cases where the wrong file (e.g., manifest.json) is being loaded.
+	manifestPathLoc := filepath.Join(a.dataRoot, "sstables", "manifest.json")
+	slog.Default().Info("FlushMemtableToL0: about to load sstable", "writer_path", writer.FilePath(), "manifest_path", manifestPathLoc)
+	if files, derr := os.ReadDir(sstDir); derr == nil {
+		names := make([]string, 0, len(files))
+		for _, f := range files {
+			names = append(names, f.Name())
+		}
+		slog.Default().Debug("FlushMemtableToL0: sst dir contents", "dir", sstDir, "files", strings.Join(names, ","))
+	} else {
+		slog.Default().Debug("FlushMemtableToL0: failed to read sst dir", "dir", sstDir, "err", derr)
+	}
+	sstablesDir := filepath.Join(a.dataRoot, "sstables")
+	if files2, derr2 := os.ReadDir(sstablesDir); derr2 == nil {
+		names2 := make([]string, 0, len(files2))
+		for _, f := range files2 {
+			names2 = append(names2, f.Name())
+		}
+		slog.Default().Debug("FlushMemtableToL0: sstables dir contents", "dir", sstablesDir, "files", strings.Join(names2, ","))
+	} else {
+		slog.Default().Debug("FlushMemtableToL0: failed to read sstables dir", "dir", sstablesDir, "err", derr2)
+	}
 	sst, loadErr := sstable.LoadSSTable(loadOpts)
 	if loadErr != nil {
 		_ = sys.Remove(writer.FilePath())
@@ -2449,8 +2477,16 @@ func (a *Engine2Adapter) encodeDataPointToWALEntry(dp *core.DataPoint) (*core.WA
 
 	key := core.EncodeTSDBKey(metricID, pairs, dp.Timestamp)
 
-	if len(dp.Fields) == 0 {
-		return &core.WALEntry{EntryType: core.EntryTypeDelete, Key: key, Value: nil}, nil
+	// When fields are empty/nil, encode an explicit empty FieldValues and
+	// represent it as a PutEvent so a datapoint with no fields remains
+	// queryable (tests expect presence, not a delete tombstone).
+	if dp.Fields == nil || len(dp.Fields) == 0 {
+		empty := make(core.FieldValues)
+		vb, err := empty.Encode()
+		if err != nil {
+			return nil, err
+		}
+		return &core.WALEntry{EntryType: core.EntryTypePutEvent, Key: key, Value: vb}, nil
 	}
 	vb, err := dp.Fields.Encode()
 	if err != nil {

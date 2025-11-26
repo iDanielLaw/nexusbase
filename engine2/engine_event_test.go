@@ -136,7 +136,8 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
+	for _, tc1 := range testCases {
+		tc := tc1
 		t.Run(tc.name, func(t *testing.T) {
 			opts := GetBaseOptsForTest(t, "test")
 			if tc.setupOpts != nil {
@@ -145,19 +146,25 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 
 			engine, err := NewStorageEngine(opts)
 			require.NoError(t, err)
+
+			// Validate metric and tag names using a Validator (matches legacy engine behavior)
+			// Perform validation before starting the engine to avoid interference
+			// from background processes that run during Start().
+			validator := core.NewValidator()
+			vErr := core.ValidateMetricAndTags(validator, tc.metric, tc.tags)
+			t.Logf("[debug test] vErr=%v", vErr)
+
 			err = engine.Start()
 			require.NoError(t, err)
 			defer engine.Close()
-
-			// Validate metric and tag names using a Validator (matches legacy engine behavior)
-			validator := core.NewValidator()
-			vErr := core.ValidateMetricAndTags(validator, tc.metric, tc.tags)
 			if tc.wantErr {
+				t.Logf("[debug test] vErr before assert: %T %#v", vErr, vErr)
 				require.Error(t, vErr)
 				if tc.wantErrType != nil {
 					assert.ErrorAs(t, vErr, &tc.wantErrType)
 				}
 			} else {
+				t.Logf("[debug test] vErr before assert (expect nil): %T %#v", vErr, vErr)
 				require.NoError(t, vErr)
 			}
 
