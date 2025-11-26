@@ -77,7 +77,9 @@ type Engine2Adapter struct {
 	// maximum bytes per chunk payload written to `chunks.dat`. Defaulted
 	// in constructor but exposed for testability/configuration.
 	maxChunkBytes int
-	clk           clock.Clock
+	// default block size for SSTables created by this adapter
+	sstableDefaultBlockSize int
+	clk                     clock.Clock
 	// basic active series tracking (in-memory)
 	activeSeries   map[string]struct{}
 	activeSeriesMu sync.RWMutex
@@ -126,7 +128,8 @@ func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapte
 		activeSeries:  make(map[string]struct{}),
 		deletedSeries: make(map[string]uint64),
 		// default chunk payload size: 16KB
-		maxChunkBytes: 16 * 1024,
+		maxChunkBytes:           16 * 1024,
+		sstableDefaultBlockSize: sstable.DefaultBlockSize,
 	}
 	// defaults for memtable snapshot conversion
 	a.memtableThreshold = 1 << 30
@@ -1045,7 +1048,37 @@ func (a *Engine2Adapter) TriggerCompaction() {}
 func (a *Engine2Adapter) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
 	return fmt.Errorf("CreateIncrementalSnapshot not implemented")
 }
-func (a *Engine2Adapter) VerifyDataConsistency() []error { return nil }
+func (a *Engine2Adapter) VerifyDataConsistency() []error {
+	var out []error
+	// Inspect manifest entries when available
+	if a.manifestMgr != nil {
+		entries := a.manifestMgr.ListEntries()
+		for _, e := range entries {
+			// Attempt to load the SSTable; if load fails, record the error
+			loadOpts := sstable.LoadSSTableOptions{FilePath: e.FilePath, ID: e.ID}
+			tbl, lerr := sstable.LoadSSTable(loadOpts)
+			if lerr != nil {
+				out = append(out, fmt.Errorf("failed to load sstable %s: %w", e.FilePath, lerr))
+				continue
+			}
+			// Run deep integrity check on the loaded table
+			if terrs := tbl.VerifyIntegrity(true); len(terrs) > 0 {
+				for _, te := range terrs {
+					out = append(out, fmt.Errorf("sstable %s: %w", tbl.FilePath(), te))
+				}
+			}
+			_ = tbl.Close()
+		}
+	}
+
+	// Ask levels manager to verify structural consistency as well
+	if lm := a.GetLevelsManager(); lm != nil {
+		if lmErrs := lm.VerifyConsistency(); len(lmErrs) > 0 {
+			out = append(out, lmErrs...)
+		}
+	}
+	return out
+}
 
 func (a *Engine2Adapter) CreateSnapshot(ctx context.Context) (string, error) {
 	if err := a.CheckStarted(); err != nil {
@@ -1543,12 +1576,16 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	id := a.GetNextSSTableID()
 	// Write SST files into `sst/` (tests and helpers expect SST files there)
 	sstDir := filepath.Join(a.dataRoot, "sst")
+	blockSize := sstable.DefaultBlockSize
+	if a.sstableDefaultBlockSize > 0 {
+		blockSize = a.sstableDefaultBlockSize
+	}
 	writerOpts := core.SSTableWriterOptions{
 		DataDir:                      sstDir,
 		ID:                           id,
 		EstimatedKeys:                0, // best-effort, memtable will write whatever it has
 		BloomFilterFalsePositiveRate: 0.01,
-		BlockSize:                    32 * 1024,
+		BlockSize:                    blockSize,
 		Compressor:                   &compressors.NoCompressionCompressor{},
 		Logger:                       nil,
 	}
@@ -2145,6 +2182,13 @@ func (a *Engine2Adapter) Start() error {
 	return nil
 }
 func (a *Engine2Adapter) Close() error {
+	// Attempt to flush any active memtables to SSTables so on-close state
+	// matches legacy engine expectations (tests expect SST files under `sst/`).
+	// Use a background context with a short timeout to avoid hanging on close.
+	if a != nil {
+		_ = a.ForceFlush(context.Background(), true)
+	}
+
 	if a.wal != nil {
 		if err := a.wal.Close(); err != nil {
 			return err

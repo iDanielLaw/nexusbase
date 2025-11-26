@@ -35,6 +35,11 @@ func NewStorageEngine(opts StorageEngineOptions) (StorageEngineInterface, error)
 	if opts.Metrics != nil {
 		a.metrics = opts.Metrics
 	}
+	// propagate SSTable block size from provided options so tests can control
+	// how many blocks are produced during memtable flushes.
+	if opts.SSTableDefaultBlockSize > 0 {
+		a.sstableDefaultBlockSize = opts.SSTableDefaultBlockSize
+	}
 	return a, nil
 }
 
