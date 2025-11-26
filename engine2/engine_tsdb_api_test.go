@@ -12,6 +12,7 @@ import (
 	"github.com/INLOpen/nexuscore/utils/clock"
 
 	"github.com/INLOpen/nexusbase/core"
+
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/stretchr/testify/assert"

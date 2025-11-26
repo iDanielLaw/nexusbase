@@ -11,6 +11,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
+
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/stretchr/testify/require"
 )

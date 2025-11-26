@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

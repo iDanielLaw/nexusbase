@@ -3,36 +3,29 @@ package engine2
 import (
 	"testing"
 
+	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/sstable"
 )
 
 // Compatibility aliases to ease migrating callers from `engine` -> `engine2`.
 // These aliases point to the original `engine` package types so caller code
 // can switch imports to `engine2` with minimal changes. This is a temporary
 // migration aid and will be removed when `engine` is deleted.
-type StorageEngineInterface = engine.StorageEngineInterface
-type PubSubInterface = engine.PubSubInterface
-type EngineMetrics = engine.EngineMetrics
-
-// Re-export common option types and helper constructors by delegating to the
-// legacy `engine` package. This lets callers change imports to `engine2`
-// without immediately requiring larger refactors. These are thin wrappers and
-// will be removed once the migration completes.
-type StorageEngineOptions = engine.StorageEngineOptions
-
-// Subscription types are defined in the legacy `engine` package. Provide
-// aliases here so callers that migrate imports to `engine2` can still
-// construct and use subscription filters without importing `engine`.
-type SubscriptionFilter = engine.SubscriptionFilter
-type Subscription = engine.Subscription
+// Legacy compatibility shims live here. To keep engine2 independent from the
+// legacy `engine` package, engine2 provides local test helpers and option
+// types so tests and callers can migrate without relying on `engine`.
 
 func NewStorageEngine(opts StorageEngineOptions) (StorageEngineInterface, error) {
-	return engine.NewStorageEngine(engine.StorageEngineOptions(opts))
-}
-
-func NewEngineMetrics(publishGlobally bool, prefix string) *EngineMetrics {
-	return engine.NewEngineMetrics(publishGlobally, prefix)
+	// Construct an engine2-backed storage engine and adapt it to the
+	// repository StorageEngineInterface so callers get an engine2-backed
+	// StorageEngine with minimal changes to their callsites.
+	e, err := NewEngine2(opts.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	// Wrap Engine2 in the adapter which implements engine2.StorageEngineInterface
+	return NewEngine2AdapterWithHooks(e, nil), nil
 }
 
 // GetActiveSeriesSnapshot delegates to the legacy engine helper so callers that
@@ -40,17 +33,53 @@ func NewEngineMetrics(publishGlobally bool, prefix string) *EngineMetrics {
 // without importing the legacy package directly. This is a temporary shim
 // during migration and will be removed when helper functions are ported.
 func GetActiveSeriesSnapshot(e StorageEngineInterface) ([]string, error) {
-	return engine.GetActiveSeriesSnapshot(e)
+	// If it's the engine2 adapter, extract active series directly.
+	if a, ok := e.(*Engine2Adapter); ok {
+		a.activeSeriesMu.RLock()
+		defer a.activeSeriesMu.RUnlock()
+		out := make([]string, 0, len(a.activeSeries))
+		for k := range a.activeSeries {
+			out = append(out, k)
+		}
+		return out, nil
+	}
+	return nil, nil
 }
 
 // GetBaseOptsForTest delegates the engine test helper to provide standard
 // StorageEngineOptions for tests. Returning the alias type lets callers
 // import `engine2` only during migration.
+// GetBaseOptsForTest returns engine2 test options. A lightweight test helper
+// so engine2 tests don't need to import the legacy `engine` package.
 func GetBaseOptsForTest(t *testing.T, prefix string) StorageEngineOptions {
-	return engine.GetBaseOptsForTest(t, prefix)
+	t.Helper()
+	// Provide minimal, sensible defaults used by engine2 tests. The full
+	// StorageEngineOptions type exists in `options.go` so tests can still set
+	// named fields if needed.
+	return StorageEngineOptions{
+		DataDir:                      t.TempDir(),
+		MemtableThreshold:            1024 * 1024,
+		IndexMemtableThreshold:       1024 * 1024,
+		BlockCacheCapacity:           100,
+		MaxL0Files:                   4,
+		TargetSSTableSize:            1024 * 1024,
+		LevelsTargetSizeMultiplier:   2,
+		MaxLevels:                    3,
+		BloomFilterFalsePositiveRate: 0.01,
+		SSTableDefaultBlockSize:      sstable.DefaultBlockSize,
+		SSTableCompressor:            &compressors.NoCompressionCompressor{},
+		WALSyncMode:                  core.WALSyncDisabled,
+		CompactionIntervalSeconds:    3600,
+		Metrics:                      NewEngineMetrics(false, prefix),
+	}
 }
 
-// HelperDataPoint delegates engine's test helper for creating DataPoints.
+// HelperDataPoint creates a core.DataPoint for tests.
 func HelperDataPoint(t *testing.T, metric string, tags map[string]string, ts int64, fields map[string]any) core.DataPoint {
-	return engine.HelperDataPoint(t, metric, tags, ts, fields)
+	t.Helper()
+	dp, err := core.NewSimpleDataPoint(metric, tags, ts, fields)
+	if err != nil {
+		t.Fatalf("Failed to create data point: %v", err)
+	}
+	return *dp
 }

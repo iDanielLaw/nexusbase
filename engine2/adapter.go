@@ -18,7 +18,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/index"
 	"github.com/INLOpen/nexusbase/indexer"
@@ -38,7 +37,7 @@ import (
 )
 
 // Ensure Engine2 implements the StorageEngineInterface at compile time.
-var _ engine.StorageEngineInterface = (*Engine2Adapter)(nil)
+var _ StorageEngineInterface = (*Engine2Adapter)(nil)
 
 // Engine2Adapter adapts the lightweight engine2 implementation to the
 // repository's StorageEngineInterface. Methods are minimal stubs for now
@@ -399,7 +398,100 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 	return mi, nil
 }
 func (a *Engine2Adapter) GetSeriesByTags(metric string, tags map[string]string) ([]string, error) {
-	return nil, fmt.Errorf("GetSeriesByTags not implemented in engine2 adapter")
+	if err := a.CheckStarted(); err != nil {
+		return nil, err
+	}
+
+	// If we have a tag index manager and a seriesID store, prefer the
+	// index-based query which returns seriesIDs. Otherwise fall back to
+	// scanning the in-memory activeSeries map.
+	result := make([]string, 0)
+
+	// Helper to convert a binary series key (stored as string in stores)
+	// into the human-readable string-encoded series key used by the repo
+	// (i.e., `EncodeSeriesKeyWithString(metricName, tagsMap)`).
+	makeHumanSeries := func(seriesKeyBytes []byte) (string, error) {
+		mID, pairs, derr := core.DecodeSeriesKey(seriesKeyBytes)
+		if derr != nil {
+			return "", derr
+		}
+		metricName, _ := a.stringStore.GetString(mID)
+		tagsMap := make(map[string]string, len(pairs))
+		for _, p := range pairs {
+			k, _ := a.stringStore.GetString(p.KeyID)
+			v, _ := a.stringStore.GetString(p.ValueID)
+			tagsMap[k] = v
+		}
+		return string(core.EncodeSeriesKeyWithString(metricName, tagsMap)), nil
+	}
+
+	// If tag index is available and tags are specified, use it.
+	if a.tagIndexManager != nil && a.seriesIDStore != nil && a.stringStore != nil && len(tags) > 0 {
+		bm, err := a.tagIndexManager.Query(tags)
+		if err != nil {
+			return nil, fmt.Errorf("tag index query failed: %w", err)
+		}
+		it := bm.Iterator()
+		for it.HasNext() {
+			sid := it.Next()
+			if seriesKeyStr, ok := a.seriesIDStore.GetKey(sid); ok {
+				hs, err := makeHumanSeries([]byte(seriesKeyStr))
+				if err == nil {
+					result = append(result, hs)
+				}
+			}
+		}
+		sort.Strings(result)
+		return result, nil
+	}
+
+	// If tags empty but metric provided, scan activeSeries and filter by metric.
+	a.activeSeriesMu.RLock()
+	defer a.activeSeriesMu.RUnlock()
+	for sk := range a.activeSeries {
+		// sk is stored as string(binarySeriesKey)
+		b := []byte(sk)
+		mID, pairs, derr := core.DecodeSeriesKey(b)
+		if derr != nil {
+			continue
+		}
+		metricName, _ := a.stringStore.GetString(mID)
+		if metric != "" && metricName != metric {
+			continue
+		}
+		// if tags provided filter; otherwise include all (or metric-matched)
+		include := true
+		if len(tags) > 0 {
+			// build tag map from encoded pairs
+			lbls := make(map[string]string, len(pairs))
+			for _, p := range pairs {
+				k, _ := a.stringStore.GetString(p.KeyID)
+				v, _ := a.stringStore.GetString(p.ValueID)
+				lbls[k] = v
+			}
+			for k, v := range tags {
+				if got, ok := lbls[k]; !ok || got != v {
+					include = false
+					break
+				}
+			}
+		}
+		if include {
+			hs := string(core.EncodeSeriesKeyWithString(metricName, func() map[string]string {
+				m := make(map[string]string, len(pairs))
+				for _, p := range pairs {
+					k, _ := a.stringStore.GetString(p.KeyID)
+					v, _ := a.stringStore.GetString(p.ValueID)
+					m[k] = v
+				}
+				return m
+			}()))
+			result = append(result, hs)
+		}
+	}
+
+	sort.Strings(result)
+	return result, nil
 }
 
 // Introspection
@@ -1277,17 +1369,20 @@ func (a *Engine2Adapter) Close() error {
 }
 
 // Introspection & Utilities
-func (a *Engine2Adapter) GetPubSub() (engine.PubSubInterface, error) {
-	// Lazily initialize a PubSub instance and return it. The PubSub type
-	// in engine2 uses legacy `engine.Subscription`/`engine.SubscriptionFilter`
-	// so it satisfies the `engine.PubSubInterface` expected by callers.
+func (a *Engine2Adapter) GetPubSub() (PubSubInterface, error) {
+	// Lazily initialize a PubSub instance and return it as the aliased
+	// PubSubInterface so the adapter satisfies the StorageEngineInterface.
 	if a.pubsub == nil {
 		a.pubsub = NewPubSub()
 	}
 	return a.pubsub, nil
 }
-func (a *Engine2Adapter) GetSnapshotsBaseDir() string             { return filepath.Join(a.dataRoot, "snapshots") }
-func (a *Engine2Adapter) Metrics() (*engine.EngineMetrics, error) { return nil, nil }
+func (a *Engine2Adapter) GetSnapshotsBaseDir() string { return filepath.Join(a.dataRoot, "snapshots") }
+func (a *Engine2Adapter) Metrics() (*EngineMetrics, error) {
+	// Return an engine2-owned EngineMetrics instance. For now, create a
+	// non-published (in-memory) metrics struct with a default prefix.
+	return NewEngineMetrics(false, ""), nil
+}
 func (a *Engine2Adapter) GetHookManager() hooks.HookManager {
 	if a.hookManager != nil {
 		return a.hookManager
