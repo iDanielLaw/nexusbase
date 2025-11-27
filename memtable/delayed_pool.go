@@ -22,6 +22,7 @@ type delayedEntryPool struct {
 	mu         sync.Mutex
 	quarantine []quarantinedItem
 	delay      time.Duration
+	stopCh     chan struct{}
 }
 
 // newDelayedEntryPool creates a delayed pool with a background drainer.
@@ -33,33 +34,39 @@ func newDelayedEntryPool(capacity int) *delayedEntryPool {
 	}
 
 	// start background drainer
+	p.stopCh = make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
-		for range ticker.C {
-			now := time.Now().UnixNano()
-			p.mu.Lock()
-			i := 0
-			for ; i < len(p.quarantine); i++ {
-				if now-p.quarantine[i].ts < p.delay.Nanoseconds() {
-					break
+		for {
+			select {
+			case <-ticker.C:
+				now := time.Now().UnixNano()
+				p.mu.Lock()
+				i := 0
+				for ; i < len(p.quarantine); i++ {
+					if now-p.quarantine[i].ts < p.delay.Nanoseconds() {
+						break
+					}
+					// move to inner pool
+					item := p.quarantine[i].e
+					// reset fields before putting into inner pool
+					if item != nil {
+						item.Key = nil
+						item.Value = nil
+						item.EntryType = 0
+						item.PointID = 0
+					}
+					p.inner.Put(item)
 				}
-				// move to inner pool
-				item := p.quarantine[i].e
-				// reset fields before putting into inner pool
-				if item != nil {
-					item.Key = nil
-					item.Value = nil
-					item.EntryType = 0
-					item.PointID = 0
+				if i > 0 {
+					// drop drained items from slice
+					p.quarantine = append(p.quarantine[:0], p.quarantine[i:]...)
 				}
-				p.inner.Put(item)
+				p.mu.Unlock()
+			case <-p.stopCh:
+				return
 			}
-			if i > 0 {
-				// drop drained items from slice
-				p.quarantine = append(p.quarantine[:0], p.quarantine[i:]...)
-			}
-			p.mu.Unlock()
 		}
 	}()
 
@@ -86,4 +93,72 @@ func (p *delayedEntryPool) Put(e *MemtableEntry) {
 // GetMetrics forwards metrics from the inner pool (approximate).
 func (p *delayedEntryPool) GetMetrics() (hits, misses uint64, size int) {
 	return p.inner.GetMetrics()
+}
+
+// Stop stops the background drainer goroutine and drains remaining quarantine items
+// into the inner pool. Call Stop when the pool is no longer needed to avoid goroutine leaks.
+func (p *delayedEntryPool) Stop() {
+	if p == nil {
+		return
+	}
+	close(p.stopCh)
+	// drain remaining items
+	p.mu.Lock()
+	for _, qi := range p.quarantine {
+		item := qi.e
+		if item != nil {
+			item.Key = nil
+			item.Value = nil
+			item.EntryType = 0
+			item.PointID = 0
+		}
+		p.inner.Put(item)
+	}
+	p.quarantine = p.quarantine[:0]
+	p.mu.Unlock()
+}
+
+// newDelayedEntryPoolWithDelay allows creating a delayed pool with a custom delay.
+func newDelayedEntryPoolWithDelay(capacity int, delay time.Duration) *delayedEntryPool {
+	p := &delayedEntryPool{
+		inner:      newEntryPool(capacity),
+		quarantine: make([]quarantinedItem, 0, 256),
+		delay:      delay,
+	}
+
+	p.stopCh = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				now := time.Now().UnixNano()
+				p.mu.Lock()
+				i := 0
+				for ; i < len(p.quarantine); i++ {
+					if now-p.quarantine[i].ts < p.delay.Nanoseconds() {
+						break
+					}
+					item := p.quarantine[i].e
+					if item != nil {
+						item.Key = nil
+						item.Value = nil
+						item.EntryType = 0
+						item.PointID = 0
+					}
+					p.inner.Put(item)
+				}
+				if i > 0 {
+					p.quarantine = append(p.quarantine[:0], p.quarantine[i:]...)
+				}
+				p.mu.Unlock()
+			case <-p.stopCh:
+				return
+			}
+		}
+	}()
+
+	slog.Default().Debug("DelayedEntryPool: created (custom delay)", "delay_ms", p.delay.Milliseconds())
+	return p
 }

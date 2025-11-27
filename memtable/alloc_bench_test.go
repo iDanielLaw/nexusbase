@@ -1,7 +1,9 @@
 package memtable
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexuscore/utils/clock"
@@ -60,5 +62,41 @@ func BenchmarkPut_Pooled(b *testing.B) {
 		e.PointID = uint64(i)
 		m.data.Insert(k, e)
 		// for benchmark fairness, do not return k/e to pool immediately
+	}
+}
+
+func BenchmarkPut_DelayedPools(b *testing.B) {
+	delays := []int{0, 10, 50, 250, 1000} // milliseconds
+	for _, d := range delays {
+		name := fmt.Sprintf("Delayed_%dms", d)
+		b.Run(name, func(sb *testing.B) {
+			// replace global EntryPool with a delayed pool using given delay
+			old := EntryPool
+			dp := newDelayedEntryPoolWithDelay(16384, time.Duration(d)*time.Millisecond)
+			EntryPool = dp
+			defer func() {
+				// restore and stop the temp pool
+				EntryPool = old
+				dp.Stop()
+			}()
+
+			m := NewMemtable2(1<<30, clock.SystemClockDefault)
+			sb.ResetTimer()
+			for i := 0; i < sb.N; i++ {
+				key := makeKey(i)
+				val := makeValue(i)
+				k := KeyPool.Get()
+				k.Key = key
+				k.PointID = uint64(i)
+				e := EntryPool.Get()
+				e.Key = key
+				vc := make([]byte, len(val))
+				copy(vc, val)
+				e.Value = vc
+				e.EntryType = core.EntryTypePutEvent
+				e.PointID = uint64(i)
+				m.data.Insert(k, e)
+			}
+		})
 	}
 }

@@ -18,68 +18,47 @@ const (
 
 // keyPool manages a pool of MemtableKey objects to reduce allocations.
 type keyPool struct {
-	mu    sync.Mutex
-	items []*MemtableKey
-	// Metrics for monitoring pool effectiveness
+	sp     sync.Pool
 	hits   atomic.Uint64
 	misses atomic.Uint64
 }
 
-// newKeyPool creates a new key pool with the specified initial capacity.
+// newKeyPool creates a new key pool backed by sync.Pool.
 func newKeyPool(capacity int) *keyPool {
-	return &keyPool{
-		items: make([]*MemtableKey, 0, capacity),
-	}
+	p := &keyPool{}
+	p.sp.New = func() any { return &MemtableKey{} }
+	return p
 }
 
-// Get retrieves a MemtableKey from the pool or allocates a new one if the pool is empty.
-// The returned object should be returned to the pool using Put() when no longer needed.
+// Get retrieves a MemtableKey from the sync.Pool or allocates a new one.
 func (p *keyPool) Get() *MemtableKey {
-	p.mu.Lock()
-	if len(p.items) == 0 {
-		p.mu.Unlock()
+	v := p.sp.Get()
+	if v == nil {
 		p.misses.Add(1)
 		item := &MemtableKey{}
 		slog.Default().Debug("KeyPool: new alloc", "ptr", fmt.Sprintf("%p", item))
 		return item
 	}
-
-	item := p.items[len(p.items)-1]
-	p.items = p.items[:len(p.items)-1]
-	p.mu.Unlock()
-
-	// Update metrics after releasing lock (atomic operation is thread-safe)
 	p.hits.Add(1)
+	item := v.(*MemtableKey)
 	slog.Default().Debug("KeyPool: reuse", "ptr", fmt.Sprintf("%p", item))
 	return item
 }
 
 // Put returns a MemtableKey to the pool for reuse.
-// The key is reset to prevent memory leaks and accidental data reuse.
 func (p *keyPool) Put(k *MemtableKey) {
 	if k == nil {
 		return
 	}
-
-	// Reset to avoid holding onto old data (important for GC)
 	k.Key = nil
 	k.PointID = 0
 	slog.Default().Debug("KeyPool: put back", "ptr", fmt.Sprintf("%p", k))
-
-	p.mu.Lock()
-	// Only add to pool if below max capacity to prevent unbounded growth
-	if len(p.items) < maxPoolSize {
-		p.items = append(p.items, k)
-	}
-	p.mu.Unlock()
+	p.sp.Put(k)
 }
 
-// GetMetrics returns pool usage statistics.
-// Returns: hits (successful reuse), misses (new allocations), current pool size.
+// GetMetrics returns approximate pool metrics (hits, misses, size unknown for sync.Pool).
 func (p *keyPool) GetMetrics() (hits, misses uint64, size int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.hits.Load(), p.misses.Load(), len(p.items)
+	return p.hits.Load(), p.misses.Load(), 0
 }
 
 // entryPool manages a pool of MemtableEntry objects to reduce allocations.
