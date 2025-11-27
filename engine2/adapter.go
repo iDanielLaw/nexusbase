@@ -314,6 +314,8 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	// Also append a core.WALEntry to leader WAL so replication can stream it.
 	if a.leaderWal != nil {
 		if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
+			seq := a.sequenceNumber.Add(1)
+			entry.SeqNum = seq
 			_ = a.leaderWal.Append(*entry)
 		}
 	}
@@ -383,6 +385,8 @@ func (a *Engine2Adapter) PutBatch(ctx context.Context, points []core.DataPoint) 
 		}
 		if a.leaderWal != nil {
 			if entry, encErr := a.encodeDataPointToWALEntry(&p); encErr == nil {
+				seq := a.sequenceNumber.Add(1)
+				entry.SeqNum = seq
 				_ = a.leaderWal.Append(*entry)
 			}
 		}
@@ -464,6 +468,8 @@ func (a *Engine2Adapter) Delete(ctx context.Context, metric string, tags map[str
 		if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
 			// mark as delete event
 			entry.EntryType = core.EntryTypeDelete
+			seq := a.sequenceNumber.Add(1)
+			entry.SeqNum = seq
 			_ = a.leaderWal.Append(*entry)
 		}
 	}
@@ -530,6 +536,8 @@ func (a *Engine2Adapter) DeleteSeries(ctx context.Context, metric string, tags m
 	if a.leaderWal != nil {
 		if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
 			entry.EntryType = core.EntryTypeDelete
+			seq := a.sequenceNumber.Add(1)
+			entry.SeqNum = seq
 			_ = a.leaderWal.Append(*entry)
 		}
 	}
@@ -576,6 +584,8 @@ func (a *Engine2Adapter) DeletesByTimeRange(ctx context.Context, metric string, 
 		if a.leaderWal != nil {
 			if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
 				entry.EntryType = core.EntryTypeDelete
+				seq := a.sequenceNumber.Add(1)
+				entry.SeqNum = seq
 				_ = a.leaderWal.Append(*entry)
 			}
 		}
@@ -1364,6 +1374,8 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 		return fmt.Errorf("engine2 not initialized")
 	}
 
+	// Diagnostic: log when a replicated entry arrives at the engine adapter.
+	slog.Default().Info("Engine2Adapter.ApplyReplicatedEntry called", "seq", entry.GetSequenceNumber(), "type", entry.GetEntryType())
 	switch entry.GetEntryType() {
 	case pb.WALEntry_PUT_EVENT:
 		// convert fields

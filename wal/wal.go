@@ -33,7 +33,15 @@ type commitRecord struct {
 // streamerRegistration holds the information needed to notify a single stream reader.
 type streamerRegistration struct {
 	id      uint64
-	notifyC chan []core.WALEntry
+	notifyC chan notifyPayload
+}
+
+// notifyPayload is the payload sent to stream readers when new WAL entries
+// are available. It contains an opaque notify ID for correlation and the
+// batch of WALEntries (deep-copied by the sender).
+type notifyPayload struct {
+	notifyID uint64
+	entries  []core.WALEntry
 }
 
 // WAL (Write-Ahead Log) provides durability by logging operations before they are applied to memtable.
@@ -55,6 +63,7 @@ type WAL struct {
 
 	// Replication Streamer fields
 	streamerIDCounter atomic.Uint64
+	notifyCounter     atomic.Uint64
 	streamerMu        sync.Mutex
 	streamers         map[uint64]*streamerRegistration
 
@@ -82,7 +91,7 @@ func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
 	id := w.streamerIDCounter.Add(1)
 	reg := &streamerRegistration{
 		id:      id,
-		notifyC: make(chan []core.WALEntry, 256), // Buffered channel to avoid blocking the committer
+		notifyC: make(chan notifyPayload, 256), // Buffered channel to avoid blocking the committer
 	}
 
 	w.streamers[id] = reg
@@ -103,6 +112,7 @@ func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
 		logger:         w.logger.With("component", "wal_stream_reader", "streamer_id", id),
 		registration:   reg,
 	}
+	w.logger.Debug("NewStreamReader created", "streamer_id", id, "from_seq", fromSeqNum, "lastReadSeqNum", lastReadSeqNum)
 	return sr, nil
 }
 
@@ -727,8 +737,33 @@ func (w *WAL) notifyStreamers(entries []core.WALEntry) {
 	}
 
 	for id, streamer := range w.streamers {
+		// Build a deep copy of the entries slice including copies of inner
+		// Key/Value byte slices to avoid any chance that pooled backing
+		// storage can be modified or reclaimed while readers are processing
+		// the batch.
+		batch := make([]core.WALEntry, len(entries))
+		for i := range entries {
+			// Shallow-copy the struct first
+			batch[i] = entries[i]
+			// Deep-copy key and value bytes
+			if len(entries[i].Key) > 0 {
+				batch[i].Key = append([]byte(nil), entries[i].Key...)
+			}
+			if len(entries[i].Value) > 0 {
+				batch[i].Value = append([]byte(nil), entries[i].Value...)
+			}
+		}
+		// Assign a notify ID for correlation across logs
+		notifyID := w.notifyCounter.Add(1)
+		// Build a small seq preview for logging
+		preview := make([]uint64, 0, len(batch))
+		for i := 0; i < len(batch) && i < 8; i++ {
+			preview = append(preview, batch[i].SeqNum)
+		}
+		w.logger.Debug("WAL: dispatching notify payload", "notify_id", notifyID, "streamer_id", id, "seq_preview", preview)
+		payload := notifyPayload{notifyID: notifyID, entries: batch}
 		select {
-		case streamer.notifyC <- entries:
+		case streamer.notifyC <- payload:
 			// Sent successfully
 		default:
 			// Channel is full, meaning the reader is lagging badly.

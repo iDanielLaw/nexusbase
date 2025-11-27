@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -52,6 +53,8 @@ type WALApplier struct {
 	cancel      context.CancelFunc
 	dialOpts    []grpc.DialOption
 	retrySleep  time.Duration
+	// testing-only channel to notify when the WAL stream has been established
+	testingStreamReady chan struct{}
 }
 
 // ErrCriticalApply is returned when applying a replicated entry fails repeatedly
@@ -68,6 +71,13 @@ func NewWALApplier(leaderAddr string, engine ReplicatedEngine, snapshotMgr snaps
 		logger:      logger.With("component", "wal_applier", "leader", leaderAddr),
 		retrySleep:  6 * time.Second, // Default retry sleep
 	}
+}
+
+// SetTestingOnlyStreamReadyChan provides a channel which will be signalled
+// (non-blocking) when the WAL stream has been successfully established.
+// This is intended for tests only and should not be used in production code.
+func (a *WALApplier) SetTestingOnlyStreamReadyChan(ch chan struct{}) {
+	a.testingStreamReady = ch
 }
 
 // NewWALApplierWithTLS creates a new WAL applier with TLS configuration.
@@ -328,6 +338,14 @@ func (a *WALApplier) replicationLoop(ctx context.Context) error {
 				continue
 			}
 
+			// Notify test helper (if set) that the WAL stream has been established.
+			if a.testingStreamReady != nil {
+				select {
+				case a.testingStreamReady <- struct{}{}:
+				default:
+				}
+			}
+
 			err = a.processStream(ctx, stream)
 			if err != nil {
 				// If the outer context is cancelled, stop immediately.
@@ -378,10 +396,19 @@ func (a *WALApplier) replicationLoop(ctx context.Context) error {
 func (a *WALApplier) processStream(ctx context.Context, stream pb.ReplicationService_StreamWALClient) error {
 	const maxApplyRetries = 3
 	for {
+		a.logger.Debug("Waiting to receive WAL entry from leader stream")
 		entry, err := stream.Recv()
+		a.logger.Debug("stream.Recv returned", "err", err)
 		if err != nil {
 			return err
 		}
+
+		// Compute correlation ID from the received proto so we can match it with
+		// the leader's send log (which logs the same correlation ID).
+		corr := computeCorrelationIDFromProto(entry)
+
+		// Diagnostic: log that we received an entry from the gRPC stream.
+		a.logger.Info("Received WAL entry from leader stream", "seq_num", entry.GetSequenceNumber(), "entry_type", entry.EntryType, "corr", corr)
 
 		expectedSeqNum := a.engine.GetLatestAppliedSeqNum() + 1
 		actualSeqNum := entry.GetSequenceNumber()
@@ -440,4 +467,26 @@ func (a *WALApplier) Stop() {
 // gRPC dial options, e.g. a custom dialer for in-memory listeners like bufconn.
 func (a *WALApplier) SetDialOptions(opts []grpc.DialOption) {
 	a.dialOpts = opts
+}
+
+// computeCorrelationIDFromProto computes a deterministic short hex correlation
+// string from a protobuf WALEntry by concatenating sequence, metric and sorted
+// tag pairs. This mirrors the server-side computation so logs can be correlated.
+func computeCorrelationIDFromProto(e *pb.WALEntry) string {
+	// Build canonical tag string
+	keys := make([]string, 0, len(e.Tags))
+	for k := range e.Tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	b := make([]byte, 0, 128)
+	b = append(b, []byte(fmt.Sprintf("%d|%s|", e.SequenceNumber, e.Metric))...)
+	for _, k := range keys {
+		b = append(b, []byte(k)...)
+		b = append(b, '=')
+		b = append(b, []byte(e.Tags[k])...)
+		b = append(b, ';')
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8]) // 16 hex chars
 }
