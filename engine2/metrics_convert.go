@@ -1,15 +1,82 @@
 package engine2
 
-import "github.com/INLOpen/nexusbase/engine"
+import "expvar"
 
-// ToEngine converts an engine2 EngineMetrics2 into the legacy engine.EngineMetrics.
-// This copies pointer references; both objects will reference the same expvar
-// variables when published globally.
-func (m *EngineMetrics2) ToEngine() *engine.EngineMetrics {
+// EngineMetricsLegacy mirrors the legacy `engine.EngineMetrics` structure so
+// `engine2` can convert to/from a compatible representation without
+// importing the legacy `engine` package directly. It purposely omits
+// unexported hook functions which are not addressable across package
+// boundaries.
+type EngineMetricsLegacy struct {
+	PublishedGlobally bool
+
+	PutTotal              *expvar.Int
+	PutErrorsTotal        *expvar.Int
+	GetTotal              *expvar.Int
+	QueryTotal            *expvar.Int
+	QueryErrorsTotal      *expvar.Int
+	DeleteTotal           *expvar.Int
+	FlushTotal            *expvar.Int
+	CompactionTotal       *expvar.Int
+	CompactionErrorsTotal *expvar.Int
+	SSTablesCreatedTotal  *expvar.Int
+	SSTablesDeletedTotal  *expvar.Int
+
+	FlushDataPointsFlushedTotal *expvar.Int
+	FlushBytesFlushedTotal      *expvar.Int
+
+	PutLatencyHist              *expvar.Map
+	GetLatencyHist              *expvar.Map
+	DeleteLatencyHist           *expvar.Map
+	QueryLatencyHist            *expvar.Map
+	RangeScanLatencyHist        *expvar.Map
+	AggregationQueryLatencyHist *expvar.Map
+
+	FlushLatencyHist      *expvar.Map
+	CompactionLatencyHist *expvar.Map
+
+	BloomFilterChecksTotal         *expvar.Int
+	BloomFilterFalsePositivesTotal *expvar.Int
+
+	WALBytesWrittenTotal   *expvar.Int
+	WALEntriesWrittenTotal *expvar.Int
+
+	WALRecoveryDurationSeconds *expvar.Float
+	WALRecoveredEntriesTotal   *expvar.Int
+
+	CompactionDataReadBytesTotal    *expvar.Int
+	CompactionDataWrittenBytesTotal *expvar.Int
+	CompactionTablesMergedTotal     *expvar.Int
+
+	CacheHits   *expvar.Int
+	CacheMisses *expvar.Int
+
+	SeriesCreatedTotal *expvar.Int
+
+	ActiveQueries         *expvar.Int
+	CompactionsInProgress *expvar.Int
+
+	ReplicationErrorsTotal       *expvar.Int
+	ReplicationPutTotal          *expvar.Int
+	ReplicationDeleteSeriesTotal *expvar.Int
+	ReplicationDeleteRangeTotal  *expvar.Int
+
+	PreallocateEnabled *expvar.Int
+
+	PreallocSuccesses   *expvar.Int
+	PreallocFailures    *expvar.Int
+	PreallocUnsupported *expvar.Int
+}
+
+// ToEngine converts an engine2 EngineMetrics2 into a legacy-compatible
+// `EngineMetricsLegacy` instance. This copies pointer references so the
+// returned struct shares expvar variables (intended for tooling/interop
+// without importing the legacy package).
+func (m *EngineMetrics2) ToEngine() *EngineMetricsLegacy {
 	if m == nil {
 		return nil
 	}
-	return &engine.EngineMetrics{
+	return &EngineMetricsLegacy{
 		PublishedGlobally:     m.PublishedGlobally,
 		PutTotal:              m.PutTotal,
 		PutErrorsTotal:        m.PutErrorsTotal,
@@ -68,18 +135,12 @@ func (m *EngineMetrics2) ToEngine() *engine.EngineMetrics {
 		PreallocSuccesses:   m.PreallocSuccesses,
 		PreallocFailures:    m.PreallocFailures,
 		PreallocUnsupported: m.PreallocUnsupported,
-
-		// Note: unexported function hooks (activeSeriesCountFunc, etc.) are
-		// intentionally not set here because they are unexported in the
-		// legacy `engine.EngineMetrics` type and not addressable from this
-		// package. Callers that need to inject those hooks should do so via
-		// legacy `engine` helpers or by directly using engine.NewEngineMetrics
-		// in combination with engine2.FromEngine.
 	}
 }
 
-// FromEngine builds an EngineMetrics2 from the legacy engine.EngineMetrics.
-func FromEngine(e *engine.EngineMetrics) *EngineMetrics2 {
+// FromEngine builds an EngineMetrics2 from a legacy-compatible
+// `EngineMetricsLegacy` instance.
+func FromEngine(e *EngineMetricsLegacy) *EngineMetrics2 {
 	if e == nil {
 		return nil
 	}
@@ -142,9 +203,5 @@ func FromEngine(e *engine.EngineMetrics) *EngineMetrics2 {
 		PreallocSuccesses:   e.PreallocSuccesses,
 		PreallocFailures:    e.PreallocFailures,
 		PreallocUnsupported: e.PreallocUnsupported,
-
-		// Unexported hook functions from engine.EngineMetrics are not
-		// accessible here; leave engine2 hooks nil so callers can set them
-		// explicitly on the EngineMetrics2 instance when needed.
 	}
 }
