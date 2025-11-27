@@ -159,5 +159,5 @@ func (p *entryPool) GetMetrics() (hits, misses uint64, size int) {
 // Pool size is set to 16384 to handle high ingestion rates with minimal allocations.
 var (
 	KeyPool   = newKeyPool(16384)
-	EntryPool = newEntryPool(16384)
+	EntryPool = newDelayedEntryPool(16384)
 )
