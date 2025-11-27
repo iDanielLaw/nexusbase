@@ -1,6 +1,8 @@
 package memtable
 
 import (
+	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 )
@@ -10,8 +12,8 @@ import (
 
 const (
 	// maxPoolSize limits the maximum number of items in each pool to prevent unbounded growth.
-	// Set to 2x the initial capacity to handle burst traffic while preventing memory leaks.
-	maxPoolSize = 32768 // 2x initial capacity of 16384
+	// Set to a large value to handle burst traffic while preventing memory leaks.
+	maxPoolSize = 32768
 )
 
 // keyPool manages a pool of MemtableKey objects to reduce allocations.
@@ -24,7 +26,6 @@ type keyPool struct {
 }
 
 // newKeyPool creates a new key pool with the specified initial capacity.
-// A larger capacity reduces the likelihood of allocations during high ingestion rates.
 func newKeyPool(capacity int) *keyPool {
 	return &keyPool{
 		items: make([]*MemtableKey, 0, capacity),
@@ -38,7 +39,9 @@ func (p *keyPool) Get() *MemtableKey {
 	if len(p.items) == 0 {
 		p.mu.Unlock()
 		p.misses.Add(1)
-		return &MemtableKey{}
+		item := &MemtableKey{}
+		slog.Default().Debug("KeyPool: new alloc", "ptr", fmt.Sprintf("%p", item))
+		return item
 	}
 
 	item := p.items[len(p.items)-1]
@@ -47,12 +50,12 @@ func (p *keyPool) Get() *MemtableKey {
 
 	// Update metrics after releasing lock (atomic operation is thread-safe)
 	p.hits.Add(1)
+	slog.Default().Debug("KeyPool: reuse", "ptr", fmt.Sprintf("%p", item))
 	return item
 }
 
 // Put returns a MemtableKey to the pool for reuse.
 // The key is reset to prevent memory leaks and accidental data reuse.
-// If the pool has reached maxPoolSize, the object is discarded to prevent unbounded growth.
 func (p *keyPool) Put(k *MemtableKey) {
 	if k == nil {
 		return
@@ -61,6 +64,7 @@ func (p *keyPool) Put(k *MemtableKey) {
 	// Reset to avoid holding onto old data (important for GC)
 	k.Key = nil
 	k.PointID = 0
+	slog.Default().Debug("KeyPool: put back", "ptr", fmt.Sprintf("%p", k))
 
 	p.mu.Lock()
 	// Only add to pool if below max capacity to prevent unbounded growth
@@ -100,7 +104,9 @@ func (p *entryPool) Get() *MemtableEntry {
 	if len(p.items) == 0 {
 		p.mu.Unlock()
 		p.misses.Add(1)
-		return &MemtableEntry{}
+		item := &MemtableEntry{}
+		slog.Default().Debug("EntryPool: new alloc", "ptr", fmt.Sprintf("%p", item))
+		return item
 	}
 
 	item := p.items[len(p.items)-1]
@@ -109,6 +115,7 @@ func (p *entryPool) Get() *MemtableEntry {
 
 	// Update metrics after releasing lock (atomic operation is thread-safe)
 	p.hits.Add(1)
+	slog.Default().Debug("EntryPool: reuse", "ptr", fmt.Sprintf("%p", item))
 	return item
 }
 
@@ -118,6 +125,14 @@ func (p *entryPool) Put(e *MemtableEntry) {
 	if e == nil {
 		return
 	}
+
+	// Log the value backing pointer (if present) for debugging aliasing issues.
+	slog.Default().Debug("EntryPool: put back", "ptr", fmt.Sprintf("%p", e), "value_ptr", func() string {
+		if e != nil && len(e.Value) > 0 {
+			return fmt.Sprintf("%p", &e.Value[0])
+		}
+		return ""
+	}())
 
 	// Reset fields to avoid holding onto old data
 	e.Key = nil

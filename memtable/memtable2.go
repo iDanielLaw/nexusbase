@@ -61,13 +61,10 @@ func (m *Memtable2) Put(dp *core.DataPoint) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// acquire from pools
-	newKey := KeyPool.Get()
-	newKey.Key = key
-	newKey.PointID = 0
-
-	newEntry := EntryPool.Get()
-	newEntry.Key = key
+	// allocate fresh key/entry objects (avoid returning pooled objects
+	// into the active skiplist which can lead to premature reuse/aliasing)
+	newKey := &MemtableKey{Key: key, PointID: 0}
+	newEntry := &MemtableEntry{Key: key}
 
 	if len(dp.Fields) == 0 {
 		newEntry.Value = nil
@@ -80,17 +77,27 @@ func (m *Memtable2) Put(dp *core.DataPoint) error {
 			EntryPool.Put(newEntry)
 			return err
 		}
-		newEntry.Value = vb
+		// Defensive copy: ensure memtable owns its value bytes so callers
+		// cannot mutate shared buffers after Put returns (avoids aliasing bugs).
+		if len(vb) > 0 {
+			vc := make([]byte, len(vb))
+			copy(vc, vb)
+			newEntry.Value = vc
+		} else {
+			newEntry.Value = nil
+		}
 		newEntry.EntryType = core.EntryTypePutEvent
 	}
 	newEntry.PointID = 0
 
 	oldNode := m.data.Insert(newKey, newEntry)
 	if oldNode != nil {
-		KeyPool.Put(newKey)
+		// Previous memtable value removed; adjust size accounting.
 		oldValue := oldNode.Value()
-		EntryPool.Put(oldValue)
 		m.sizeBytes -= oldValue.Size()
+		// Do NOT return oldValue to EntryPool here: pools can lead to
+		// reuse of backing arrays while skiplist or other readers still
+		// hold references, causing aliasing bugs on some platforms.
 	}
 	m.sizeBytes += newEntry.Size()
 	return nil
@@ -108,22 +115,25 @@ func (m *Memtable2) PutRaw(key []byte, value []byte, entryType core.EntryType, p
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	newKey := KeyPool.Get()
-	newKey.Key = key
-	newKey.PointID = pointID
-
-	newEntry := EntryPool.Get()
-	newEntry.Key = key
-	newEntry.Value = value
+	newKey := &MemtableKey{Key: key, PointID: pointID}
+	newEntry := &MemtableEntry{Key: key}
+	// Defensive copy: take ownership of the provided value bytes so they
+	// cannot be mutated by the caller or reused buffers later.
+	if len(value) > 0 {
+		vc := make([]byte, len(value))
+		copy(vc, value)
+		newEntry.Value = vc
+	} else {
+		newEntry.Value = nil
+	}
 	newEntry.EntryType = entryType
 	newEntry.PointID = pointID
 
 	oldNode := m.data.Insert(newKey, newEntry)
 	if oldNode != nil {
-		KeyPool.Put(newKey)
 		oldValue := oldNode.Value()
-		EntryPool.Put(oldValue)
 		m.sizeBytes -= oldValue.Size()
+		// Do not return to pool for safety (see note above).
 	}
 	m.sizeBytes += newEntry.Size()
 	return nil
@@ -225,8 +235,11 @@ func (m *Memtable2) Close() {
 		return
 	}
 	m.data.Range(func(key *MemtableKey, value *MemtableEntry) bool {
-		KeyPool.Put(key)
-		EntryPool.Put(value)
+		// Do not return entries or keys to pools here. Returning pooled
+		// objects while other goroutines may hold references can lead to
+		// subtle reuse/aliasing bugs. Let GC reclaim these objects safely.
+		_ = key
+		_ = value
 		return true
 	})
 	m.data = nil

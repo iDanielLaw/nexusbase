@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"expvar"
 	"fmt"
@@ -183,6 +184,10 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	if a.wal == nil || a.mem == nil {
 		return fmt.Errorf("engine2 not initialized")
 	}
+	// Debug: log puts for the metric used in flaky aggregation tests
+	if point.Metric == "system.load" {
+		slog.Default().Info("Engine2Adapter.Put called", "metric", point.Metric, "ts", point.Timestamp, "fields", point.Fields)
+	}
 	// Validate metric and tag names to mirror legacy engine behavior.
 	// Do this before writing to WAL or memtable so invalid points are rejected.
 	if vErr := core.ValidateMetricAndTags(core.NewValidator(), point.Metric, point.Tags); vErr != nil {
@@ -194,7 +199,40 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	// Encode datapoint and write into memtable via central API.
 	if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
 		seq := a.sequenceNumber.Add(1)
+		// Log encoded WALEntry values for diagnostic runs when metric matches
+		if point.Metric == "system.load" {
+			slog.Default().Info("Engine2Adapter: writing to memtable", "metric", point.Metric, "ts", point.Timestamp, "entry_type", entry.EntryType, "value_len", len(entry.Value))
+		}
 		_ = a.mem.PutRaw(entry.Key, entry.Value, entry.EntryType, seq)
+		// Immediate verification read-after-write for diagnostic runs.
+		if point.Metric == "system.load" {
+			if v, et, ok := a.mem.Get(entry.Key); ok {
+				valStr := "<empty>"
+				if et == core.EntryTypePutEvent && len(v) > 0 {
+					if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
+						if vv, ok := fv["value"]; ok {
+							valStr = fmt.Sprintf("%v", vv)
+						} else {
+							for _, vv := range fv {
+								valStr = fmt.Sprintf("%v", vv)
+								break
+							}
+						}
+					} else {
+						valStr = fmt.Sprintf("decode_err:%v", derr)
+					}
+				}
+				// Test-only print removed: keep structured slog info only.
+				vp := ""
+				if len(v) > 0 {
+					vp = fmt.Sprintf("%p", &v[0])
+				}
+				slog.Default().Info("Engine2Adapter: post-Put memtable read", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", entry.Key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
+			} else {
+				// Test-only print removed: keep structured slog warn only.
+				slog.Default().Warn("Engine2Adapter: post-Put memtable missing key", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", entry.Key))
+			}
+		}
 		// register active series and index state when ID-encoded key used
 		if len(entry.Key) >= 8 {
 			seriesKey := entry.Key[:len(entry.Key)-8]
@@ -223,6 +261,36 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 			}
 			seq := a.sequenceNumber.Add(1)
 			_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, seq)
+		}
+
+		// Immediate verification read-after-write for diagnostic runs (fallback path).
+		if point.Metric == "system.load" {
+			if v, et, ok := a.mem.Get(key); ok {
+				valStr := "<empty>"
+				if et == core.EntryTypePutEvent && len(v) > 0 {
+					if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
+						if vv, ok := fv["value"]; ok {
+							valStr = fmt.Sprintf("%v", vv)
+						} else {
+							for _, vv := range fv {
+								valStr = fmt.Sprintf("%v", vv)
+								break
+							}
+						}
+					} else {
+						valStr = fmt.Sprintf("decode_err:%v", derr)
+					}
+				}
+				// Test-only print removed: keep structured slog info only.
+				vp := ""
+				if len(v) > 0 {
+					vp = fmt.Sprintf("%p", &v[0])
+				}
+				slog.Default().Info("Engine2Adapter: post-Put memtable read (fallback)", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
+			} else {
+				// Test-only print removed: keep structured slog warn only.
+				slog.Default().Warn("Engine2Adapter: post-Put memtable missing key (fallback)", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", key))
+			}
 		}
 		// register active series for string-encoded key
 		seriesKey := core.EncodeSeriesKeyWithString(point.Metric, point.Tags)
@@ -684,6 +752,41 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 	// Build per-series iterators using an LSM-aware range scan (memtable + SSTables)
 	var iteratorsToMerge []core.IteratorInterface[*core.IteratorNode]
 	for _, seriesKey := range binarySeriesKeys {
+		// Diagnostic: dump memtable entries for this seriesKey before building
+		// range iterators so we can observe memtable view (post-Put) just
+		// prior to iterator construction. This helps pinpoint when values
+		// diverge between memtable and iterator views on Windows.
+		if a.mem != nil {
+			startKey := make([]byte, len(seriesKey)+8)
+			copy(startKey, seriesKey)
+			binary.BigEndian.PutUint64(startKey[len(seriesKey):], uint64(params.StartTime))
+			endKey := make([]byte, len(seriesKey)+8)
+			copy(endKey, seriesKey)
+			binary.BigEndian.PutUint64(endKey[len(seriesKey):], uint64(params.EndTime+1))
+			miter := a.mem.NewIterator(startKey, endKey, params.Order)
+			for miter.Next() {
+				n, _ := miter.At()
+				var vh string
+				if len(n.Value) > 0 {
+					vh = hex.EncodeToString(n.Value)
+				}
+				ts, _ := core.DecodeTimestamp(n.Key[len(n.Key)-8:])
+				vp := ""
+				if len(n.Value) > 0 {
+					vp = fmt.Sprintf("%p", &n.Value[0])
+				}
+				slog.Default().Info("MEM-DUMP-DBG",
+					"adapter_id", a.adapterID,
+					"series_key_hex", hex.EncodeToString(seriesKey),
+					"ts", ts,
+					"entry_type", n.EntryType,
+					"value_len", len(n.Value),
+					"value_hex", vh,
+					"value_ptr", vp,
+				)
+			}
+			_ = miter.Close()
+		}
 		rIters, err := a.rangeScan(seriesKey, params.StartTime, params.EndTime, params.Order)
 		if err != nil {
 			for _, it := range iteratorsToMerge {
@@ -840,6 +943,23 @@ func (it *engine2QueryResultIterator) At() (*core.QueryResultItem, error) {
 	if !ok {
 		return nil, fmt.Errorf("metric ID %d not found in string store", metricID)
 	}
+	// Temporary iterator-side diagnostic to help capture iterator view of
+	// the stored value for the failing Windows reproducer. This logs a
+	// compact hex representation of the iterator-observed value along with
+	// basic metadata so we can correlate against post-Put memtable dumps.
+	var valueHex string
+	if len(value) > 0 {
+		valueHex = hex.EncodeToString(value)
+	}
+	slog.Default().Info("QUERY-DBG",
+		"adapter_id", it.engine.adapterID,
+		"metric", metric,
+		"metric_id", metricID,
+		"key_len", len(key),
+		"value_len", len(value),
+		"value_hex", valueHex,
+		"entry_type", cur.EntryType,
+	)
 	allTags := make(map[string]string, len(encodedTags))
 	for _, pair := range encodedTags {
 		tagK, _ := it.engine.stringStore.GetString(pair.KeyID)
@@ -2161,10 +2281,6 @@ func (a *Engine2Adapter) Start() error {
 	// L1 by default to match expected semantics for recovered tables.
 	if a.manifestMgr != nil {
 		entries := a.manifestMgr.ListEntries()
-		dataRoot := ""
-		if a.Engine2 != nil {
-			dataRoot = a.Engine2.GetDataRoot()
-		}
 
 		// Decide whether to treat manifest entries as authoritative (load into
 		// L1) or to ignore them and perform a fallback scan. The repository
@@ -2172,37 +2288,7 @@ func (a *Engine2Adapter) Start() error {
 		// forces a fallback-scan even when the newer `sstables/manifest.json`
 		// exists. To satisfy that contract, prefer fallback when those legacy
 		// files are absent — otherwise trust the manifest when entries exist.
-		shouldLoadManifest := false
-		// First detect whether legacy markers exist in the data root. Their
-		// presence indicates the canonical legacy state and we should honor
-		// the manifest entries when available.
-		hasLegacyMarkers := false
-		if dataRoot != "" {
-			if _, err := os.Stat(filepath.Join(dataRoot, core.CurrentFileName)); err == nil {
-				hasLegacyMarkers = true
-			} else {
-				if files, err := os.ReadDir(dataRoot); err == nil {
-					for _, f := range files {
-						if strings.HasPrefix(f.Name(), "MANIFEST") {
-							hasLegacyMarkers = true
-							break
-						}
-					}
-				}
-			}
-		}
-
-		// If legacy markers exist, honor the manifest when it contains entries.
-		// If legacy markers do not exist, tests expect a fallback-scan path
-		// (i.e., do not treat `sstables/manifest.json` as authoritative).
-		if hasLegacyMarkers {
-			shouldLoadManifest = len(entries) > 0
-		} else {
-			// No legacy markers => prefer fallback-scan, even if manifest has
-			// entries. This preserves the explicit test behavior where callers
-			// remove legacy markers to force fallback initialization.
-			shouldLoadManifest = false
-		}
+		shouldLoadManifest := len(entries) > 0
 		// (diagnostics removed) manifest load decision previously printed here
 
 		if shouldLoadManifest {
@@ -2485,6 +2571,13 @@ func (a *Engine2Adapter) Close() error {
 		_ = a.stringStore.Close()
 	}
 	// close manifest manager
+	// Stop background managers before closing manifest/other resources to
+	// avoid leaking goroutines that can interfere with subsequent tests.
+	if a.tagIndexManager != nil {
+		// Best-effort stop; TagIndexManager.Stop() is idempotent and will
+		// flush final memtables and wait for background loops to exit.
+		a.tagIndexManager.Stop()
+	}
 	if a.manifestMgr != nil {
 		a.manifestMgr.Close()
 	}

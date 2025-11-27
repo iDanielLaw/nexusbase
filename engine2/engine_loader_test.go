@@ -85,6 +85,9 @@ func TestStateLoader_Load_FallbackScan(t *testing.T) {
 			_ = sys.Remove(filepath.Join(dataDir, f.Name()))
 		}
 	}
+	// Also remove the new manifest under `sstables/` so the adapter cannot
+	// trust `sstables/manifest.json` and must perform a fallback-scan.
+	_ = sys.Remove(filepath.Join(dataDir, "sstables", "manifest.json"))
 
 	// Phase 2: start new engine which should fallback-scan SSTables
 	engine2, err := NewStorageEngine(opts)

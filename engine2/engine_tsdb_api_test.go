@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"expvar"
+	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -387,6 +389,14 @@ func TestStorageEngine_Query_WithAggregation(t *testing.T) {
 		if err := engine.Put(context.Background(), HelperDataPoint(t, metric, tags, ts[i], map[string]any{"value": vals[i]})); err != nil {
 			t.Fatalf("Put failed for ts[%d]: %v", i, err)
 		}
+		// Debug assertion: verify the point is readable immediately after Put
+		if fv, gerr := engine.Get(context.Background(), metric, tags, ts[i]); gerr != nil {
+			t.Fatalf("Get after Put failed for ts[%d]: %v", i, gerr)
+		} else {
+			if v, ok := fv["value"].ValueFloat64(); !ok || v != vals[i] {
+				t.Fatalf("Post-Put verification mismatch for ts[%d]: got %v want %v", i, v, vals[i])
+			}
+		}
 	}
 
 	startTime := ts[0]
@@ -420,6 +430,40 @@ func TestStorageEngine_Query_WithAggregation(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			qp := core.QueryParams{Metric: metric, StartTime: startTime, EndTime: endTime, Tags: tags, AggregationSpecs: tt.aggregations, DownsampleInterval: "", EmitEmptyWindows: false}
+			// Debug: when running the failing subtest in the full-suite, log raw points
+			if strings.Contains(t.Name(), "count_sum_avg") {
+				rawQP := core.QueryParams{Metric: metric, StartTime: startTime, EndTime: endTime, Tags: tags}
+				rawIter, err := engine.Query(context.Background(), rawQP)
+				if err == nil {
+					defer rawIter.Close()
+					var valsSeen []struct {
+						ts int64
+						v  float64
+					}
+					for rawIter.Next() {
+						it, err := rawIter.At()
+						if err != nil {
+							break
+						}
+						fv, ok := it.Fields["value"]
+						if !ok {
+							continue
+						}
+						if v, ok := fv.ValueFloat64(); ok {
+							valsSeen = append(valsSeen, struct {
+								ts int64
+								v  float64
+							}{ts: it.Timestamp, v: v})
+						}
+					}
+					// format as strings for clearer log
+					out := []string{}
+					for _, p := range valsSeen {
+						out = append(out, fmt.Sprintf("(ts=%d v=%v)", p.ts, p.v))
+					}
+					t.Logf("[debug test] raw points before aggregation: %s", strings.Join(out, ", "))
+				}
+			}
 			iter, err := engine.Query(context.Background(), qp)
 			if err != nil {
 				t.Fatalf("Query with aggregations failed: %v", err)
@@ -442,13 +486,18 @@ func TestStorageEngine_Query_WithAggregation(t *testing.T) {
 			for k, want := range tt.expectedAggResults {
 				if got, ok := resultValues[k]; !ok {
 					t.Errorf("Missing aggregation %s", k)
+					t.Logf("[diag] missing aggregation %s; dataDir=%s", k, opts.DataDir)
 				} else if got != want {
 					t.Errorf("Aggregation %s: got %f want %f", k, got, want)
+					t.Logf("[diag] aggregation %s mismatch: got %f want %f; dataDir=%s", k, got, want, opts.DataDir)
 				}
 			}
 		})
 	}
 }
+
+// (removed) Previous dumpDiagnostics helper was used for temporary debugging
+// and has been removed. Tests should rely on concise t.Logf messages instead.
 
 func TestStorageEngine_AggregationQueryLatencyMetric(t *testing.T) {
 	opts := GetBaseOptsForTest(t, "test")

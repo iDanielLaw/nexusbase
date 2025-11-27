@@ -709,6 +709,23 @@ func (w *WAL) notifyStreamers(entries []core.WALEntry) {
 	}
 
 	w.logger.Info("Notifying streamers", "count", len(w.streamers), "entries", len(entries))
+	// Diagnostic: log pointers of entry Key/Value slices to help detect aliasing
+	for i, e := range entries {
+		if i >= 16 {
+			// limit per-notify verbosity
+			break
+		}
+		kp := ""
+		vp := ""
+		if len(e.Key) > 0 {
+			kp = fmt.Sprintf("%p", &e.Key[0])
+		}
+		if len(e.Value) > 0 {
+			vp = fmt.Sprintf("%p", &e.Value[0])
+		}
+		w.logger.Debug("WAL: notify entry ptrs", "index", i, "seq", e.SeqNum, "key_ptr", kp, "value_ptr", vp, "key_len", len(e.Key), "value_len", len(e.Value))
+	}
+
 	for id, streamer := range w.streamers {
 		select {
 		case streamer.notifyC <- entries:
