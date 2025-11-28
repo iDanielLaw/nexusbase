@@ -121,6 +121,13 @@ type TagIndexManagerOptions struct {
 	CompactionTombstoneWeight  float64     // New: Weight for tombstone score
 	CompactionOverlapWeight    float64     // New: Weight for overlap penalty
 	Clock                      clock.Clock // Clock interface for time measurement, allows mocking in tests.
+	// EnableSSTablePreallocate instructs writers for index SSTables to attempt
+	// preallocation when creating files. Best-effort; failures are non-fatal.
+	EnableSSTablePreallocate bool
+	// SSTableRestartPointInterval sets the restart-point frequency for index
+	// sstable writers (number of entries per restart point). If zero, writer
+	// defaults are used.
+	SSTableRestartPointInterval int
 }
 
 // TagIndexManager manages the LSM-tree for the secondary tag index.
@@ -959,6 +966,9 @@ func (tim *TagIndexManager) createNewIndexWriter() (core.SSTableWriterInterface,
 		Compressor:                   &compressors.NoCompressionCompressor{}, // Bitmaps are already compressed
 		Logger:                       tim.logger,
 	}
+	// Propagate optional tuning from manager options
+	writerOpts.Preallocate = tim.opts.EnableSSTablePreallocate
+	writerOpts.RestartPointInterval = tim.opts.SSTableRestartPointInterval
 	writer, err := tim.sstableWriterFactory(writerOpts)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create index SSTable writer: %w", err)

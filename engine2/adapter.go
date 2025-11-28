@@ -174,6 +174,9 @@ func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapte
 			SSTNextID:       a.GetNextSSTableID,
 		}
 		timOpts := indexer.TagIndexManagerOptions{DataDir: e.GetDataRoot()}
+		// propagate sstable writer tuning options to the tag index manager
+		timOpts.EnableSSTablePreallocate = e.options.EnableSSTablePreallocate
+		timOpts.SSTableRestartPointInterval = e.options.SSTableRestartPointInterval
 		if tim, err := indexer.NewTagIndexManager(timOpts, deps, slog.Default(), nil); err == nil {
 			a.tagIndexManager = tim
 		}
@@ -1876,6 +1879,8 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 		Compressor:                   comp,
 		Tracer:                       tracer,
 		Logger:                       log,
+		Preallocate:                  a.options.EnableSSTablePreallocate,
+		RestartPointInterval:         a.options.SSTableRestartPointInterval,
 	}
 	writer, err := sstable.NewSSTableWriter(writerOpts)
 	if err != nil {
@@ -2734,16 +2739,18 @@ func (a *Engine2Adapter) Start() error {
 				IntraL0CompactionMaxFileSizeBytes: intraL0MaxFileSize,
 				SSTableCompressor:                 sstCompressor,
 			},
-			Logger:               a.GetLogger(),
-			Tracer:               a.GetTracer(),
-			IsSeriesDeleted:      a.isSeriesDeleted,
-			IsRangeDeleted:       a.isRangeDeleted,
-			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
-			BlockCache:           nil,
-			Metrics:              a.metrics,
-			FileRemover:          nil,
-			SSTableWriterFactory: nil,
-			ShutdownChan:         nil,
+			Logger:                      a.GetLogger(),
+			Tracer:                      a.GetTracer(),
+			IsSeriesDeleted:             a.isSeriesDeleted,
+			IsRangeDeleted:              a.isRangeDeleted,
+			ExtractSeriesKeyFunc:        func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			BlockCache:                  nil,
+			Metrics:                     a.metrics,
+			FileRemover:                 nil,
+			SSTableWriterFactory:        nil,
+			EnableSSTablePreallocate:    a.options.EnableSSTablePreallocate,
+			SSTableRestartPointInterval: a.options.SSTableRestartPointInterval,
+			ShutdownChan:                nil,
 		}
 		cmIface, cerr := NewCompactionManager(cmParams)
 		if cerr != nil {

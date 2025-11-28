@@ -78,6 +78,13 @@ type CompactionManagerParams struct {
 	FileRemover          core.FileRemover
 	SSTableWriterFactory core.SSTableWriterFactory
 	ShutdownChan         chan struct{}
+
+	// EnableSSTablePreallocate instructs created sstable writers to attempt
+	// platform/file-system preallocation when creating files.
+	EnableSSTablePreallocate bool
+	// SSTableRestartPointInterval sets the restart point interval for writers
+	// created by the compaction manager. If zero, writers use their defaults.
+	SSTableRestartPointInterval int
 }
 
 // CompactionManager is responsible for managing and executing compaction tasks.
@@ -113,6 +120,8 @@ type CompactionManager struct {
 	isRangeDeletedChecker       iterator.RangeDeletedChecker
 	extractSeriesKeyFuncForIter iterator.SeriesKeyExtractorFunc
 	sstableCompressor           core.Compressor
+	enableSSTablePreallocate    bool
+	sstableRestartPointInterval int
 
 	metrics *EngineMetrics
 }
@@ -325,6 +334,8 @@ func NewCompactionManager(params CompactionManagerParams) (CompactionManagerInte
 		sstableCompressor:           params.Opts.SSTableCompressor,
 		blockCache:                  params.BlockCache,
 		metrics:                     params.Metrics,
+		enableSSTablePreallocate:    params.EnableSSTablePreallocate,
+		sstableRestartPointInterval: params.SSTableRestartPointInterval,
 	}
 
 	if params.FileRemover != nil {
@@ -620,6 +631,8 @@ func (cm *CompactionManager) startNewSSTableWriter(fileID *uint64) (core.SSTable
 		Tracer:                       cm.tracer,
 		Compressor:                   cm.sstableCompressor,
 		Logger:                       cm.logger.With("sstable_writer_id", *fileID),
+		Preallocate:                  cm.enableSSTablePreallocate,
+		RestartPointInterval:         cm.sstableRestartPointInterval,
 	})
 	if writerErr != nil {
 		return nil, fmt.Errorf("failed to create new sstable writer: %w", writerErr)
