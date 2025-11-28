@@ -1,6 +1,7 @@
 package engine2
 
 import (
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -105,12 +106,21 @@ func (ps *PubSub) Publish(update *tsdb.DataPointUpdate) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	for _, sub := range ps.subscribers {
+	total := len(ps.subscribers)
+	matched := 0
+	sent := 0
+	for id, sub := range ps.subscribers {
 		if sub.Filter.Matches(update) {
+			matched++
+			sentOK := false
 			select {
 			case sub.Updates <- update:
+				sentOK = true
+				sent++
 			default:
 			}
+			slog.Default().Debug("PubSub: attempted publish", "sub_id", id, "metric", update.Metric, "matched", true, "sent", sentOK)
 		}
 	}
+	slog.Default().Debug("PubSub: publish summary", "metric", update.Metric, "matched", matched, "sent", sent, "subs_total", total)
 }

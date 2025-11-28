@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/INLOpen/nexusbase/api/tsdb"
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/hooks"
@@ -229,6 +230,17 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 			_ = a.leaderWal.Append(*entry)
 		}
 
+		// Publish a realtime update for subscribers (best-effort)
+		if ps, _ := a.GetPubSub(); ps != nil {
+			upd := &tsdb.DataPointUpdate{
+				UpdateType: tsdb.DataPointUpdate_PUT,
+				Metric:     point.Metric,
+				Tags:       point.Tags,
+				Timestamp:  point.Timestamp,
+			}
+			ps.Publish(upd)
+		}
+
 		// Optional diagnostic: read-after-write for specific metrics.
 		if point.Metric == "system.load" {
 			if v, et, ok := a.mem.Get(entry.Key); ok {
@@ -279,6 +291,17 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 		if a.leaderWal != nil {
 			e2 := core.WALEntry{EntryType: core.EntryTypePutEvent, Key: key, Value: vb, SeqNum: seq}
 			_ = a.leaderWal.Append(e2)
+		}
+
+		// Publish a realtime update for subscribers (best-effort)
+		if ps, _ := a.GetPubSub(); ps != nil {
+			upd := &tsdb.DataPointUpdate{
+				UpdateType: tsdb.DataPointUpdate_PUT,
+				Metric:     point.Metric,
+				Tags:       point.Tags,
+				Timestamp:  point.Timestamp,
+			}
+			ps.Publish(upd)
 		}
 	}
 
@@ -1050,6 +1073,16 @@ func (a *Engine2Adapter) GetSeriesByTags(metric string, tags map[string]string) 
 		for it.HasNext() {
 			sid := it.Next()
 			if seriesKeyStr, ok := a.seriesIDStore.GetKey(sid); ok {
+				// If metric filter provided, ensure this series matches the metric
+				if metric != "" && a.stringStore != nil {
+					mID, _, derr := core.DecodeSeriesKey([]byte(seriesKeyStr))
+					if derr == nil {
+						mstr, _ := a.stringStore.GetString(mID)
+						if mstr != metric {
+							continue
+						}
+					}
+				}
 				hs, err := makeHumanSeries([]byte(seriesKeyStr))
 				if err == nil {
 					result = append(result, hs)
@@ -1493,10 +1526,36 @@ func (a *Engine2Adapter) ApplyReplicatedEntry(ctx context.Context, entry *pb.WAL
 		_ = a.mem.PutRaw(keySeries, nil, core.EntryTypeDelete, 0)
 
 	case pb.WALEntry_DELETE_RANGE:
-		// Apply range delete directly to memtable without writing to WAL.
-		for ts := entry.GetStartTime(); ts <= entry.GetEndTime(); ts++ {
-			key := core.EncodeTSDBKeyWithString(entry.GetMetric(), entry.GetTags(), ts)
-			_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, 0)
+		// Apply replicated range delete as a single in-memory range tombstone
+		// and materialize a single memtable tombstone at the range start so
+		// iterators consult the tombstone consistently (matches
+		// DeletesByTimeRange local behavior).
+		// Build a representative series key: prefer ID-encoded when possible
+		sampleDP := core.DataPoint{Metric: entry.GetMetric(), Tags: entry.GetTags(), Timestamp: entry.GetStartTime(), Fields: nil}
+		var seriesKeyBytes []byte
+		if we, err := a.encodeDataPointToWALEntry(&sampleDP); err == nil && len(we.Key) >= 8 {
+			seriesKeyBytes = we.Key[:len(we.Key)-8]
+		} else {
+			seriesKeyBytes = core.EncodeSeriesKeyWithString(entry.GetMetric(), entry.GetTags())
+		}
+
+		rt := core.RangeTombstone{MinTimestamp: entry.GetStartTime(), MaxTimestamp: entry.GetEndTime(), SeqNum: entry.GetSequenceNumber()}
+		a.rangeTombstonesMu.Lock()
+		if a.rangeTombstones == nil {
+			a.rangeTombstones = make(map[string][]core.RangeTombstone)
+		}
+		a.rangeTombstones[string(seriesKeyBytes)] = append(a.rangeTombstones[string(seriesKeyBytes)], rt)
+		a.rangeTombstonesMu.Unlock()
+
+		// materialize single memtable tombstone at startTime with the replicated seq
+		if a.mem != nil {
+			dp := core.DataPoint{Metric: entry.GetMetric(), Tags: entry.GetTags(), Timestamp: entry.GetStartTime(), Fields: nil}
+			if enc, err := a.encodeDataPointToWALEntry(&dp); err == nil {
+				_ = a.mem.PutRaw(enc.Key, nil, core.EntryTypeDelete, entry.GetSequenceNumber())
+			} else {
+				key := core.EncodeTSDBKeyWithString(entry.GetMetric(), entry.GetTags(), entry.GetStartTime())
+				_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, entry.GetSequenceNumber())
+			}
 		}
 
 	default:
