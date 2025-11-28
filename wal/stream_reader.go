@@ -31,6 +31,7 @@ type streamReader struct {
 	logger       *slog.Logger
 	registration *streamerRegistration
 	isTailing    bool // Flag to indicate if we are reading live entries via notification
+	lastNotifyID uint64
 }
 
 // Next returns the next WAL entry from the stream.
@@ -49,13 +50,14 @@ func (sr *streamReader) Next(ctx context.Context) (*core.WALEntry, error) {
 		if sr.bufferIndex < len(sr.entryBuffer) {
 			entry := &sr.entryBuffer[sr.bufferIndex]
 			sr.bufferIndex++
-			sr.logger.Debug("Checking entry from buffer", "entrySeq", entry.SeqNum, "lastReadSeq", sr.lastReadSeqNum)
+			sr.logger.Debug("Checking entry from buffer", "entrySeq", entry.SeqNum, "lastReadSeq", sr.lastReadSeqNum, "notify_id", sr.lastNotifyID)
 			if entry.SeqNum > sr.lastReadSeqNum {
 				sr.lastReadSeqNum = entry.SeqNum
-				sr.logger.Debug("Serving entry from buffer", "seqNum", entry.SeqNum)
+				sr.logger.Info("Serving entry from buffer", "seqNum", entry.SeqNum, "notify_id", sr.lastNotifyID)
 				return entry, nil
 			}
-			sr.logger.Debug("Skipping already seen entry in buffer", "seqNum", entry.SeqNum)
+			// Log skipped entries with correlation info so we can trace where seqs are filtered
+			sr.logger.Warn("Skipping already seen or out-of-order entry in buffer", "seqNum", entry.SeqNum, "lastReadSeq", sr.lastReadSeqNum, "notify_id", sr.lastNotifyID)
 			continue // Skip already seen entry
 		}
 
@@ -69,13 +71,23 @@ func (sr *streamReader) Next(ctx context.Context) (*core.WALEntry, error) {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case batch, ok := <-sr.registration.notifyC:
+			case payload, ok := <-sr.registration.notifyC:
 				if !ok {
 					sr.logger.Info("Stream reader notification channel closed, ending stream.")
 					return nil, io.EOF
 				}
-				sr.logger.Info("Stream reader received notification", "entries", len(batch))
+				batch := payload.entries
+				sr.logger.Info("Stream reader received notification", "entries", len(batch), "notify_id", payload.notifyID)
+				// Log the sequence numbers included for easier correlation with sender logs.
+				if len(batch) > 0 {
+					seqs := make([]uint64, 0, len(batch))
+					for i := 0; i < len(batch) && i < 8; i++ {
+						seqs = append(seqs, batch[i].SeqNum)
+					}
+					sr.logger.Info("Stream reader notification seqs (first N)", "seqs", seqs, "lastReadSeq", sr.lastReadSeqNum, "notify_id", payload.notifyID)
+				}
 				sr.entryBuffer = batch
+				sr.lastNotifyID = payload.notifyID
 				continue // Restart loop to process the new buffer
 			}
 		}

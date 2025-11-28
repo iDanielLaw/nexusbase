@@ -8,7 +8,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/sstable"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"github.com/stretchr/testify/assert"
@@ -18,11 +18,11 @@ import (
 )
 
 // getBaseOptsForE2ETest provides basic engine options for end-to-end testing.
-func getBaseOptsForE2ETest(t *testing.T) engine.StorageEngineOptions {
+func getBaseOptsForE2ETest(t *testing.T) engine2.StorageEngineOptions {
 	t.Helper()
 	// NOTE: The field names in StorageEngineOptions have been updated.
 	// This function now uses the new field names based on engine/engine.go.
-	return engine.StorageEngineOptions{
+	return engine2.StorageEngineOptions{
 		TargetSSTableSize:            1 * 1024 * 1024, // 1MB
 		MemtableThreshold:            1 * 1024 * 1024, // 1MB
 		MaxL0Files:                   4,
@@ -73,7 +73,7 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 	sourceOpts := getBaseOptsForE2ETest(t)
 	sourceOpts.DataDir = sourceDir
 
-	sourceEngine, err := engine.NewStorageEngine(sourceOpts)
+	sourceEngine, err := engine2.NewStorageEngine(sourceOpts)
 	require.NoError(t, err)
 	err = sourceEngine.Start()
 	require.NoError(t, err)
@@ -105,7 +105,7 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 	destOpts := getBaseOptsForE2ETest(t)
 	destOpts.DataDir = destDir
 
-	destEngine, err := engine.NewStorageEngine(destOpts)
+	destEngine, err := engine2.NewStorageEngine(destOpts)
 	require.NoError(t, err)
 	err = destEngine.Start()
 	require.NoError(t, err)
@@ -123,7 +123,7 @@ func TestExecutor_E2E_SnapshotAndRestore(t *testing.T) {
 	require.NoError(t, err)
 
 	// --- Phase 3: Restart engine and verify state ---
-	restartedEngine, err := engine.NewStorageEngine(destOpts)
+	restartedEngine, err := engine2.NewStorageEngine(destOpts)
 	require.NoError(t, err)
 	err = restartedEngine.Start()
 	require.NoError(t, err)
@@ -150,7 +150,7 @@ func TestExecutor_E2E_RemoveSeries(t *testing.T) {
 	opts := getBaseOptsForE2ETest(t)
 	opts.DataDir = dataDir
 
-	eng, err := engine.NewStorageEngine(opts)
+	eng, err := engine2.NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = eng.Start()
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestExecutor_E2E_RemovePoint(t *testing.T) {
 	opts := getBaseOptsForE2ETest(t)
 	opts.DataDir = dataDir
 
-	eng, err := engine.NewStorageEngine(opts)
+	eng, err := engine2.NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = eng.Start()
 	require.NoError(t, err)
@@ -266,7 +266,7 @@ func TestExecutor_E2E_RemoveRange(t *testing.T) {
 	opts := getBaseOptsForE2ETest(t)
 	opts.DataDir = dataDir
 
-	eng, err := engine.NewStorageEngine(opts)
+	eng, err := engine2.NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = eng.Start()
 	require.NoError(t, err)

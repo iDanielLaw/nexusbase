@@ -195,14 +195,18 @@ func (s *Server) StreamWAL(req *pb.StreamWALRequest, stream pb.ReplicationServic
 	defer walReader.Close()
 
 	for {
+		s.logger.Debug("Calling walReader.Next for follower stream", "follower", followerAddr)
 		entry, err := walReader.Next(ctx)
+		s.logger.Debug("walReader.Next returned", "err", err, "follower", followerAddr)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				s.logger.Info("Follower disconnected", "follower", followerAddr, "reason", err)
 				return err
 			}
 			if errors.Is(err, wal.ErrNoNewEntries) {
-				continue // tail mode, wait for new entries
+				// tail mode, wait for new entries
+				s.logger.Debug("walReader indicated no new entries, continuing (tail mode)", "follower", followerAddr)
+				continue
 			}
 			if errors.Is(err, io.EOF) {
 				s.logger.Info("Reached end of WAL stream permanently.", "follower", followerAddr)
@@ -212,21 +216,44 @@ func (s *Server) StreamWAL(req *pb.StreamWALRequest, stream pb.ReplicationServic
 			return status.Errorf(codes.Internal, "error reading WAL: %v", err)
 		}
 
-		protoEntry, err := s.convertWALEntryToProto(entry)
+		// Make small defensive copies of entry payloads to avoid any chance
+		// of observing pooled buffer reuse while we convert to protobuf.
+		// These copies ensure stable data for computing correlation IDs and
+		// for protobuf conversion.
+		entryCopy := *entry
+		if len(entry.Key) > 0 {
+			entryCopy.Key = append([]byte(nil), entry.Key...)
+		}
+		if len(entry.Value) > 0 {
+			entryCopy.Value = append([]byte(nil), entry.Value...)
+		}
+
+		protoEntry, err := s.convertWALEntryToProto(&entryCopy)
 		if err != nil {
 			s.logger.Error("Failed to convert WAL entry to protobuf message", "seq_num", entry.SeqNum, "error", err)
 			continue
 		}
 
-		// --- ปรับปรุง: ตรวจสอบ sequence number/idempotency/gap ---
-		// (สมมติว่ามี followerState ใน server เพื่อ track seqNum ต่อ follower)
-		// สามารถต่อยอด logic นี้ได้ตาม design ล่าสุด
+		// Diagnostic: log proto size and a compact preview of the message before send
+		// Note: Avoid logging large payloads; show lengths instead.
+		fieldsInfo := ""
+		if protoEntry.Fields != nil {
+			fieldsInfo = "present"
+		} else {
+			fieldsInfo = "nil"
+		}
+		s.logger.Debug("Prepared WAL proto for send", "seq", protoEntry.SequenceNumber, "type", protoEntry.EntryType, "metric", protoEntry.Metric, "fields", fieldsInfo, "tags_count", len(protoEntry.Tags))
+
+		// Compute a lightweight correlation ID based on sequence, metric and tags
+		// so we can correlate server-side sends with follower receives in logs.
+		corr := computeCorrelationIDFromProto(protoEntry)
+		s.logger.Debug("About to send WAL proto to follower", "seq", protoEntry.SequenceNumber, "corr", corr, "follower", followerAddr)
 
 		if err := stream.Send(protoEntry); err != nil {
-			s.logger.Error("Failed to send WAL entry to follower", "follower", followerAddr, "error", err)
+			s.logger.Error("Failed to send WAL entry to follower", "follower", followerAddr, "error", err, "seq", protoEntry.SequenceNumber, "corr", corr)
 			return err
 		}
-		s.logger.Info("Successfully sent WAL entry to follower", "seq_num", protoEntry.SequenceNumber, "follower", followerAddr)
+		s.logger.Info("Successfully sent WAL entry to follower", "seq_num", protoEntry.SequenceNumber, "corr", corr, "follower", followerAddr)
 	}
 }
 
@@ -241,6 +268,8 @@ func (s *Server) convertWALEntryToProto(entry *core.WALEntry) (*pb.WALEntry, err
 		protoEntry.EntryType = pb.WALEntry_PUT_EVENT
 
 		// Decode series key and timestamp from the entry Key
+		// Use the provided entry.Key/value which have been defensively copied
+		// by the caller to avoid races with pooled buffers.
 		seriesKeyBytes, err := core.ExtractSeriesKeyFromInternalKeyWithErr(entry.Key)
 		if err != nil {
 			return nil, err

@@ -105,44 +105,52 @@ func (l *WriteAmplificationListener) IsAsync() bool {
 
 /**
 // cmd/server/main.go
-
+// Example: Engine2-first startup and hook registration.
+// This snippet demonstrates constructing an Engine2 instance and adapting
+// it to the repository StorageEngineInterface so we can obtain the
+// HookManager and register listeners (preferred over starting the legacy
+// `engine` directly).
+//
+// Note: this example is intentionally explicit so callers can see how to
+// pass a HookManager into the Engine2 adapter when creating a server.
+//
 // ... imports ...
-import (
-    "github.com/INLOpen/nexusbase/internal"
-    "github.com/INLOpen/nexusbase/listeners" // สมมติว่าสร้าง package ใหม่
-)
-
-func main() {
-    // ... (Load config, create logger) ...
-
-    // Create the storage engine instance first.
-    dbEngine, err := engine.NewStorageEngine(opts)
-    if err != nil {
-        logger.Error("Failed to create storage engine", "error", err)
-        os.Exit(1)
-    }
-
-    // --- Register Hooks ---
-    // 1. Create listener instances
-    waListener := listeners.NewWriteAmplificationListener(logger)
-
-    // 2. Get the hook manager from the engine
-    concreteEngine, ok := dbEngine.(internal.PrivateStorageEngine)
-    if !ok {
-        logger.Error("Failed to assert engine to access HookManager")
-        os.Exit(1)
-    }
-    hookManager := concreteEngine.GetHookManager()
-
-    // 3. Register the listener for the PostCompaction event
-    hookManager.Register(hooks.EventPostCompaction, waListener)
-    logger.Info("Registered WriteAmplificationListener for PostCompaction events.")
-    // --- End Register Hooks ---
-
-
-    // Create and initialize the application server
-    appServer, err := server.NewAppServer(dbEngine, cfg, logger)
-    // ... (rest of the main function) ...
-}
-
+// import (
+//     "github.com/INLOpen/nexusbase/internal"
+//     "github.com/INLOpen/nexusbase/engine2"
+//     "github.com/INLOpen/nexusbase/listeners"
+// )
+//
+// func main() {
+//     // ... (Load config, create logger) ...
+//
+//     // Create a raw Engine2 instance rooted at the configured data dir.
+//     eng2, err := engine2.NewEngine2(opts.DataDir)
+//     if err != nil {
+//         logger.Error("Failed to create Engine2 instance", "error", err)
+//         os.Exit(1)
+//     }
+//
+//     // Wrap Engine2 with the adapter and provide a HookManager so hooks
+//     // and listeners can be registered by callers.
+//     hookManager := hooks.NewHookManager(logger.With("component", "HookManager"))
+//     engAdapter := engine2.NewEngine2AdapterWithHooks(eng2, hookManager)
+//     if startErr := engAdapter.Start(); startErr != nil {
+//         logger.Error("Failed to start Engine2 adapter", "error", startErr)
+//         _ = engAdapter.Close()
+//         os.Exit(1)
+//     }
+//
+//     // --- Register Hooks ---
+//     waListener := listeners.NewWriteAmplificationListener(logger)
+//     hookManager.Register(hooks.EventPostCompaction, waListener)
+//     logger.Info("Registered WriteAmplificationListener for PostCompaction events.")
+//     // --- End Register Hooks ---
+//
+//     // Create and initialize the application server using the adapter as
+//     // the primary storage engine instance.
+//     appServer, err := server.NewAppServer(engAdapter, cfg, logger)
+//     // ... (rest of the main function) ...
+// }
+//
 */

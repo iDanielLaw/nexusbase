@@ -11,7 +11,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/sstable"
 )
 
@@ -22,7 +22,7 @@ func TestRestoreUtil(t *testing.T) {
 	restoredDataDir := filepath.Join(baseDir, "restored_data")
 
 	// --- 1. Setup: Create an original database and a snapshot ---
-	opts := engine.StorageEngineOptions{
+	opts := engine2.StorageEngineOptions{
 		DataDir:                      originalDataDir,
 		MemtableThreshold:            1024,
 		IndexMemtableThreshold:       1024,
@@ -35,11 +35,11 @@ func TestRestoreUtil(t *testing.T) {
 		SSTableCompressor:            &compressors.NoCompressionCompressor{},
 	}
 
-	engine1, err := engine.NewStorageEngine(opts)
+	origEngine, err := engine2.NewStorageEngine(opts)
 	if err != nil {
 		t.Fatalf("Failed to create original engine: %v", err)
 	}
-	engine1.Start()
+	origEngine.Start()
 
 	// Add some data
 	metric := "restore.test"
@@ -54,16 +54,16 @@ func TestRestoreUtil(t *testing.T) {
 
 	t.Log(*point)
 
-	if err := engine1.Put(context.Background(), *point); err != nil {
+	if err := origEngine.Put(context.Background(), *point); err != nil {
 		t.Fatalf("Failed to put data point in original engine: %v", err)
 	}
 
 	// Create snapshot
-	createdSnapshotPath, err := engine1.CreateSnapshot(context.Background())
+	createdSnapshotPath, err := origEngine.CreateSnapshot(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to create snapshot: %v", err)
 	}
-	if err := engine1.Close(); err != nil {
+	if err := origEngine.Close(); err != nil {
 		t.Fatalf("Failed to close original engine: %v", err)
 	}
 
@@ -74,7 +74,7 @@ func TestRestoreUtil(t *testing.T) {
 	}
 
 	// --- 3. Verification: Open the restored database and check data ---
-	restoredOpts := engine.StorageEngineOptions{
+	restoredOpts := engine2.StorageEngineOptions{
 		DataDir:                      restoredDataDir,
 		MemtableThreshold:            1024,
 		IndexMemtableThreshold:       1024,
@@ -85,16 +85,16 @@ func TestRestoreUtil(t *testing.T) {
 		WALSyncMode:                  core.WALSyncAlways,
 		Logger:                       slog.Default(),
 	}
-	engine2, err := engine.NewStorageEngine(restoredOpts)
+	restoredEngine, err := engine2.NewStorageEngine(restoredOpts)
 	if err != nil {
 		t.Fatalf("Failed to open restored engine: %v", err)
 	}
-	engine2.Start()
-	defer engine2.Close()
+	restoredEngine.Start()
+	defer restoredEngine.Close()
 
 	// Verify the data exists
 	// Query for the specific point to verify by providing a precise time range.
-	iter, err := engine2.Query(context.Background(), core.QueryParams{Metric: metric, Tags: tags, StartTime: ts, EndTime: ts})
+	iter, err := restoredEngine.Query(context.Background(), core.QueryParams{Metric: metric, Tags: tags, StartTime: ts, EndTime: ts})
 	if err != nil {
 		t.Fatalf("Query from restored engine failed: %v", err)
 	}

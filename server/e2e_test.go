@@ -22,7 +22,7 @@ import (
 	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -215,7 +215,7 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (func(ctx co
 	metadataSyncInterval := config.ParseDuration(appCfg.Engine.MetadataSyncInterval, 60*time.Second, logger)
 
 	// Configure StorageEngine options
-	opts := engine.StorageEngineOptions{
+	opts := engine2.StorageEngineOptions{
 		DataDir:                      appCfg.Engine.DataDir,
 		MemtableThreshold:            appCfg.Engine.Memtable.SizeThresholdBytes,
 		MemtableFlushIntervalMs:      int(memtableFlushInterval.Milliseconds()),
@@ -228,7 +228,7 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (func(ctx co
 		SSTableDefaultBlockSize:      int(appCfg.Engine.SSTable.BlockSizeBytes),
 		CompactionIntervalSeconds:    int(compactionInterval.Seconds()),
 		MetadataSyncIntervalSeconds:  int(metadataSyncInterval.Seconds()),
-		Metrics:                      engine.NewEngineMetrics(true, "engine_"), // This might need adjustment if metrics are handled differently
+		Metrics:                      engine2.NewEngineMetrics(true, "engine_"), // This might need adjustment if metrics are handled differently
 		SSTableCompressor:            sstCompressor,
 		WALSyncMode:                  core.WALSyncMode(appCfg.Engine.WAL.SyncMode),
 		WALBatchSize:                 appCfg.Engine.WAL.BatchSize,
@@ -237,7 +237,7 @@ func setupE2ETestServerWithSecure(t *testing.T, e2eOpts e2eOptions) (func(ctx co
 		Logger:                       logger,
 	}
 
-	eng, err := engine.NewStorageEngine(opts)
+	eng, err := engine2.NewStorageEngine(opts)
 	require.NoError(t, err)
 	err = eng.Start()
 	require.NoError(t, err)
@@ -1233,7 +1233,7 @@ func TestReplication_HealthCheckIntegration(t *testing.T) {
 	logger, _, err := createLogger(cfg.Logging)
 	assert.NoError(t, err)
 
-	eng, err := engine.NewStorageEngine(engine.StorageEngineOptions{DataDir: cfg.Engine.DataDir})
+	eng, err := engine2.NewStorageEngine(engine2.StorageEngineOptions{DataDir: cfg.Engine.DataDir})
 	assert.NoError(t, err)
 
 	appServer, err := NewAppServerWithListeners(eng, cfg, logger, nil, nil)

@@ -46,7 +46,7 @@ type mockEngineProvider struct {
 
 	// สถานะภายในสำหรับ mock
 	lockMu             sync.Mutex
-	memtablesToFlush   []*memtable.Memtable
+	memtablesToFlush   []*memtable.Memtable2
 	sequenceNumber     uint64
 	deletedSeries      map[string]uint64
 	rangeTombstones    map[string][]core.RangeTombstone
@@ -56,7 +56,7 @@ type mockEngineProvider struct {
 	seriesIDStore      *mockPrivateManagerStore
 	sstableCompression string
 	wal                *mockWAL
-	flushedMemtables   []*memtable.Memtable
+	flushedMemtables   []*memtable.Memtable2
 	isStarted          bool
 }
 
@@ -119,21 +119,21 @@ func (m *mockEngineProvider) GetSequenceNumber() uint64 {
 func (m *mockEngineProvider) Lock()   { m.lockMu.Lock() }
 func (m *mockEngineProvider) Unlock() { m.lockMu.Unlock() }
 
-func (m *mockEngineProvider) GetMemtablesForFlush() ([]*memtable.Memtable, *memtable.Memtable) {
+func (m *mockEngineProvider) GetMemtablesForFlush() ([]*memtable.Memtable2, *memtable.Memtable2) {
 	args := m.Called()
-	var memsToFlush []*memtable.Memtable
+	var memsToFlush []*memtable.Memtable2
 	if len(args) > 0 && args.Get(0) != nil {
-		memsToFlush = args.Get(0).([]*memtable.Memtable)
+		memsToFlush = args.Get(0).([]*memtable.Memtable2)
 	}
 
-	var newMem *memtable.Memtable
+	var newMem *memtable.Memtable2
 	if len(args) > 1 && args.Get(1) != nil {
-		newMem, _ = args.Get(1).(*memtable.Memtable)
+		newMem, _ = args.Get(1).(*memtable.Memtable2)
 	}
 	return memsToFlush, newMem
 }
 
-func (m *mockEngineProvider) FlushMemtableToL0(mem *memtable.Memtable, parentCtx context.Context) error {
+func (m *mockEngineProvider) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx context.Context) error {
 	args := m.Called(mem, parentCtx)
 	m.flushedMemtables = append(m.flushedMemtables, mem)
 	return args.Error(0)
@@ -526,9 +526,12 @@ func TestManager_CreateFull(t *testing.T) {
 	provider.rangeTombstones = map[string][]core.RangeTombstone{
 		"range_tombstone_series_1": {{MinTimestamp: 100, MaxTimestamp: 200, SeqNum: 101}},
 	}
-	mem1 := memtable.NewMemtable(1024, provider.clock)
-	mem1.Put([]byte("mem_key_1"), []byte("mem_val_1"), core.EntryTypePutEvent, 120)
-	provider.memtablesToFlush = []*memtable.Memtable{mem1}
+	mem1 := memtable.NewMemtable2(1024, provider.clock)
+	dp1, _ := core.NewDataPoint("mem_key_1", nil, 120)
+	pv1, _ := core.NewPointValue("mem_val_1")
+	dp1.AddField("v", pv1)
+	_ = mem1.Put(dp1)
+	provider.memtablesToFlush = []*memtable.Memtable2{mem1}
 
 	// สร้าง SSTables จำลองและเพิ่มเข้าไปใน mock levels manager
 	require.NoError(t, os.MkdirAll(provider.sstDir, 0755))
@@ -967,7 +970,7 @@ func TestManager_CreateFull_EmptyEngineState(t *testing.T) {
 
 	// Configure empty state
 	provider.sequenceNumber = 1
-	provider.memtablesToFlush = []*memtable.Memtable{} // No memtables
+	provider.memtablesToFlush = []*memtable.Memtable2{} // No memtables
 	provider.deletedSeries = nil
 	provider.rangeTombstones = nil
 	provider.On("GetSequenceNumber").Return(uint64(1)).Once()
@@ -1278,12 +1281,16 @@ func TestManager_CreateIncremental_ErrorPaths(t *testing.T) {
 		createTestParentSnapshot(t, snapshotsBaseDir, 100, nil)
 
 		// Prepare for incremental
-		memToFlush := memtable.NewMemtable(1024, provider.clock)
+		memToFlush := memtable.NewMemtable2(1024, provider.clock)
 		expectedErr := fmt.Errorf("simulated flush error")
 
 		// Mock calls for the incremental snapshot
 		provider.On("GetSequenceNumber").Return(uint64(150)).Once() // For findAndValidateParent
-		provider.On("GetMemtablesForFlush").Return([]*memtable.Memtable{memToFlush}, nil).Once()
+		dp2, _ := core.NewDataPoint("mem_key_flush", nil, 200)
+		pv2, _ := core.NewPointValue("val")
+		dp2.AddField("v", pv2)
+		_ = memToFlush.Put(dp2)
+		provider.On("GetMemtablesForFlush").Return([]*memtable.Memtable2{memToFlush}, nil).Once()
 		provider.On("FlushMemtableToL0", memToFlush, mock.Anything).Return(expectedErr).Once()
 
 		// 2. Execution

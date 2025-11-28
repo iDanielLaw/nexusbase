@@ -37,8 +37,8 @@ type EngineProvider interface {
 	// Locking & State Manipulation
 	Lock()
 	Unlock()
-	GetMemtablesForFlush() (memtables []*memtable.Memtable, newMemtable *memtable.Memtable)
-	FlushMemtableToL0(mem *memtable.Memtable, parentCtx context.Context) error
+	GetMemtablesForFlush() (memtables []*memtable.Memtable2, newMemtable *memtable.Memtable2)
+	FlushMemtableToL0(mem *memtable.Memtable2, parentCtx context.Context) error
 
 	// State Access
 	GetDeletedSeries() map[string]uint64

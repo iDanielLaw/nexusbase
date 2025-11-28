@@ -4,12 +4,14 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/memtable"
+	"github.com/INLOpen/nexuscore/utils/clock"
 )
 
 // Test that Query returns results in ascending timestamp order when timestamps
 // were inserted out-of-order. This validates the memtable ordered-timestamp index.
 func TestQueryReturnsOrderedTimestamps(t *testing.T) {
-	m := NewMemtable()
+	m := memtable.NewMemtable2(1<<30, clock.SystemClockDefault)
 	metric := "m1"
 	tags := map[string]string{"host": "a"}
 
@@ -40,11 +42,25 @@ func TestQueryReturnsOrderedTimestamps(t *testing.T) {
 	}
 
 	for _, dp := range dps {
-		m.Put(dp)
+		if err := m.Put(dp); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
 	}
 
 	params := core.QueryParams{Metric: metric, Tags: tags, StartTime: 0, EndTime: 1000}
-	res := m.Query(params)
+	it := getPooledIterator(m, params)
+	defer it.Close()
+	var res []core.QueryResultItem
+	for it.Next() {
+		v, err := it.AtValue()
+		if err != nil {
+			t.Fatalf("iterator AtValue error: %v", err)
+		}
+		res = append(res, v)
+	}
+	if err := it.Error(); err != nil {
+		t.Fatalf("iterator error: %v", err)
+	}
 
 	if len(res) != 4 {
 		t.Fatalf("expected 4 results, got %d", len(res))

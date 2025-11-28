@@ -12,7 +12,7 @@ import (
 	"github.com/INLOpen/nexusbase/auth"
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/sstable"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -27,7 +27,7 @@ import (
 // GRPCServer wraps the grpc.Server and implements the TSDBService.
 type GRPCServer struct {
 	tsdb.UnimplementedTSDBServiceServer
-	engine        engine.StorageEngineInterface
+	engine        engine2.StorageEngineInterface
 	server        *grpc.Server
 	healthSrv     *health.Server
 	logger        *slog.Logger
@@ -38,7 +38,7 @@ type GRPCServer struct {
 
 // NewGRPCServer creates and configures a new gRPC server instance.
 // It handles TLS, authentication, and service registration.
-func NewGRPCServer(eng engine.StorageEngineInterface, putPool *WorkerPool, batchPool *WorkerPool, cfg *config.ServerConfig, authenticator core.IAuthenticator, logger *slog.Logger) (*GRPCServer, error) {
+func NewGRPCServer(eng engine2.StorageEngineInterface, putPool *WorkerPool, batchPool *WorkerPool, cfg *config.ServerConfig, authenticator core.IAuthenticator, logger *slog.Logger) (*GRPCServer, error) {
 	s := &GRPCServer{
 		engine:        eng,
 		logger:        logger.With("component", "GRPCServer"),
@@ -443,7 +443,7 @@ func (s *GRPCServer) Subscribe(req *tsdb.SubscribeRequest, stream tsdb.TSDBServi
 	}
 	ctx := stream.Context()
 
-	filter := engine.SubscriptionFilter{
+	filter := engine2.SubscriptionFilter{
 		Metric: req.GetMetric(),
 		Tags:   req.GetTags(),
 	}

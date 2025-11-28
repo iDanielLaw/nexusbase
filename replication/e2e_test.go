@@ -3,30 +3,32 @@ package replication_test
 import (
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/INLOpen/nexusbase/config"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/replication"
+	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
-	"github.com/INLOpen/nexusbase/internal/testutil"
 )
 
 // replicationTestHarness holds all the components for a leader-follower test setup.
 type replicationTestHarness struct {
-	leaderEngine  engine.StorageEngineInterface
+	leaderEngine  engine2.StorageEngineInterface
 	leaderCfg     *config.Config
 	leaderManager *replication.Manager
 
-	followerEngine  engine.StorageEngineInterface
-	followerCfg     *config.Config
-	followerApplier *replication.WALApplier
+	followerEngine         engine2.StorageEngineInterface
+	followerCfg            *config.Config
+	followerApplier        *replication.WALApplier
+	followerStreamReady    chan struct{}
+	leaderStreamRegistered chan struct{}
 }
 
 // setupReplicationTest creates a full leader and follower environment for integration testing.
@@ -35,12 +37,14 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 
 	// --- Leader Setup ---
 
-	// Use an in-memory listener to avoid binding real TCP ports in tests.
-	const bufSize = 1024 * 1024
-	lis := testutil.NewBufconnListener(bufSize)
+	// Use a real TCP listener on a random port so the replication manager
+	// and follower communicate over a real gRPC/TCP connection. This helps
+	// isolate bufconn-specific harness behavior.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
 	leaderAddr := lis.Addr().String()
 
-	leaderOpts := engine.GetBaseOptsForTest(t, "leader_")
+	leaderOpts := engine2.GetBaseOptsForTest(t, "leader_")
 	leaderOpts.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: true}))
 	leaderOpts.ReplicationMode = "leader"
 
@@ -49,7 +53,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	leaderCfg.Replication.Mode = "leader"
 	leaderCfg.Replication.ListenAddress = leaderAddr
 
-	leaderEngine, err := engine.NewStorageEngine(leaderOpts)
+	leaderEngine, err := engine2.NewStorageEngine(leaderOpts)
 	require.NoError(t, err)
 	err = leaderEngine.Start()
 	require.NoError(t, err)
@@ -64,13 +68,13 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 		replicationLogger,
 	)
 
-	// Use the listener-backed NewManager so the manager will serve on our bufconn listener.
+	// Use the provided TCP listener so the manager will serve on that address.
 	leaderManager, err := replication.NewManagerWithListener(leaderCfg.Replication, replicationServer, replicationLogger, lis)
 	require.NoError(t, err)
 
 	// --- Follower Setup ---
 
-	followerOpts := engine.GetBaseOptsForTest(t, "follower_")
+	followerOpts := engine2.GetBaseOptsForTest(t, "follower_")
 	followerOpts.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: true}))
 	followerOpts.ReplicationMode = "follower"
 
@@ -79,7 +83,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	followerCfg.Replication.Mode = "follower"
 	followerCfg.Replication.LeaderAddress = leaderAddr
 
-	followerEngine, err := engine.NewStorageEngine(followerOpts)
+	followerEngine, err := engine2.NewStorageEngine(followerOpts)
 	require.NoError(t, err)
 	err = followerEngine.Start()
 	require.NoError(t, err)
@@ -93,31 +97,37 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	)
 
 	h := &replicationTestHarness{
-		leaderEngine:    leaderEngine,
-		leaderCfg:       leaderCfg,
-		leaderManager:   leaderManager,
-		followerEngine:  followerEngine,
-		followerCfg:     followerCfg,
-		followerApplier: followerApplier,
+		leaderEngine:           leaderEngine,
+		leaderCfg:              leaderCfg,
+		leaderManager:          leaderManager,
+		followerEngine:         followerEngine,
+		followerCfg:            followerCfg,
+		followerApplier:        followerApplier,
+		followerStreamReady:    make(chan struct{}, 1),
+		leaderStreamRegistered: make(chan struct{}, 1),
 	}
 
 	// Start servers in goroutines
 	go func() { _ = h.leaderManager.Start(context.Background()) }()
 
 	// Wait for the leader to be connectable before starting the follower.
-	// This avoids race conditions in the test setup.
-	// Dial the bufconn listener using a custom dialer
+	// This avoids race conditions in the test setup. Dial the TCP listener.
 	connCtx, connCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer connCancel()
-	conn, err := grpc.DialContext(connCtx, leaderAddr, append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())...)
+	conn, err := grpc.DialContext(connCtx, leaderAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	require.NoError(t, err, "could not connect to leader gRPC server in test setup")
 	conn.Close()
 
-	// Inject the bufconn dial options into the WAL applier so it uses the in-memory
-	// listener instead of trying to dial a TCP address named like "bufconn".
-	h.followerApplier.SetDialOptions(append(testutil.BufconnDialOptions(lis), grpc.WithTransportCredentials(insecure.NewCredentials())))
+	// Use default dial options (insecure credentials) for the WAL applier to
+	// dial the leader TCP address directly.
+	h.followerApplier.SetDialOptions([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
 
-	h.followerApplier.Start(context.Background())
+	// Wire up leader WAL testing hook so tests can wait until the WAL reader
+	// registration has occurred on the leader side. Type-assert to the concrete
+	// WAL implementation and set the testing channel when available.
+	if lw, ok := leaderEngine.GetWAL().(*wal.WAL); ok {
+		lw.TestingOnlyStreamerRegistered = h.leaderStreamRegistered
+	}
 
 	cleanup := func() {
 		t.Log("Cleaning up replication test harness...")
@@ -136,15 +146,26 @@ func TestReplication_HappyPath_Put(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-
 	// --- Test Catch-up by writing to a segment and rotating it ---
 	primeTs := time.Now().UnixNano()
-	primePoint := engine.HelperDataPoint(t, "prime", map[string]string{"n": "1"}, primeTs, map[string]any{"v": 1})
+	primePoint := engine2.HelperDataPoint(t, "prime", map[string]string{"n": "1"}, primeTs, map[string]any{"v": 1})
 	err := h.leaderEngine.Put(ctx, primePoint)
 	require.NoError(t, err)
 
 	err = h.leaderEngine.GetWAL().Rotate()
 	require.NoError(t, err)
+
+	// Now start the follower so it can catch-up from the rotated segment.
+	h.followerApplier.SetTestingOnlyStreamReadyChan(h.followerStreamReady)
+	h.followerApplier.Start(context.Background())
+
+	// Wait until the leader registers a WAL stream reader for the follower.
+	select {
+	case <-h.leaderStreamRegistered:
+		t.Log("Leader registered WAL stream reader; follower started")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for leader WAL stream registration")
+	}
 
 	require.Eventually(t, func() bool {
 		seqNum := h.followerEngine.GetLatestAppliedSeqNum()
@@ -154,7 +175,7 @@ func TestReplication_HappyPath_Put(t *testing.T) {
 
 	// --- Test Tailing by writing to the new active segment ---
 	ts := time.Now().UnixNano()
-	point := engine.HelperDataPoint(t, "cpu", map[string]string{"host": "A"}, ts, map[string]any{"value": 42.0})
+	point := engine2.HelperDataPoint(t, "cpu", map[string]string{"host": "A"}, ts, map[string]any{"value": 42.0})
 	err = h.leaderEngine.Put(ctx, point)
 	require.NoError(t, err)
 
@@ -179,15 +200,21 @@ func TestReplication_Tailing_Only(t *testing.T) {
 	h, cleanup := setupReplicationTest(t)
 	defer cleanup()
 
-	// Wait a bit longer to ensure the follower has connected and the
-	// stream reader is in tailing mode before we write any data.
-	time.Sleep(1 * time.Second)
-
+	// Start the follower and wait until the leader registers the WAL reader
+	// so the follower will receive tailed notifications.
+	h.followerApplier.SetTestingOnlyStreamReadyChan(h.followerStreamReady)
+	h.followerApplier.Start(context.Background())
+	select {
+	case <-h.leaderStreamRegistered:
+		t.Log("Leader registered WAL stream reader; follower started")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for leader WAL stream registration")
+	}
 	ctx := context.Background()
 	ts := time.Now().UnixNano()
 
 	// Write a point, which should be sent via the notification channel.
-	point := engine.HelperDataPoint(t, "mem", map[string]string{"host": "B"}, ts, map[string]any{"value": 12345.0})
+	point := engine2.HelperDataPoint(t, "mem", map[string]string{"host": "B"}, ts, map[string]any{"value": 12345.0})
 	err := h.leaderEngine.Put(ctx, point)
 	require.NoError(t, err)
 

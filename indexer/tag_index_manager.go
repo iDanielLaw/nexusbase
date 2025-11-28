@@ -146,6 +146,39 @@ type TagIndexManager struct {
 	clock                 clock.Clock // Clock interface for time measurement, allows mocking in tests.
 }
 
+// Instrumentation for debugging creation/stop leaks of TagIndexManager.
+var (
+	tagIndexManagerActiveCount atomic.Int64
+	tagIndexManagerCreatesMu   sync.Mutex
+	tagIndexManagerCreates     []string
+	tagIndexManagerStopsMu     sync.Mutex
+	tagIndexManagerStops       []string
+	// track instances for test-only best-effort shutdown
+	tagIndexManagerInstancesMu sync.Mutex
+	tagIndexManagerInstances   []*TagIndexManager
+)
+
+// GetActiveTagIndexManagerCount returns the number of currently-active
+// TagIndexManager instances (instrumentation helper).
+func GetActiveTagIndexManagerCount() int64 {
+	return tagIndexManagerActiveCount.Load()
+}
+
+// DumpTagIndexManagerInstrumentation returns current active count and copies of
+// the collected creation and stop stack traces. Useful for test diagnostics.
+func DumpTagIndexManagerInstrumentation() (int64, []string, []string) {
+	cnt := tagIndexManagerActiveCount.Load()
+	tagIndexManagerCreatesMu.Lock()
+	creates := make([]string, len(tagIndexManagerCreates))
+	copy(creates, tagIndexManagerCreates)
+	tagIndexManagerCreatesMu.Unlock()
+	tagIndexManagerStopsMu.Lock()
+	stops := make([]string, len(tagIndexManagerStops))
+	copy(stops, tagIndexManagerStops)
+	tagIndexManagerStopsMu.Unlock()
+	return cnt, creates, stops
+}
+
 // NewTagIndexManager creates a new manager for the tag index.
 func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies, logger *slog.Logger, tracer trace.Tracer) (*TagIndexManager, error) {
 	var clk clock.Clock
@@ -214,14 +247,60 @@ func NewTagIndexManager(opts TagIndexManagerOptions, deps *TagIndexDependencies,
 		clock:                 clk,
 	}
 
+	// Instrumentation: record creation stack and increment active count.
+	tagIndexManagerActiveCount.Add(1)
+	// record instance for test-time diagnostics and best-effort shutdown
+	tagIndexManagerInstancesMu.Lock()
+	tagIndexManagerInstances = append(tagIndexManagerInstances, tim)
+	tagIndexManagerInstancesMu.Unlock()
+	if logger != nil {
+		logger.Info("TagIndexManager created", "active_count", tagIndexManagerActiveCount.Load())
+	}
+	// capture a short stack trace to help identify the creator
+	buf := make([]byte, 1<<12)
+	n := runtime.Stack(buf, false)
+	stackStr := string(buf[:n])
+	tagIndexManagerCreatesMu.Lock()
+	tagIndexManagerCreates = append(tagIndexManagerCreates, fmt.Sprintf("%s\n%s", time.Now().Format(time.RFC3339Nano), stackStr))
+	tagIndexManagerCreatesMu.Unlock()
+
 	// Load existing state from the index manifest
 	if err := tim.LoadFromFile(opts.DataDir); err != nil {
 		// Close the levels manager if loading fails to release any file handles
 		lm.Close()
+		// decrement active count on failure to construct
+		tagIndexManagerActiveCount.Add(-1)
 		return nil, fmt.Errorf("failed to load tag index state from disk: %w", err)
 	}
 
 	return tim, nil
+}
+
+// StopAllTagIndexManagersForTest invokes Stop() on all created TagIndexManager
+// instances on a best-effort basis. This is intended for use by tests that
+// simulate crashes and need to ensure background goroutines are not leaked
+// across test boundaries. It is safe to call multiple times.
+func StopAllTagIndexManagersForTest() {
+	tagIndexManagerInstancesMu.Lock()
+	instances := make([]*TagIndexManager, len(tagIndexManagerInstances))
+	copy(instances, tagIndexManagerInstances)
+	// clear the slice so subsequent calls don't repeatedly stop the same ones
+	tagIndexManagerInstances = nil
+	tagIndexManagerInstancesMu.Unlock()
+
+	for _, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		// Best-effort stop; recover from any panics during shutdown to avoid
+		// flaking the test helper itself.
+		func(tim *TagIndexManager) {
+			defer func() {
+				_ = recover()
+			}()
+			tim.Stop()
+		}(inst)
+	}
 }
 
 // Private
@@ -288,6 +367,17 @@ func (tim *TagIndexManager) Stop() {
 	if err := tim.levelsManager.Close(); err != nil {
 		tim.logger.Error("Failed to close index levels manager", "error", err)
 	}
+	// Instrumentation: decrement active count and record stop stack
+	tagIndexManagerActiveCount.Add(-1)
+	if tim.logger != nil {
+		tim.logger.Info("TagIndexManager stopped", "active_count", tagIndexManagerActiveCount.Load())
+	}
+	stopBuf := make([]byte, 1<<12)
+	sn := runtime.Stack(stopBuf, false)
+	stopStack := string(stopBuf[:sn])
+	tagIndexManagerStopsMu.Lock()
+	tagIndexManagerStops = append(tagIndexManagerStops, fmt.Sprintf("%s\n%s", time.Now().Format(time.RFC3339Nano), stopStack))
+	tagIndexManagerStopsMu.Unlock()
 	tim.logger.Info("Tag index manager stopped.")
 }
 

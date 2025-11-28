@@ -27,13 +27,38 @@ func MigrateLockFileToBinary(lockPath string) error {
 		return nil
 	}
 
-	// Otherwise try parse legacy text format
+	// Otherwise try parse legacy text format. Be defensive: only treat as
+	// legacy text if the first two lines appear to be ASCII digits (pid
+	// and timestamp). If they contain other binary bytes (eg. accidental
+	// newline in a binary file), treat the file as already-migrated/binary
+	// and no-op rather than failing with a parse error.
 	parts := strings.Split(strings.TrimSpace(asStr), "\n")
 	if len(parts) < 2 {
 		return errors.New("unrecognized lock file format")
 	}
 	pidStr := strings.TrimSpace(parts[0])
 	tsStr := strings.TrimSpace(parts[1])
+
+	// quick sanity: pidStr and tsStr should be all digits; otherwise assume
+	// this is not a legacy text file (likely binary data that happened to
+	// contain a newline) and skip migration.
+	isDigits := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	if !isDigits(pidStr) || !isDigits(tsStr) {
+		// treat as already binary / non-legacy -> no-op
+		return nil
+	}
+
 	pid, perr := strconv.ParseUint(pidStr, 10, 32)
 	if perr != nil {
 		return perr

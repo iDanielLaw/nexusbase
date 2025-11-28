@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/INLOpen/nexusbase/core"
 )
@@ -64,6 +65,8 @@ func (w *WAL) commit(records []*commitRecord) {
 	startNewPayload := func() {
 		bptr := w.bufPool.Get().(*[]byte)
 		*bptr = (*bptr)[:0]
+		// Diagnostic: record allocation / checkout of pooled buffer
+		slog.Default().Debug("WAL: payload buffer allocated", "buf_ptr", fmt.Sprintf("%p", bptr), "cap", cap(*bptr))
 		currentBufPtr = bptr
 		currentBuf = (*bptr)[:0]
 		currentBuf = append(currentBuf, byte(core.EntryTypePutBatch))
@@ -204,10 +207,18 @@ func (w *WAL) commit(records []*commitRecord) {
 		}
 		totalBytes += newRecordSize
 		totalEntries += len(encodedEntryLists[pi])
+		// notify streamers with the logical entries
+		// Build a small seq preview for correlation with stream-reader logs
+		preview := make([]uint64, 0, len(encodedEntryLists[pi]))
+		for i := 0; i < len(encodedEntryLists[pi]) && i < 8; i++ {
+			preview = append(preview, encodedEntryLists[pi][i].SeqNum)
+		}
+		slog.Default().Info("WAL: notifying streamers about payload", "payload_index", pi, "payload_buf_ptr", fmt.Sprintf("%p", payloadBufPtrs[pi]), "seq_preview", preview)
 		w.notifyStreamers(encodedEntryLists[pi])
 
-		// return payload buffer to pool
+		// return payload buffer to pool (after notify)
 		if payloadBufPtrs[pi] != nil {
+			slog.Default().Debug("WAL: returning payload buffer to pool", "payload_index", pi, "payload_buf_ptr", fmt.Sprintf("%p", payloadBufPtrs[pi]))
 			*payloadBufPtrs[pi] = (*payloadBufPtrs[pi])[:0]
 			w.bufPool.Put(payloadBufPtrs[pi])
 		}

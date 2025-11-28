@@ -11,7 +11,9 @@ import (
 // This WAL is used to expose a `wal.WALInterface` to replication and snapshot code
 // while engine2 keeps its own simple per-engine WAL file for replay.
 func openLeaderWAL(dataRoot string) (wal.WALInterface, error) {
-	dir := filepath.Join(dataRoot, "wal_segments")
+	// Use `wal/` directory for the leader WAL so tests that inspect
+	// `dataDir/wal` find the expected segment files.
+	dir := filepath.Join(dataRoot, "wal")
 	opts := wal.Options{
 		Dir: dir,
 	}

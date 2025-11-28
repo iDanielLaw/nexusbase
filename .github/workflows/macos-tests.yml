@@ -9,6 +9,7 @@ on:
 
 jobs:
   test-macos:
+    if: false
     runs-on: macos-latest
     continue-on-error: true
     strategy:

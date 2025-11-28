@@ -61,6 +61,8 @@ func (a *aggregateAccumulator) Add(val core.PointValue) error {
 	// From here on, we have a numeric value.
 	a.numericCount++
 
+	// (no-op) -- debug removed
+
 	if !a.firstNumeric {
 		a.first = numValue
 		a.firstNumeric = true
@@ -300,6 +302,18 @@ func (it *MultiFieldAggregatingIterator) prepareResult() {
 				resultMap[key] = math.Sqrt(variance)
 			}
 		}
+	}
+
+	// Temporary debug: log the computed aggregation map for diagnostics
+	// (removed after debugging)
+	if len(resultMap) > 0 {
+		// use standard library logging to avoid importing extra deps in test
+		// print keys/values
+		s := ""
+		for k, v := range resultMap {
+			s += fmt.Sprintf("%s=%v ", k, v)
+		}
+		fmt.Printf("[debug aggregator] resultMap: %s\n", s)
 	}
 
 	// Encode the final map into the resultValue

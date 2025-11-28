@@ -8,19 +8,19 @@ import (
 	"strings"
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 	corenbql "github.com/INLOpen/nexuscore/nbql"
 	"github.com/INLOpen/nexuscore/utils/clock"
 )
 
 // Executor processes parsed AST commands and interacts with the storage engine.
 type Executor struct {
-	engine engine.StorageEngineInterface
+	engine engine2.StorageEngineInterface
 	clock  clock.Clock
 }
 
 // NewExecutor creates a new command executor.
-func NewExecutor(eng engine.StorageEngineInterface, clock clock.Clock) *Executor {
+func NewExecutor(eng engine2.StorageEngineInterface, clock clock.Clock) *Executor {
 	return &Executor{engine: eng, clock: clock}
 }
 

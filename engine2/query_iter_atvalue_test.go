@@ -4,23 +4,29 @@ import (
 	"testing"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/memtable"
+	"github.com/INLOpen/nexuscore/utils/clock"
 )
 
 // Test that AtValue returns a value copy that is stable across iterator advances
 // while At() returns a pointer to an internal buffer that is reused.
 func TestMemQueryIterator_AtValueIndependent(t *testing.T) {
-	m := NewMemtable()
+	m := memtable.NewMemtable2(1<<30, clock.SystemClockDefault)
 
 	// create two datapoints for same metric+tags with different timestamps
 	dp1, _ := core.NewDataPoint("cpu.usage", map[string]string{"host": "a"}, 100)
 	pv1, _ := core.NewPointValue(float64(1.23))
 	dp1.AddField("value", pv1)
-	m.Put(dp1)
+	if err := m.Put(dp1); err != nil {
+		t.Fatalf("PutDataPoint failed: %v", err)
+	}
 
 	dp2, _ := core.NewDataPoint("cpu.usage", map[string]string{"host": "a"}, 200)
 	pv2, _ := core.NewPointValue(float64(4.56))
 	dp2.AddField("value", pv2)
-	m.Put(dp2)
+	if err := m.Put(dp2); err != nil {
+		t.Fatalf("PutDataPoint failed: %v", err)
+	}
 
 	params := core.QueryParams{Metric: "cpu.usage", StartTime: 0, EndTime: 1000, Tags: map[string]string{"host": "a"}}
 	it := getPooledIterator(m, params)

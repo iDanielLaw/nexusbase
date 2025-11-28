@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/INLOpen/nexusbase/core"
-	"github.com/INLOpen/nexusbase/engine"
+	"github.com/INLOpen/nexusbase/engine2"
 )
 
 // Job represents a task to be executed by a worker.
@@ -22,7 +22,7 @@ type Job struct {
 type WorkerPool struct {
 	numWorkers int
 	jobQueue   chan Job
-	engine     engine.StorageEngineInterface
+	engine     engine2.StorageEngineInterface
 	logger     *slog.Logger
 	wg         sync.WaitGroup
 }
@@ -30,7 +30,7 @@ type WorkerPool struct {
 // NewWorkerPool creates a new worker pool.
 // numWorkers: the number of worker goroutines to spawn.
 // queueSize: the size of the job queue.
-func NewWorkerPool(numWorkers, queueSize int, eng engine.StorageEngineInterface, logger *slog.Logger) *WorkerPool {
+func NewWorkerPool(numWorkers, queueSize int, eng engine2.StorageEngineInterface, logger *slog.Logger) *WorkerPool {
 	return &WorkerPool{
 		numWorkers: numWorkers,
 		jobQueue:   make(chan Job, queueSize),
