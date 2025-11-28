@@ -76,6 +76,9 @@ type WAL struct {
 	testingOnlyInjectCloseError  error
 	testingOnlyInjectAppendError error
 
+	// Testing-only hook: if non-nil, signal when a new streamer registration occurs.
+	TestingOnlyStreamerRegistered chan struct{}
+
 	// Buffer pool for encoding WALEntry payloads to reduce allocations.
 	bufPool *sync.Pool
 }
@@ -96,6 +99,14 @@ func (w *WAL) NewStreamReader(fromSeqNum uint64) (StreamReader, error) {
 
 	w.streamers[id] = reg
 	w.logger.Info("New WAL stream reader registered", "streamer_id", id)
+
+	// Testing-only: signal test harness that a new streamer was registered.
+	if w.TestingOnlyStreamerRegistered != nil {
+		select {
+		case w.TestingOnlyStreamerRegistered <- struct{}{}:
+		default:
+		}
+	}
 
 	// Initialize lastReadSeqNum so the reader will start returning the entry
 	// with sequence number `fromSeqNum` on the first Next() call.
@@ -760,7 +771,9 @@ func (w *WAL) notifyStreamers(entries []core.WALEntry) {
 		for i := 0; i < len(batch) && i < 8; i++ {
 			preview = append(preview, batch[i].SeqNum)
 		}
-		w.logger.Debug("WAL: dispatching notify payload", "notify_id", notifyID, "streamer_id", id, "seq_preview", preview)
+		// Use Info level here so the dispatch is visible in test runs and can
+		// be correlated with committer and stream-reader logs.
+		w.logger.Info("WAL: dispatching notify payload", "notify_id", notifyID, "streamer_id", id, "seq_preview", preview)
 		payload := notifyPayload{notifyID: notifyID, entries: batch}
 		select {
 		case streamer.notifyC <- payload:

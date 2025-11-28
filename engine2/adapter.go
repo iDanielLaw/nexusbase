@@ -184,27 +184,52 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 	if a.wal == nil || a.mem == nil {
 		return fmt.Errorf("engine2 not initialized")
 	}
-	// Debug: log puts for the metric used in flaky aggregation tests
+
 	if point.Metric == "system.load" {
 		slog.Default().Info("Engine2Adapter.Put called", "metric", point.Metric, "ts", point.Timestamp, "fields", point.Fields)
 	}
-	// Validate metric and tag names to mirror legacy engine behavior.
-	// Do this before writing to WAL or memtable so invalid points are rejected.
+
 	if vErr := core.ValidateMetricAndTags(core.NewValidator(), point.Metric, point.Tags); vErr != nil {
 		return vErr
 	}
+
 	if err := a.wal.Append(&point); err != nil {
 		return fmt.Errorf("wal append failed: %w", err)
 	}
-	// Encode datapoint and write into memtable via central API.
+
+	// Prefer ID-encoded WALEntry when possible (more efficient).
 	if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
+		// Consume a single sequence number for this logical Put and reuse it
+		// for both the memtable write and the leader WAL append.
 		seq := a.sequenceNumber.Add(1)
-		// Log encoded WALEntry values for diagnostic runs when metric matches
+
 		if point.Metric == "system.load" {
 			slog.Default().Info("Engine2Adapter: writing to memtable", "metric", point.Metric, "ts", point.Timestamp, "entry_type", entry.EntryType, "value_len", len(entry.Value))
 		}
+
 		_ = a.mem.PutRaw(entry.Key, entry.Value, entry.EntryType, seq)
-		// Immediate verification read-after-write for diagnostic runs.
+
+		// Register active series and tag index for id-encoded keys.
+		if len(entry.Key) >= 8 {
+			seriesKey := entry.Key[:len(entry.Key)-8]
+			seriesKeyStr := string(seriesKey)
+			a.addActiveSeries(seriesKeyStr)
+			if a.seriesIDStore != nil {
+				sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
+				if a.tagIndexManager != nil {
+					if _, pairs, derr := core.DecodeSeriesKey(seriesKey); derr == nil {
+						_ = a.tagIndexManager.AddEncoded(sid, pairs)
+					}
+				}
+			}
+		}
+
+		if a.leaderWal != nil {
+			entry.SeqNum = seq
+			_ = a.leaderWal.Append(*entry)
+		}
+
+		// Optional diagnostic: read-after-write for specific metrics.
 		if point.Metric == "system.load" {
 			if v, et, ok := a.mem.Get(entry.Key); ok {
 				valStr := "<empty>"
@@ -222,177 +247,102 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 						valStr = fmt.Sprintf("decode_err:%v", derr)
 					}
 				}
-				// Test-only print removed: keep structured slog info only.
 				vp := ""
 				if len(v) > 0 {
 					vp = fmt.Sprintf("%p", &v[0])
 				}
 				slog.Default().Info("Engine2Adapter: post-Put memtable read", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", entry.Key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
 			} else {
-				// Test-only print removed: keep structured slog warn only.
 				slog.Default().Warn("Engine2Adapter: post-Put memtable missing key", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", entry.Key))
 			}
 		}
-		// register active series and index state when ID-encoded key used
-		if len(entry.Key) >= 8 {
-			seriesKey := entry.Key[:len(entry.Key)-8]
-			seriesKeyStr := string(seriesKey)
-			a.addActiveSeries(seriesKeyStr)
-			if a.seriesIDStore != nil {
-				sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
-				if a.tagIndexManager != nil {
-					if _, _, pairsErr := core.DecodeSeriesKey(seriesKey); pairsErr == nil {
-						_, pairs, _ := core.DecodeSeriesKey(seriesKey)
-						_ = a.tagIndexManager.AddEncoded(sid, pairs)
-					}
-				}
-			}
+
+		return nil
+	}
+
+	// Fallback: encode using string-key when id-encoding fails.
+	key := core.EncodeTSDBKeyWithString(point.Metric, point.Tags, point.Timestamp)
+	if len(point.Fields) == 0 {
+		seq := a.sequenceNumber.Add(1)
+		_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, seq)
+		if a.leaderWal != nil {
+			e := core.WALEntry{EntryType: core.EntryTypeDelete, Key: key, Value: nil, SeqNum: seq}
+			_ = a.leaderWal.Append(e)
 		}
 	} else {
-		// Fallback: string-key encoding
-		key := core.EncodeTSDBKeyWithString(point.Metric, point.Tags, point.Timestamp)
-		if len(point.Fields) == 0 {
-			seq := a.sequenceNumber.Add(1)
-			_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, seq)
-		} else {
-			vb, e := point.Fields.Encode()
-			if e != nil {
-				return fmt.Errorf("failed to encode fields: %w", e)
-			}
-			seq := a.sequenceNumber.Add(1)
-			_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, seq)
+		vb, e := point.Fields.Encode()
+		if e != nil {
+			return fmt.Errorf("failed to encode fields: %w", e)
 		}
-
-		// Immediate verification read-after-write for diagnostic runs (fallback path).
-		if point.Metric == "system.load" {
-			if v, et, ok := a.mem.Get(key); ok {
-				valStr := "<empty>"
-				if et == core.EntryTypePutEvent && len(v) > 0 {
-					if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
-						if vv, ok := fv["value"]; ok {
-							valStr = fmt.Sprintf("%v", vv)
-						} else {
-							for _, vv := range fv {
-								valStr = fmt.Sprintf("%v", vv)
-								break
-							}
-						}
-					} else {
-						valStr = fmt.Sprintf("decode_err:%v", derr)
-					}
-				}
-				// Test-only print removed: keep structured slog info only.
-				vp := ""
-				if len(v) > 0 {
-					vp = fmt.Sprintf("%p", &v[0])
-				}
-				slog.Default().Info("Engine2Adapter: post-Put memtable read (fallback)", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
-			} else {
-				// Test-only print removed: keep structured slog warn only.
-				slog.Default().Warn("Engine2Adapter: post-Put memtable missing key (fallback)", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", key))
-			}
-		}
-		// register active series for string-encoded key
-		seriesKey := core.EncodeSeriesKeyWithString(point.Metric, point.Tags)
-		seriesKeyStr := string(seriesKey)
-		a.addActiveSeries(seriesKeyStr)
-		if a.seriesIDStore != nil && a.stringStore != nil {
-			sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
-			// attempt to add encoded pairs when stringStore available
-			var pairs []core.EncodedSeriesTagPair
-			for k, v := range point.Tags {
-				kid, _ := a.stringStore.GetOrCreateID(k)
-				vid, _ := a.stringStore.GetOrCreateID(v)
-				pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
-			}
-			sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
-			if a.tagIndexManager != nil {
-				_ = a.tagIndexManager.AddEncoded(sid, pairs)
-			}
-		}
-	}
-	// Also append a core.WALEntry to leader WAL so replication can stream it.
-	if a.leaderWal != nil {
-		if entry, encErr := a.encodeDataPointToWALEntry(&point); encErr == nil {
-			seq := a.sequenceNumber.Add(1)
-			entry.SeqNum = seq
-			_ = a.leaderWal.Append(*entry)
-		}
-	}
-	return nil
-}
-func (a *Engine2Adapter) PutBatch(ctx context.Context, points []core.DataPoint) error {
-	if a.wal == nil || a.mem == nil {
-		return fmt.Errorf("engine2 not initialized")
-	}
-	// Validate each datapoint's metric and tag names before mutating state.
-	for i := range points {
-		p := points[i]
-		if vErr := core.ValidateMetricAndTags(core.NewValidator(), p.Metric, p.Tags); vErr != nil {
-			return vErr
-		}
-	}
-	for i := range points {
-		p := points[i]
-		if err := a.wal.Append(&p); err != nil {
-			return fmt.Errorf("wal append failed: %w", err)
-		}
-		if entry, encErr := a.encodeDataPointToWALEntry(&p); encErr == nil {
-			seq := a.sequenceNumber.Add(1)
-			_ = a.mem.PutRaw(entry.Key, entry.Value, entry.EntryType, seq)
-			if len(entry.Key) >= 8 {
-				seriesKey := entry.Key[:len(entry.Key)-8]
-				seriesKeyStr := string(seriesKey)
-				a.addActiveSeries(seriesKeyStr)
-				if a.seriesIDStore != nil {
-					sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
-					if a.tagIndexManager != nil {
-						if _, pairs, derr := core.DecodeSeriesKey(seriesKey); derr == nil {
-							_ = a.tagIndexManager.AddEncoded(sid, pairs)
-						}
-					}
-				}
-			}
-		} else {
-			key := core.EncodeTSDBKeyWithString(p.Metric, p.Tags, p.Timestamp)
-			if len(p.Fields) == 0 {
-				seq := a.sequenceNumber.Add(1)
-				_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, seq)
-			} else {
-				vb, e := p.Fields.Encode()
-				if e != nil {
-					return fmt.Errorf("failed to encode fields: %w", e)
-				}
-				seq := a.sequenceNumber.Add(1)
-				_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, seq)
-			}
-			seriesKey := core.EncodeSeriesKeyWithString(p.Metric, p.Tags)
-			seriesKeyStr := string(seriesKey)
-			a.addActiveSeries(seriesKeyStr)
-			if a.seriesIDStore != nil && a.stringStore != nil {
-				sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
-				var pairs []core.EncodedSeriesTagPair
-				for k, v := range p.Tags {
-					kid, _ := a.stringStore.GetOrCreateID(k)
-					vid, _ := a.stringStore.GetOrCreateID(v)
-					pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
-				}
-				sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
-				if a.tagIndexManager != nil {
-					_ = a.tagIndexManager.AddEncoded(sid, pairs)
-				}
-			}
-		}
+		seq := a.sequenceNumber.Add(1)
+		_ = a.mem.PutRaw(key, vb, core.EntryTypePutEvent, seq)
 		if a.leaderWal != nil {
-			if entry, encErr := a.encodeDataPointToWALEntry(&p); encErr == nil {
-				seq := a.sequenceNumber.Add(1)
-				entry.SeqNum = seq
-				_ = a.leaderWal.Append(*entry)
+			e2 := core.WALEntry{EntryType: core.EntryTypePutEvent, Key: key, Value: vb, SeqNum: seq}
+			_ = a.leaderWal.Append(e2)
+		}
+	}
+
+	// Diagnostic read-after-write for fallback path.
+	if point.Metric == "system.load" {
+		if v, et, ok := a.mem.Get(key); ok {
+			valStr := "<empty>"
+			if et == core.EntryTypePutEvent && len(v) > 0 {
+				if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
+					if vv, ok := fv["value"]; ok {
+						valStr = fmt.Sprintf("%v", vv)
+					} else {
+						for _, vv := range fv {
+							valStr = fmt.Sprintf("%v", vv)
+							break
+						}
+					}
+				} else {
+					valStr = fmt.Sprintf("decode_err:%v", derr)
+				}
 			}
+			vp := ""
+			if len(v) > 0 {
+				vp = fmt.Sprintf("%p", &v[0])
+			}
+			slog.Default().Info("Engine2Adapter: post-Put memtable read (fallback)", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
+		} else {
+			slog.Default().Warn("Engine2Adapter: post-Put memtable missing key (fallback)", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", key))
+		}
+	}
+
+	// register active series for string-encoded key
+	seriesKey := core.EncodeSeriesKeyWithString(point.Metric, point.Tags)
+	seriesKeyStr := string(seriesKey)
+	a.addActiveSeries(seriesKeyStr)
+	if a.seriesIDStore != nil && a.stringStore != nil {
+		sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
+		var pairs []core.EncodedSeriesTagPair
+		for k, v := range point.Tags {
+			kid, _ := a.stringStore.GetOrCreateID(k)
+			vid, _ := a.stringStore.GetOrCreateID(v)
+			pairs = append(pairs, core.EncodedSeriesTagPair{KeyID: kid, ValueID: vid})
+		}
+		sort.Slice(pairs, func(i, j int) bool { return pairs[i].KeyID < pairs[j].KeyID })
+		if a.tagIndexManager != nil {
+			_ = a.tagIndexManager.AddEncoded(sid, pairs)
+		}
+	}
+
+	return nil
+}
+
+// PutBatch writes multiple datapoints. This is a simple implementation that
+// delegates to Put for each point. It preserves ordering and stops on the
+// first error.
+func (a *Engine2Adapter) PutBatch(ctx context.Context, points []core.DataPoint) error {
+	for _, p := range points {
+		if err := a.Put(ctx, p); err != nil {
+			return err
 		}
 	}
 	return nil
 }
+
 func (a *Engine2Adapter) Get(ctx context.Context, metric string, tags map[string]string, timestamp int64) (core.FieldValues, error) {
 	if a.mem == nil {
 		return nil, fmt.Errorf("engine2 not initialized")
@@ -561,33 +511,35 @@ func (a *Engine2Adapter) DeletesByTimeRange(ctx context.Context, metric string, 
 		seriesKeyBytes = core.EncodeSeriesKeyWithString(metric, tags)
 	}
 	rt := core.RangeTombstone{MinTimestamp: startTime, MaxTimestamp: endTime, SeqNum: ^uint64(0)}
+	// Record the range tombstone once (no per-nanosecond iteration).
+	// Allocate a single sequence number to represent the tombstone event so
+	// consumers (snapshots/replication) can order this change consistently.
+	seq := a.sequenceNumber.Add(1)
+	rt.SeqNum = seq
 	a.rangeTombstonesMu.Lock()
 	if a.rangeTombstones == nil {
 		a.rangeTombstones = make(map[string][]core.RangeTombstone)
 	}
 	a.rangeTombstones[string(seriesKeyBytes)] = append(a.rangeTombstones[string(seriesKeyBytes)], rt)
 	a.rangeTombstonesMu.Unlock()
-	for ts := startTime; ts <= endTime; ts++ {
-		// append tombstone for each timestamp in range (simple implementation)
-		dp := core.DataPoint{Metric: metric, Tags: tags, Timestamp: ts, Fields: nil}
-		if err := a.wal.Append(&dp); err != nil {
-			return fmt.Errorf("wal append failed: %w", err)
-		}
-		if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
-			seq := a.sequenceNumber.Add(1)
-			_ = a.mem.PutRaw(entry.Key, nil, core.EntryTypeDelete, seq)
-		} else {
-			key := core.EncodeTSDBKeyWithString(metric, tags, ts)
-			seq := a.sequenceNumber.Add(1)
-			_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, seq)
-		}
-		if a.leaderWal != nil {
-			if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
-				entry.EntryType = core.EntryTypeDelete
-				seq := a.sequenceNumber.Add(1)
-				entry.SeqNum = seq
-				_ = a.leaderWal.Append(*entry)
-			}
+
+	// Write a single WAL record representing the range deletion and materialize
+	// a memtable tombstone for the series key so reads see the deletion.
+	dp := core.DataPoint{Metric: metric, Tags: tags, Timestamp: startTime, Fields: nil}
+	if err := a.wal.Append(&dp); err != nil {
+		return fmt.Errorf("wal append failed: %w", err)
+	}
+	if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
+		_ = a.mem.PutRaw(entry.Key, nil, core.EntryTypeDelete, seq)
+	} else {
+		key := core.EncodeTSDBKeyWithString(metric, tags, startTime)
+		_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, seq)
+	}
+	if a.leaderWal != nil {
+		if entry, encErr := a.encodeDataPointToWALEntry(&dp); encErr == nil {
+			entry.EntryType = core.EntryTypeDelete
+			entry.SeqNum = seq
+			_ = a.leaderWal.Append(*entry)
 		}
 	}
 	return nil

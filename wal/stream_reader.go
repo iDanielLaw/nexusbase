@@ -56,7 +56,8 @@ func (sr *streamReader) Next(ctx context.Context) (*core.WALEntry, error) {
 				sr.logger.Info("Serving entry from buffer", "seqNum", entry.SeqNum, "notify_id", sr.lastNotifyID)
 				return entry, nil
 			}
-			sr.logger.Debug("Skipping already seen entry in buffer", "seqNum", entry.SeqNum)
+			// Log skipped entries with correlation info so we can trace where seqs are filtered
+			sr.logger.Warn("Skipping already seen or out-of-order entry in buffer", "seqNum", entry.SeqNum, "lastReadSeq", sr.lastReadSeqNum, "notify_id", sr.lastNotifyID)
 			continue // Skip already seen entry
 		}
 

@@ -12,6 +12,7 @@ import (
 	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/replication"
+	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,10 +24,11 @@ type replicationTestHarness struct {
 	leaderCfg     *config.Config
 	leaderManager *replication.Manager
 
-	followerEngine      engine2.StorageEngineInterface
-	followerCfg         *config.Config
-	followerApplier     *replication.WALApplier
-	followerStreamReady chan struct{}
+	followerEngine         engine2.StorageEngineInterface
+	followerCfg            *config.Config
+	followerApplier        *replication.WALApplier
+	followerStreamReady    chan struct{}
+	leaderStreamRegistered chan struct{}
 }
 
 // setupReplicationTest creates a full leader and follower environment for integration testing.
@@ -95,13 +97,14 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	)
 
 	h := &replicationTestHarness{
-		leaderEngine:        leaderEngine,
-		leaderCfg:           leaderCfg,
-		leaderManager:       leaderManager,
-		followerEngine:      followerEngine,
-		followerCfg:         followerCfg,
-		followerApplier:     followerApplier,
-		followerStreamReady: make(chan struct{}, 1),
+		leaderEngine:           leaderEngine,
+		leaderCfg:              leaderCfg,
+		leaderManager:          leaderManager,
+		followerEngine:         followerEngine,
+		followerCfg:            followerCfg,
+		followerApplier:        followerApplier,
+		followerStreamReady:    make(chan struct{}, 1),
+		leaderStreamRegistered: make(chan struct{}, 1),
 	}
 
 	// Start servers in goroutines
@@ -119,10 +122,12 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 	// dial the leader TCP address directly.
 	h.followerApplier.SetDialOptions([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
 
-	// Provide a testing-only ready channel so tests can deterministically wait
-	// until the follower has subscribed to the leader WAL stream.
-	h.followerApplier.SetTestingOnlyStreamReadyChan(h.followerStreamReady)
-	h.followerApplier.Start(context.Background())
+	// Wire up leader WAL testing hook so tests can wait until the WAL reader
+	// registration has occurred on the leader side. Type-assert to the concrete
+	// WAL implementation and set the testing channel when available.
+	if lw, ok := leaderEngine.GetWAL().(*wal.WAL); ok {
+		lw.TestingOnlyStreamerRegistered = h.leaderStreamRegistered
+	}
 
 	cleanup := func() {
 		t.Log("Cleaning up replication test harness...")
@@ -141,15 +146,6 @@ func TestReplication_HappyPath_Put(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-
-	// Wait for follower to subscribe to the WAL stream before priming leader.
-	select {
-	case <-h.followerStreamReady:
-		t.Log("Follower stream ready; proceeding with priming write")
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for follower stream readiness")
-	}
-
 	// --- Test Catch-up by writing to a segment and rotating it ---
 	primeTs := time.Now().UnixNano()
 	primePoint := engine2.HelperDataPoint(t, "prime", map[string]string{"n": "1"}, primeTs, map[string]any{"v": 1})
@@ -158,6 +154,18 @@ func TestReplication_HappyPath_Put(t *testing.T) {
 
 	err = h.leaderEngine.GetWAL().Rotate()
 	require.NoError(t, err)
+
+	// Now start the follower so it can catch-up from the rotated segment.
+	h.followerApplier.SetTestingOnlyStreamReadyChan(h.followerStreamReady)
+	h.followerApplier.Start(context.Background())
+
+	// Wait until the leader registers a WAL stream reader for the follower.
+	select {
+	case <-h.leaderStreamRegistered:
+		t.Log("Leader registered WAL stream reader; follower started")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for leader WAL stream registration")
+	}
 
 	require.Eventually(t, func() bool {
 		seqNum := h.followerEngine.GetLatestAppliedSeqNum()
@@ -192,14 +200,16 @@ func TestReplication_Tailing_Only(t *testing.T) {
 	h, cleanup := setupReplicationTest(t)
 	defer cleanup()
 
-	// Wait for follower to subscribe to the WAL stream before sending a tailed write.
+	// Start the follower and wait until the leader registers the WAL reader
+	// so the follower will receive tailed notifications.
+	h.followerApplier.SetTestingOnlyStreamReadyChan(h.followerStreamReady)
+	h.followerApplier.Start(context.Background())
 	select {
-	case <-h.followerStreamReady:
-		t.Log("Follower stream ready; proceeding with tailed write")
+	case <-h.leaderStreamRegistered:
+		t.Log("Leader registered WAL stream reader; follower started")
 	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for follower stream readiness")
+		t.Fatalf("timed out waiting for leader WAL stream registration")
 	}
-
 	ctx := context.Background()
 	ts := time.Now().UnixNano()
 

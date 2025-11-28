@@ -208,7 +208,12 @@ func (w *WAL) commit(records []*commitRecord) {
 		totalBytes += newRecordSize
 		totalEntries += len(encodedEntryLists[pi])
 		// notify streamers with the logical entries
-		slog.Default().Debug("WAL: notifying streamers about payload", "payload_index", pi, "payload_buf_ptr", fmt.Sprintf("%p", payloadBufPtrs[pi]))
+		// Build a small seq preview for correlation with stream-reader logs
+		preview := make([]uint64, 0, len(encodedEntryLists[pi]))
+		for i := 0; i < len(encodedEntryLists[pi]) && i < 8; i++ {
+			preview = append(preview, encodedEntryLists[pi][i].SeqNum)
+		}
+		slog.Default().Info("WAL: notifying streamers about payload", "payload_index", pi, "payload_buf_ptr", fmt.Sprintf("%p", payloadBufPtrs[pi]), "seq_preview", preview)
 		w.notifyStreamers(encodedEntryLists[pi])
 
 		// return payload buffer to pool (after notify)
