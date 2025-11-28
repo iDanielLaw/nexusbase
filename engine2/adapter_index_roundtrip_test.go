@@ -19,12 +19,12 @@ func init() {
 func TestAdapterFlushWritesReadableIndex(t *testing.T) {
 	dir := t.TempDir()
 
-	// create engine2 and adapter
-	e, err := NewEngine2(dir)
+	// create engine2 adapter via compatibility helper
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	if err != nil {
-		t.Fatalf("NewEngine2: %v", err)
+		t.Fatalf("NewStorageEngine: %v", err)
 	}
-	a := NewEngine2Adapter(e)
+	a := ai.(*Engine2Adapter)
 
 	// Put a few data points with non-empty FieldValues so chunk payloads are written
 	basePts := []struct {

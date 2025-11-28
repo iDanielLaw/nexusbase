@@ -13,10 +13,11 @@ func TestCreateDatabaseHappyPath(t *testing.T) {
 	_ = os.RemoveAll(tmpDir)
 	defer os.RemoveAll(tmpDir)
 
-	e, err := NewEngine2(tmpDir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: tmpDir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
+	e := ai.(*Engine2Adapter).Engine2
 
 	ctx := context.Background()
 	if err := e.CreateDatabase(ctx, "testdb", CreateDBOptions{IfNotExists: false, Options: map[string]string{"a": "b"}}); err != nil {
@@ -57,10 +58,11 @@ func TestCreateDatabaseIdempotentIfNotExists(t *testing.T) {
 	_ = os.RemoveAll(tmpDir)
 	defer os.RemoveAll(tmpDir)
 
-	e, err := NewEngine2(tmpDir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: tmpDir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
+	e := ai.(*Engine2Adapter).Engine2
 
 	ctx := context.Background()
 	if err := e.CreateDatabase(ctx, "db1", CreateDBOptions{IfNotExists: false}); err != nil {

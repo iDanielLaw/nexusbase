@@ -20,11 +20,11 @@ import (
 func TestAdapterWritesMultipleChunks(t *testing.T) {
 	dir := t.TempDir()
 
-	e, err := NewEngine2(dir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	if err != nil {
-		t.Fatalf("NewEngine2: %v", err)
+		t.Fatalf("NewStorageEngine: %v", err)
 	}
-	a := NewEngine2Adapter(e)
+	a := ai.(*Engine2Adapter)
 
 	// Build a large payload string to force chunk splitting.
 	bigStr := strings.Repeat("x", 1024) // 1KB payload

@@ -10,11 +10,11 @@ import (
 func TestPutGetReplayForceFlush(t *testing.T) {
 	dir := t.TempDir()
 
-	eng, err := NewEngine2(dir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
-	adapter := NewEngine2Adapter(eng)
+	adapter := ai.(*Engine2Adapter)
 	defer adapter.Close()
 
 	fv, _ := core.NewFieldValuesFromMap(map[string]interface{}{"v": 42})
@@ -39,11 +39,11 @@ func TestPutGetReplayForceFlush(t *testing.T) {
 	}
 
 	// recreate engine to ensure WAL replay works
-	eng2, err := NewEngine2(dir)
+	ai2, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	if err != nil {
-		t.Fatalf("NewEngine2 reload failed: %v", err)
+		t.Fatalf("NewStorageEngine reload failed: %v", err)
 	}
-	adapter2 := NewEngine2Adapter(eng2)
+	adapter2 := ai2.(*Engine2Adapter)
 	defer adapter2.Close()
 
 	got2, err := adapter2.Get(context.Background(), "m1", map[string]string{"k": "v"}, 1000)

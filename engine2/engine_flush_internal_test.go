@@ -21,9 +21,9 @@ const localMaxFlushRetries = 3
 func Test_MoveToDLQ(t *testing.T) {
 	t.Run("Success_WithData", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -48,9 +48,9 @@ func Test_MoveToDLQ(t *testing.T) {
 
 	t.Run("Success_EmptyMemtable", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -70,9 +70,9 @@ func Test_MoveToDLQ(t *testing.T) {
 
 	t.Run("Failure_DLQDirNotConfigured", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -93,9 +93,9 @@ func Test_MoveToDLQ(t *testing.T) {
 func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 	t.Run("Success_FirstTry", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -116,9 +116,9 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 
 	t.Run("Success_AfterOneRetry", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 

@@ -14,12 +14,12 @@ func TestLeaderWAL_OpenAndPutRotate(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 
-	// Create Engine2
-	e, err := NewEngine2(tmp)
+	// Create adapter via compatibility helper and obtain underlying engine
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: tmp})
 	require.NoError(t, err)
+	a := ai.(*Engine2Adapter)
+	e := a.Engine2
 	defer func() { _ = e.wal.Close(); _ = os.RemoveAll(tmp) }()
-
-	a := NewEngine2AdapterWithHooks(e, nil)
 
 	// initialize string store so encoding works
 	// NewEngine2AdapterWithHooks already creates a stringStore.

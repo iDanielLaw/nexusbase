@@ -25,7 +25,7 @@ func NewStorageEngine(opts StorageEngineOptions) (StorageEngineInterface, error)
 		return nil, err
 	}
 	// Wrap Engine2 in the adapter which implements engine2.StorageEngineInterface
-	a := NewEngine2AdapterWithHooks(e, nil)
+	a := NewEngine2AdapterWithHooks(e, opts.HookManager)
 	// If caller provided a custom clock or metrics in options, apply them
 	// to the adapter so behaviors like relative-time queries and metrics
 	// visibility match the caller's expectations (tests pass a mock clock).

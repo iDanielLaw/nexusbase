@@ -17,9 +17,10 @@ import (
 // a new SSTable. The resulting SSTable file and manifest entry are verified.
 func TestAdapter_FlushMemtableToL0_Success(t *testing.T) {
 	dir := t.TempDir()
-	e, err := NewEngine2(dir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	require.NoError(t, err)
-	a := NewEngine2AdapterWithHooks(e, nil)
+	// tests in this package rely on adapter-specific helpers; assert to concrete adapter
+	a := ai.(*Engine2Adapter)
 	require.NoError(t, a.Start())
 	defer a.Close()
 

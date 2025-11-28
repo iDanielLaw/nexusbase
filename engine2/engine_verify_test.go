@@ -130,9 +130,9 @@ func TestStorageEngine_VerifyDataConsistency_Port(t *testing.T) {
 
 		// Now open the target engine adapter and Start it so the startup path
 		// will reload the manifest and register discovered SSTables into L1.
-		e2, err := NewEngine2(opts.DataDir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: opts.DataDir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e2, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -189,9 +189,9 @@ func TestStorageEngine_VerifyDataConsistency_Port(t *testing.T) {
 
 		// Start a fresh engine and add the corrupted SSTable into its levels manager
 		// Use the engine2 runtime so we can access LevelsManager to inject the corrupted SSTable
-		e2, err := NewEngine2(localOpts.DataDir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: localOpts.DataDir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e2, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 

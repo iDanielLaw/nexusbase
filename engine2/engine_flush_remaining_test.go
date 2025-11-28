@@ -17,9 +17,9 @@ import (
 func TestAdapter_PeriodicAndSizeFlushEquivalents(t *testing.T) {
 	t.Run("PeriodicFlush_SuccessEquivalent", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -47,9 +47,9 @@ func TestAdapter_PeriodicAndSizeFlushEquivalents(t *testing.T) {
 
 	t.Run("PeriodicFlush_NoDataEquivalent", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -67,9 +67,9 @@ func TestAdapter_PeriodicAndSizeFlushEquivalents(t *testing.T) {
 
 	t.Run("SizeTriggerEquivalent", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
-		a := NewEngine2AdapterWithHooks(e, nil)
+		a := ai.(*Engine2Adapter)
 		require.NoError(t, a.Start())
 		defer a.Close()
 
@@ -99,9 +99,9 @@ func TestAdapter_PeriodicAndSizeFlushEquivalents(t *testing.T) {
 
 func TestAdapter_FlushRemainingMemtables_Equivalent(t *testing.T) {
 	dir := t.TempDir()
-	e, err := NewEngine2(dir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	require.NoError(t, err)
-	a := NewEngine2AdapterWithHooks(e, nil)
+	a := ai.(*Engine2Adapter)
 	require.NoError(t, a.Start())
 	defer a.Close()
 
@@ -146,9 +146,9 @@ func TestAdapter_FlushRemainingMemtables_Equivalent(t *testing.T) {
 
 func TestAdapter_SyncMetadata_Equivalent(t *testing.T) {
 	dir := t.TempDir()
-	e, err := NewEngine2(dir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	require.NoError(t, err)
-	a := NewEngine2AdapterWithHooks(e, nil)
+	a := ai.(*Engine2Adapter)
 	require.NoError(t, a.Start())
 	defer a.Close()
 

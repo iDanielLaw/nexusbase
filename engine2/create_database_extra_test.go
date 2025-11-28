@@ -15,10 +15,11 @@ func TestInvalidDBNames(t *testing.T) {
 	_ = os.RemoveAll(tmpDir)
 	defer os.RemoveAll(tmpDir)
 
-	e, err := NewEngine2(tmpDir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: tmpDir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
+	e := ai.(*Engine2Adapter).Engine2
 
 	invalidNames := []string{"", "1abc", "abc!", strings.Repeat("a", 65)}
 	for _, name := range invalidNames {
@@ -37,10 +38,11 @@ func TestReservedNames(t *testing.T) {
 	_ = os.RemoveAll(tmpDir)
 	defer os.RemoveAll(tmpDir)
 
-	e, err := NewEngine2(tmpDir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: tmpDir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
+	e := ai.(*Engine2Adapter).Engine2
 
 	reserved := []string{"system", "internal"}
 	for _, name := range reserved {
@@ -59,10 +61,11 @@ func TestConcurrentCreate(t *testing.T) {
 	_ = os.RemoveAll(tmpDir)
 	defer os.RemoveAll(tmpDir)
 
-	e, err := NewEngine2(tmpDir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: tmpDir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
+	e := ai.(*Engine2Adapter).Engine2
 
 	const goroutines = 20
 	var wg sync.WaitGroup
