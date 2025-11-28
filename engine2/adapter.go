@@ -574,7 +574,14 @@ func (a *Engine2Adapter) DeletesByTimeRange(ctx context.Context, metric string, 
 
 	// Write a single WAL record representing the range deletion and materialize
 	// a memtable tombstone for the series key so reads see the deletion.
+	// We encode the range-end into a special marker field so WAL replay can
+	// reconstruct the in-memory range tombstone state on startup.
 	dp := core.DataPoint{Metric: metric, Tags: tags, Timestamp: startTime, Fields: nil}
+	if endPV, perr := core.NewPointValue(endTime); perr == nil {
+		fv := make(core.FieldValues)
+		fv["__range_delete_end"] = endPV
+		dp.Fields = fv
+	}
 	if err := a.wal.Append(&dp); err != nil {
 		return fmt.Errorf("wal append failed: %w", err)
 	}
@@ -621,7 +628,7 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 	// Helper: obtain binary-encoded series keys matching metric+tags
 	getBinarySeriesKeys := func() ([][]byte, error) {
 		// If we have a tag index, prefer that
-		if a.tagIndexManager != nil && a.seriesIDStore != nil {
+		if a.tagIndexManager != nil && a.seriesIDStore != nil && a.stringStore != nil && len(params.Tags) > 0 {
 			bm, err := a.tagIndexManager.Query(params.Tags)
 			if err != nil {
 				return nil, fmt.Errorf("tag index query failed: %w", err)
@@ -2460,6 +2467,17 @@ func (a *Engine2Adapter) Start() error {
 
 			// determine if this WAL entry represents a point-delete (non-series timestamp with nil fields)
 			isPointDelete := dp.Timestamp != -1 && dp.Fields == nil
+			// determine if this WAL entry encodes a range-delete marker (special field)
+			isRangeDelete := false
+			var rangeDeleteEnd int64
+			if dp.Fields != nil {
+				if pv, ok := dp.Fields["__range_delete_end"]; ok {
+					if endV, ok2 := pv.ValueInt64(); ok2 {
+						isRangeDelete = true
+						rangeDeleteEnd = endV
+					}
+				}
+			}
 
 			// if we have a string store, ensure IDs exist and register series
 			if a.stringStore != nil {
@@ -2522,24 +2540,62 @@ func (a *Engine2Adapter) Start() error {
 					}
 				}
 			} else {
-				// For point deletes we must NOT register the series or add it
-				// back into the tag index. Regular datapoints (non-deletes)
-				// should be indexed and registered as active series.
-				if !isPointDelete {
-					// regular datapoint: register series and add to tag index
+				// Handle range-delete marker specially: create an in-memory
+				// range tombstone entry and materialize a memtable tombstone.
+				if isRangeDelete {
+					// Build representative series key (prefer ID-encoded when possible)
 					if a.stringStore != nil {
-						var metricID uint64
-						metricID, _ = a.stringStore.GetID(dp.Metric)
-						if metricID == 0 {
-							metricID, _ = a.stringStore.GetOrCreateID(dp.Metric)
+						mID, _ := a.stringStore.GetID(dp.Metric)
+						if mID == 0 {
+							mID, _ = a.stringStore.GetOrCreateID(dp.Metric)
 						}
-						seriesKey := core.EncodeSeriesKey(metricID, pairs)
+						seriesKey := core.EncodeSeriesKey(mID, pairs)
 						seriesKeyStr := string(seriesKey)
-						a.addActiveSeries(seriesKeyStr)
-						if a.seriesIDStore != nil {
-							sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
-							if a.tagIndexManager != nil {
-								_ = a.tagIndexManager.AddEncoded(sid, pairs)
+						a.rangeTombstonesMu.Lock()
+						if a.rangeTombstones == nil {
+							a.rangeTombstones = make(map[string][]core.RangeTombstone)
+						}
+						a.rangeTombstones[seriesKeyStr] = append(a.rangeTombstones[seriesKeyStr], core.RangeTombstone{MinTimestamp: dp.Timestamp, MaxTimestamp: rangeDeleteEnd, SeqNum: seq})
+						a.rangeTombstonesMu.Unlock()
+					} else {
+						seriesKey := core.EncodeSeriesKeyWithString(dp.Metric, dp.Tags)
+						seriesKeyStr := string(seriesKey)
+						a.rangeTombstonesMu.Lock()
+						if a.rangeTombstones == nil {
+							a.rangeTombstones = make(map[string][]core.RangeTombstone)
+						}
+						a.rangeTombstones[seriesKeyStr] = append(a.rangeTombstones[seriesKeyStr], core.RangeTombstone{MinTimestamp: dp.Timestamp, MaxTimestamp: rangeDeleteEnd, SeqNum: seq})
+						a.rangeTombstonesMu.Unlock()
+					}
+					// ensure memtable has a tombstone for this representative key
+					if a.mem != nil {
+						if we, err := a.encodeDataPointToWALEntry(dp); err == nil {
+							_ = a.mem.PutRaw(we.Key, nil, core.EntryTypeDelete, seq)
+						} else {
+							key := core.EncodeTSDBKeyWithString(dp.Metric, dp.Tags, dp.Timestamp)
+							_ = a.mem.PutRaw(key, nil, core.EntryTypeDelete, seq)
+						}
+					}
+				} else {
+					// For point deletes we must NOT register the series or add it
+					// back into the tag index. Regular datapoints (non-deletes)
+					// should be indexed and registered as active series.
+					if !isPointDelete {
+						// regular datapoint: register series and add to tag index
+						if a.stringStore != nil {
+							var metricID uint64
+							metricID, _ = a.stringStore.GetID(dp.Metric)
+							if metricID == 0 {
+								metricID, _ = a.stringStore.GetOrCreateID(dp.Metric)
+							}
+							seriesKey := core.EncodeSeriesKey(metricID, pairs)
+							seriesKeyStr := string(seriesKey)
+							a.addActiveSeries(seriesKeyStr)
+							if a.seriesIDStore != nil {
+								sid, _ := a.seriesIDStore.GetOrCreateID(seriesKeyStr)
+								if a.tagIndexManager != nil {
+									_ = a.tagIndexManager.AddEncoded(sid, pairs)
+								}
 							}
 						}
 					}
