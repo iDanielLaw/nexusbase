@@ -375,46 +375,72 @@ func (a *Engine2Adapter) Get(ctx context.Context, metric string, tags map[string
 		dp := core.DataPoint{Metric: metric, Tags: tags, Timestamp: timestamp, Fields: nil}
 		if entry, err := a.encodeDataPointToWALEntry(&dp); err == nil {
 			key := entry.Key
-			if v, et, ok := a.mem.Get(key); ok {
-				// check series tombstone map first
-				if len(key) >= 8 {
-					seriesKey := make([]byte, len(key)-8)
-					copy(seriesKey, key[:len(key)-8])
-					if a.isSeriesDeleted(seriesKey, 0) {
+			// Use memtable iterator to obtain SeqNum so we can consult range tombstones
+			if a.mem != nil {
+				// build endKey as exclusive (timestamp+1)
+				endKey := make([]byte, len(key))
+				copy(endKey, key)
+				last := binary.BigEndian.Uint64(endKey[len(endKey)-8:])
+				binary.BigEndian.PutUint64(endKey[len(endKey)-8:], last+1)
+				miter := a.mem.NewIterator(key, endKey, types.Ascending)
+				defer miter.Close()
+				if miter.Next() {
+					node, _ := miter.At()
+					// check series tombstone map first
+					if len(node.Key) >= 8 {
+						seriesKey := make([]byte, len(node.Key)-8)
+						copy(seriesKey, node.Key[:len(node.Key)-8])
+						if a.isSeriesDeleted(seriesKey, node.SeqNum) {
+							return nil, sstable.ErrNotFound
+						}
+						if a.isRangeDeleted(seriesKey, timestamp, node.SeqNum) {
+							return nil, sstable.ErrNotFound
+						}
+					}
+					if node.EntryType == core.EntryTypeDelete || len(node.Value) == 0 {
 						return nil, sstable.ErrNotFound
 					}
+					fv, derr := core.DecodeFieldsFromBytes(node.Value)
+					if derr != nil {
+						return nil, derr
+					}
+					return fv, nil
 				}
-				if et == core.EntryTypeDelete || len(v) == 0 {
-					return nil, sstable.ErrNotFound
-				}
-				fv, derr := core.DecodeFieldsFromBytes(v)
-				if derr != nil {
-					return nil, derr
-				}
-				return fv, nil
 			}
 		}
 	}
 
 	// Fallback to string-key and query Memtable2
 	key := core.EncodeTSDBKeyWithString(metric, tags, timestamp)
-	if v, et, ok := a.mem.Get(key); ok {
-		// check series tombstone map first (string-encoded series key without timestamp)
-		if len(key) >= 8 {
-			seriesKey := make([]byte, len(key)-8)
-			copy(seriesKey, key[:len(key)-8])
-			if a.isSeriesDeleted(seriesKey, 0) {
+	if a.mem != nil {
+		// build endKey (timestamp+1)
+		endKey := make([]byte, len(key))
+		copy(endKey, key)
+		last := binary.BigEndian.Uint64(endKey[len(endKey)-8:])
+		binary.BigEndian.PutUint64(endKey[len(endKey)-8:], last+1)
+		miter := a.mem.NewIterator(key, endKey, types.Ascending)
+		defer miter.Close()
+		if miter.Next() {
+			node, _ := miter.At()
+			if len(node.Key) >= 8 {
+				seriesKey := make([]byte, len(node.Key)-8)
+				copy(seriesKey, node.Key[:len(node.Key)-8])
+				if a.isSeriesDeleted(seriesKey, node.SeqNum) {
+					return nil, sstable.ErrNotFound
+				}
+				if a.isRangeDeleted(seriesKey, timestamp, node.SeqNum) {
+					return nil, sstable.ErrNotFound
+				}
+			}
+			if node.EntryType == core.EntryTypeDelete || len(node.Value) == 0 {
 				return nil, sstable.ErrNotFound
 			}
+			fv, derr := core.DecodeFieldsFromBytes(node.Value)
+			if derr != nil {
+				return nil, derr
+			}
+			return fv, nil
 		}
-		if et == core.EntryTypeDelete || len(v) == 0 {
-			return nil, sstable.ErrNotFound
-		}
-		fv, derr := core.DecodeFieldsFromBytes(v)
-		if derr != nil {
-			return nil, derr
-		}
-		return fv, nil
 	}
 	return nil, sstable.ErrNotFound
 }
@@ -2072,7 +2098,9 @@ func (a *Engine2Adapter) isRangeDeleted(seriesKey []byte, timestamp int64, dataP
 		return false
 	}
 	for _, rt := range rs {
-		if timestamp >= rt.MinTimestamp && timestamp <= rt.MaxTimestamp && dataPointSeqNum <= rt.SeqNum {
+		match := timestamp >= rt.MinTimestamp && timestamp <= rt.MaxTimestamp && dataPointSeqNum <= rt.SeqNum
+		slog.Default().Info("isRangeDeleted check", "series_key_hex", fmt.Sprintf("%x", seriesKey), "ts", timestamp, "dp_seq", dataPointSeqNum, "rt_min", rt.MinTimestamp, "rt_max", rt.MaxTimestamp, "rt_seq", rt.SeqNum, "match", match)
+		if match {
 			return true
 		}
 	}
