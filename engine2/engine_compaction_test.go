@@ -167,7 +167,7 @@ func setupCompactionManagerWithMockWriter(t *testing.T, mockWriter *MockSSTableW
 	return cmIface
 }
 
-func verifySSTableContent(t *testing.T, tables []*sstable.SSTable, expectedData map[string]string, eng StorageEngineInterface) {
+func verifySSTableContent(t *testing.T, tables []*sstable.SSTable, expectedData map[string]string) {
 	t.Helper()
 	var iters []core.IteratorInterface[*core.IteratorNode]
 	for _, tbl := range tables {

@@ -27,7 +27,7 @@ import (
 // GRPCServer wraps the grpc.Server and implements the TSDBService.
 type GRPCServer struct {
 	tsdb.UnimplementedTSDBServiceServer
-	engine        engine2.StorageEngineInterface
+	engine        engine2.StorageEngineExternal
 	server        *grpc.Server
 	healthSrv     *health.Server
 	logger        *slog.Logger
@@ -38,7 +38,7 @@ type GRPCServer struct {
 
 // NewGRPCServer creates and configures a new gRPC server instance.
 // It handles TLS, authentication, and service registration.
-func NewGRPCServer(eng engine2.StorageEngineInterface, putPool *WorkerPool, batchPool *WorkerPool, cfg *config.ServerConfig, authenticator core.IAuthenticator, logger *slog.Logger) (*GRPCServer, error) {
+func NewGRPCServer(eng engine2.StorageEngineExternal, putPool *WorkerPool, batchPool *WorkerPool, cfg *config.ServerConfig, authenticator core.IAuthenticator, logger *slog.Logger) (*GRPCServer, error) {
 	s := &GRPCServer{
 		engine:        eng,
 		logger:        logger.With("component", "GRPCServer"),

@@ -22,7 +22,7 @@ type Job struct {
 type WorkerPool struct {
 	numWorkers int
 	jobQueue   chan Job
-	engine     engine2.StorageEngineInterface
+	engine     engine2.StorageEngineExternal
 	logger     *slog.Logger
 	wg         sync.WaitGroup
 }
@@ -30,7 +30,7 @@ type WorkerPool struct {
 // NewWorkerPool creates a new worker pool.
 // numWorkers: the number of worker goroutines to spawn.
 // queueSize: the size of the job queue.
-func NewWorkerPool(numWorkers, queueSize int, eng engine2.StorageEngineInterface, logger *slog.Logger) *WorkerPool {
+func NewWorkerPool(numWorkers, queueSize int, eng engine2.StorageEngineExternal, logger *slog.Logger) *WorkerPool {
 	return &WorkerPool{
 		numWorkers: numWorkers,
 		jobQueue:   make(chan Job, queueSize),

@@ -16,6 +16,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/cache"
 	"github.com/INLOpen/nexusbase/core"
+	internalpkg "github.com/INLOpen/nexusbase/engine2/internal"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
@@ -56,7 +57,14 @@ type CompactionOptions struct {
 
 // CompactionManagerParams groups parameters for NewCompactionManager.
 type CompactionManagerParams struct {
-	Engine               StorageEngineInterface
+	// Engine must provide both the external API (hooks, snapshots, metrics)
+	// and the internal API (GetClock, GetNextSSTableID, etc.). Use an
+	// anonymous interface combining both surfaces so callers may pass our
+	// concrete adapter which implements the full aggregated interface.
+	Engine interface {
+		internalpkg.StorageEngineInternal
+		StorageEngineExternal
+	}
 	LevelsManager        levels.Manager
 	DataDir              string
 	Opts                 CompactionOptions
@@ -74,7 +82,10 @@ type CompactionManagerParams struct {
 
 // CompactionManager is responsible for managing and executing compaction tasks.
 type CompactionManager struct {
-	Engine        StorageEngineInterface
+	Engine interface {
+		internalpkg.StorageEngineInternal
+		StorageEngineExternal
+	}
 	levelsManager levels.Manager
 	dataDir       string
 	opts          CompactionOptions

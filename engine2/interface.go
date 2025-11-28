@@ -4,13 +4,9 @@ import (
 	"context"
 
 	"github.com/INLOpen/nexusbase/core"
+	internalpkg "github.com/INLOpen/nexusbase/engine2/internal"
 	"github.com/INLOpen/nexusbase/hooks"
-	"github.com/INLOpen/nexusbase/indexer"
-	pb "github.com/INLOpen/nexusbase/replication/proto"
-	"github.com/INLOpen/nexusbase/snapshot"
 	"github.com/INLOpen/nexusbase/sys"
-	"github.com/INLOpen/nexusbase/wal"
-	"github.com/INLOpen/nexuscore/utils/clock"
 )
 
 // StorageEngineInterface defines the public API for the storage engine used
@@ -22,8 +18,10 @@ type internalFileManage struct {
 	OpenFile sys.OpenFileHandler
 }
 
-type StorageEngineInterface interface {
-	GetNextSSTableID() uint64
+// StorageEngineExternal defines the surface intended for external callers
+// (e.g. server handlers, CLI, etc.). These are the public operations a
+// consumer of the storage engine will typically invoke.
+type StorageEngineExternal interface {
 	// Data Manipulation
 	Put(ctx context.Context, point core.DataPoint) error
 	PutBatch(ctx context.Context, points []core.DataPoint) error
@@ -50,11 +48,6 @@ type StorageEngineInterface interface {
 	CreateSnapshot(ctx context.Context) (snapshotPath string, err error)
 	RestoreFromSnapshot(ctx context.Context, path string, overwrite bool) error
 
-	// Replication
-	ApplyReplicatedEntry(ctx context.Context, entry *pb.WALEntry) error
-	GetLatestAppliedSeqNum() uint64
-	ReplaceWithSnapshot(snapshotDir string) error
-
 	Start() error
 	Close() error
 
@@ -66,10 +59,19 @@ type StorageEngineInterface interface {
 	GetDLQDir() string
 	GetDataDir() string
 	GetWALPath() string
-	GetClock() clock.Clock
-	GetWAL() wal.WALInterface
-	GetStringStore() indexer.StringStoreInterface
-	GetSnapshotManager() snapshot.ManagerInterface
+}
 
-	GetSequenceNumber() uint64
+// StorageEngineInternal defines methods intended for internal consumers
+// (replication, snapshot machinery, tests) that require access to lower-
+// level resources and identifiers. This is kept separate to make the
+// external surface clearer while preserving the full combined interface
+// for backward compatibility.
+// StorageEngineInternal is provided from the internal package below.
+
+// StorageEngineInterface is the full interface (external + internal).
+// It preserves backward compatibility for existing callers that expect
+// a single aggregated interface type.
+type StorageEngineInterface interface {
+	StorageEngineExternal
+	internalpkg.StorageEngineInternal
 }

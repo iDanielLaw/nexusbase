@@ -58,7 +58,7 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 		setupOpts        func(opts *StorageEngineOptions)
 		wantErr          bool
 		wantErrType      interface{}
-		verify           func(t *testing.T, eng StorageEngineInterface)
+		verify           func(t *testing.T, eng StorageEngineExternal)
 		wantErrField     bool
 		wantErrFieldType interface{}
 	}{
@@ -96,7 +96,7 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 			ts:      1,
 			fields:  map[string]interface{}{"value": 1.0},
 			wantErr: false,
-			verify: func(t *testing.T, eng StorageEngineInterface) {
+			verify: func(t *testing.T, eng StorageEngineExternal) {
 				// Verify via public API: Get should find the point
 				_, err := eng.Get(context.Background(), "metric.no_tags", nil, 1)
 				require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 			ts:      1,
 			fields:  nil,
 			wantErr: false,
-			verify: func(t *testing.T, eng StorageEngineInterface) {
+			verify: func(t *testing.T, eng StorageEngineExternal) {
 				// Verify via public API: Get should return a FieldValues map (possibly empty)
 				fv, err := eng.Get(context.Background(), "metric.no_fields", map[string]string{"id": "A"}, 1)
 				require.NoError(t, err)
@@ -126,7 +126,7 @@ func TestStorageEngine_PutEvent_EdgeCasesAndErrors(t *testing.T) {
 				opts.MemtableThreshold = 10
 			},
 			wantErr: false,
-			verify: func(t *testing.T, eng StorageEngineInterface) {
+			verify: func(t *testing.T, eng StorageEngineExternal) {
 				// Instead of inspecting internal L0 tables, verify via public API that data is queryable
 				require.Eventually(t, func() bool {
 					_, err := eng.Get(context.Background(), "metric.flush.trigger", map[string]string{"id": "A"}, 1)

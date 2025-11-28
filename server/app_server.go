@@ -34,7 +34,7 @@ type AppServer struct {
 	batchWorker  *WorkerPool
 	cfg          *config.Config
 	logger       *slog.Logger
-	engine       engine2.StorageEngineInterface
+	engine       engine2.StorageEngineExternal
 	cancel       context.CancelFunc
 
 	// Replication components

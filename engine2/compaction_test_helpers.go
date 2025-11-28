@@ -202,7 +202,7 @@ func createDummySSTableWithTombstones(t *testing.T, dir string, id uint64, entri
 }
 
 // encodeTags is a lightweight encoder compatible with the helpers above.
-func encodeTags(_ StorageEngineInterface, tags map[string]string) []core.EncodedSeriesTagPair {
+func encodeTags(tags map[string]string) []core.EncodedSeriesTagPair {
 	if tags == nil {
 		return nil
 	}
