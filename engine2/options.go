@@ -58,6 +58,11 @@ type StorageEngineOptions struct {
 
 	EnableSSTablePreallocate bool
 
+	// SSTableRestartPointInterval sets the default restart-point interval
+	// for SSTable writers created by the engine adapter. If zero, the
+	// writer's internal default is used.
+	SSTableRestartPointInterval int
+
 	SelfMonitoringEnabled      bool
 	SelfMonitoringPrefix       string
 	SelfMonitoringIntervalMs   int

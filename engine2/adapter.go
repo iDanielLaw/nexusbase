@@ -1846,14 +1846,36 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	if a.options.SSTableCompressor != nil {
 		comp = a.options.SSTableCompressor
 	}
+	// Estimate keys from the memtable where possible so the bloom filter
+	// can be sized appropriately. Fall back to 0 when unknown.
+	estKeys := uint64(0)
+	if mem != nil {
+		estKeys = uint64(mem.Len())
+	}
+
+	// Tracer: prefer the configured tracer provider, otherwise use noop tracer.
+	var tracer trace.Tracer
+	if a.options.TracerProvider != nil {
+		tracer = a.options.TracerProvider.Tracer("sstable")
+	} else {
+		tracer = noop.NewTracerProvider().Tracer("sstable")
+	}
+
+	// Logger: prefer configured logger in options, otherwise fall back to adapter logger.
+	log := a.GetLogger()
+	if a.options.Logger != nil {
+		log = a.options.Logger
+	}
+
 	writerOpts := core.SSTableWriterOptions{
 		DataDir:                      sstDir,
 		ID:                           id,
-		EstimatedKeys:                0, // best-effort, memtable will write whatever it has
+		EstimatedKeys:                estKeys,
 		BloomFilterFalsePositiveRate: bfRate,
 		BlockSize:                    blockSize,
 		Compressor:                   comp,
-		Logger:                       a.GetLogger(),
+		Tracer:                       tracer,
+		Logger:                       log,
 	}
 	writer, err := sstable.NewSSTableWriter(writerOpts)
 	if err != nil {

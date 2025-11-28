@@ -111,6 +111,35 @@ func NewSSTableWriter(opts core.SSTableWriterOptions) (core.SSTableWriterInterfa
 		return nil, fmt.Errorf("failed to create bloom filter: %w", err) // Keep fmt.Errorf for error return
 	}
 
+	// Determine restart point interval: prefer explicit option if provided.
+	restartInterval := DefaultRestartPointInterval
+	if opts.RestartPointInterval > 0 {
+		restartInterval = opts.RestartPointInterval
+	}
+
+	// If requested, attempt to preallocate an estimated file size. This is
+	// best-effort; failures are non-fatal and return ErrPreallocNotSupported
+	// for platforms/filesystems that don't support it.
+	if opts.Preallocate && opts.EstimatedKeys > 0 {
+		// Conservative estimate: average 128 bytes per entry (key+value+overhead).
+		// This is a heuristic; it's intentionally conservative to avoid under-
+		// allocating in common workloads.
+		preallocSize := int64(opts.EstimatedKeys) * int64(128)
+		if preallocSize > 0 {
+			if err := sys.Preallocate(file, preallocSize); err != nil {
+				// If preallocation is not supported, treat as informational.
+				if err == sys.ErrPreallocNotSupported {
+					opts.Logger.Debug("SSTable preallocation not supported, continuing without prealloc")
+				} else {
+					// Log other prealloc failures but continue; they are non-fatal.
+					opts.Logger.Warn("SSTable preallocation failed, continuing", "error", err)
+				}
+			} else {
+				opts.Logger.Debug("SSTable preallocated", "size", preallocSize)
+			}
+		}
+	}
+
 	return &SSTableWriter{
 		filePath:                     tempFilePath,
 		file:                         file,
@@ -122,7 +151,7 @@ func NewSSTableWriter(opts core.SSTableWriterOptions) (core.SSTableWriterInterfa
 		keyCount:                     0, // Initialize key count
 		bloomFilterFalsePositiveRate: opts.BloomFilterFalsePositiveRate,
 		estimatedKeys:                opts.EstimatedKeys,
-		restartPointInterval:         DefaultRestartPointInterval, // Use a default for now
+		restartPointInterval:         restartInterval,
 		blockSize:                    opts.BlockSize,
 		tracer:                       opts.Tracer,
 		compressor:                   opts.Compressor,

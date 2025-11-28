@@ -26,6 +26,11 @@ type SSTableWriterOptions struct {
 	Tracer                       trace.Tracer
 	Compressor                   Compressor
 	Logger                       *slog.Logger // Logger for debug/info messages
+	// If true, attempt to preallocate the sstable file on disk (best-effort).
+	Preallocate bool
+	// RestartPointInterval controls how often restart points are emitted
+	// inside blocks (number of entries). If zero, the writer's default is used.
+	RestartPointInterval int
 }
 
 type SSTableWriterFactory func(opts SSTableWriterOptions) (SSTableWriterInterface, error)
