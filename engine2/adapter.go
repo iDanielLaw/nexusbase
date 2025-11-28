@@ -75,6 +75,8 @@ type Engine2Adapter struct {
 	snapshotMgr snapshot.ManagerInterface
 	// simple in-memory pubsub implementation for real-time updates
 	pubsub *PubSub
+	// ensure pubsub is initialized exactly once in a thread-safe manner
+	pubsubOnce sync.Once
 	// adapter lock used by snapshot provider methods
 	providerLock sync.Mutex
 	// memtable snapshot/flush configuration
@@ -2705,11 +2707,12 @@ func (a *Engine2Adapter) Close() error {
 
 // Introspection & Utilities
 func (a *Engine2Adapter) GetPubSub() (PubSubInterface, error) {
-	// Lazily initialize a PubSub instance and return it as the aliased
-	// PubSubInterface so the adapter satisfies the StorageEngineInterface.
-	if a.pubsub == nil {
+	// Lazily initialize `pubsub` exactly once using sync.Once to avoid
+	// data races. sync.Once provides the necessary memory synchronization
+	// guarantees for concurrent callers.
+	a.pubsubOnce.Do(func() {
 		a.pubsub = NewPubSub()
-	}
+	})
 	return a.pubsub, nil
 }
 func (a *Engine2Adapter) GetSnapshotsBaseDir() string { return filepath.Join(a.dataRoot, "snapshots") }
