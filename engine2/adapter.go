@@ -93,9 +93,11 @@ type Engine2Adapter struct {
 	// deleted series tracking used by tag index manager
 	deletedSeries   map[string]uint64
 	deletedSeriesMu sync.RWMutex
-	// compaction guard to avoid concurrent manual compaction runs
-	compactionMu      sync.Mutex
-	compactionRunning bool
+	// (compaction manager created on Start and reused)
+
+	// persistent compaction manager (created on Start and stopped on Close)
+	compactionMgr CompactionManagerInterface
+	compactionWg  sync.WaitGroup
 
 	// Engine metrics instance (cached so tests and runtime observe the same struct)
 	metrics *EngineMetrics
@@ -1210,76 +1212,15 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 	return nil
 }
 func (a *Engine2Adapter) TriggerCompaction() {
-	// Create and run a one-off CompactionManager compaction cycle.
+	// Only trigger compaction via the persistent CompactionManager created in Start().
 	if a == nil {
 		return
 	}
-
-	a.compactionMu.Lock()
-	if a.compactionRunning {
-		a.compactionMu.Unlock()
-		slog.Default().Info("TriggerCompaction: compaction already running, skipping")
+	if a.compactionMgr == nil {
+		slog.Default().Warn("TriggerCompaction: compaction manager not initialized; call Start() before triggering compaction")
 		return
 	}
-	a.compactionRunning = true
-	a.compactionMu.Unlock()
-
-	// Run asynchronously so callers don't block. We perform a single
-	// synchronous compaction cycle inside the goroutine by constructing
-	// a CompactionManager and invoking its internal cycle method.
-	go func() {
-		defer func() {
-			a.compactionMu.Lock()
-			a.compactionRunning = false
-			a.compactionMu.Unlock()
-		}()
-
-		// Ensure memtables are flushed before compaction to materialize
-		// any in-memory data into SSTables.
-		_ = a.ForceFlush(context.Background(), true)
-
-		// Build compaction manager params using adapter state.
-		cmParams := CompactionManagerParams{
-			Engine:        a,
-			LevelsManager: a.GetLevelsManager(),
-			DataDir:       filepath.Join(a.dataRoot, "sstables"),
-			Opts: CompactionOptions{
-				MaxL0Files:                        4,
-				L0CompactionTriggerSize:           0,
-				TargetSSTableSize:                 1 << 20,
-				LevelsTargetSizeMultiplier:        10,
-				CompactionIntervalSeconds:         60,
-				MaxConcurrentLNCompactions:        0,
-				IntraL0CompactionTriggerFiles:     2,
-				IntraL0CompactionMaxFileSizeBytes: 0,
-				SSTableCompressor:                 &compressors.NoCompressionCompressor{},
-			},
-			Logger:               a.GetLogger(),
-			Tracer:               a.GetTracer(),
-			IsSeriesDeleted:      a.isSeriesDeleted,
-			IsRangeDeleted:       a.isRangeDeleted,
-			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
-			BlockCache:           nil,
-			Metrics:              a.metrics,
-			FileRemover:          nil,
-			SSTableWriterFactory: nil,
-			ShutdownChan:         nil,
-		}
-
-		cmIface, err := NewCompactionManager(cmParams)
-		if err != nil {
-			slog.Default().Warn("TriggerCompaction: failed to create CompactionManager", "err", err)
-			return
-		}
-		cm := cmIface.(*CompactionManager)
-		// wire metrics counters if metrics are available
-		if a.metrics != nil {
-			cm.SetMetricsCounters(a.metrics.CompactionTotal, a.metrics.CompactionLatencyHist, a.metrics.CompactionDataReadBytesTotal, a.metrics.CompactionDataWrittenBytesTotal, a.metrics.CompactionTablesMergedTotal)
-		}
-
-		// perform a single compaction cycle synchronously
-		cm.performCompactionCycle()
-	}()
+	a.compactionMgr.Trigger()
 }
 
 func (a *Engine2Adapter) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
@@ -2763,6 +2704,49 @@ func (a *Engine2Adapter) Start() error {
 
 	// (diagnostics removed) start-complete status previously printed here
 
+	// create and start persistent compaction manager so manual triggers
+	// can reuse the same manager rather than creating transient instances.
+	if a.compactionMgr == nil {
+		cmParams := CompactionManagerParams{
+			Engine:        a,
+			LevelsManager: a.GetLevelsManager(),
+			DataDir:       filepath.Join(a.dataRoot, "sstables"),
+			Opts: CompactionOptions{
+				MaxL0Files:                        4,
+				L0CompactionTriggerSize:           0,
+				TargetSSTableSize:                 1 << 20,
+				LevelsTargetSizeMultiplier:        10,
+				CompactionIntervalSeconds:         60,
+				MaxConcurrentLNCompactions:        0,
+				IntraL0CompactionTriggerFiles:     2,
+				IntraL0CompactionMaxFileSizeBytes: 0,
+				SSTableCompressor:                 &compressors.NoCompressionCompressor{},
+			},
+			Logger:               a.GetLogger(),
+			Tracer:               a.GetTracer(),
+			IsSeriesDeleted:      a.isSeriesDeleted,
+			IsRangeDeleted:       a.isRangeDeleted,
+			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			BlockCache:           nil,
+			Metrics:              a.metrics,
+			FileRemover:          nil,
+			SSTableWriterFactory: nil,
+			ShutdownChan:         nil,
+		}
+		cmIface, cerr := NewCompactionManager(cmParams)
+		if cerr != nil {
+			slog.Default().Warn("Start: failed to create CompactionManager; continuing without background compaction", "err", cerr)
+		} else {
+			a.compactionMgr = cmIface
+			// wire metrics counters if available
+			if a.metrics != nil {
+				a.compactionMgr.SetMetricsCounters(a.metrics.CompactionTotal, a.metrics.CompactionLatencyHist, a.metrics.CompactionDataReadBytesTotal, a.metrics.CompactionDataWrittenBytesTotal, a.metrics.CompactionTablesMergedTotal)
+			}
+			// start background compaction loop
+			a.compactionMgr.Start(&a.compactionWg)
+		}
+	}
+
 	// mark started for snapshot provider
 	a.started.Store(true)
 	return nil
@@ -2802,6 +2786,14 @@ func (a *Engine2Adapter) Close() error {
 	}
 	// drop memtable reference
 	a.mem = nil
+
+	// stop compaction manager if running
+	if a.compactionMgr != nil {
+		// Best-effort stop; Stop() is idempotent.
+		a.compactionMgr.Stop()
+		// wait for background compaction loop to exit if Start() added to wg
+		a.compactionWg.Wait()
+	}
 
 	// reset sequence number
 	a.sequenceNumber.Store(0)
