@@ -2099,7 +2099,7 @@ func (a *Engine2Adapter) isRangeDeleted(seriesKey []byte, timestamp int64, dataP
 	}
 	for _, rt := range rs {
 		match := timestamp >= rt.MinTimestamp && timestamp <= rt.MaxTimestamp && dataPointSeqNum <= rt.SeqNum
-		slog.Default().Info("isRangeDeleted check", "series_key_hex", fmt.Sprintf("%x", seriesKey), "ts", timestamp, "dp_seq", dataPointSeqNum, "rt_min", rt.MinTimestamp, "rt_max", rt.MaxTimestamp, "rt_seq", rt.SeqNum, "match", match)
+		slog.Default().Debug("isRangeDeleted check", "series_key_hex", fmt.Sprintf("%x", seriesKey), "ts", timestamp, "dp_seq", dataPointSeqNum, "rt_min", rt.MinTimestamp, "rt_max", rt.MaxTimestamp, "rt_seq", rt.SeqNum, "match", match)
 		if match {
 			return true
 		}
