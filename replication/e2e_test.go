@@ -10,7 +10,6 @@ import (
 
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/engine2"
-	"github.com/INLOpen/nexusbase/indexer"
 	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexusbase/wal"
 	"github.com/stretchr/testify/require"
@@ -60,13 +59,7 @@ func setupReplicationTest(t *testing.T) (*replicationTestHarness, func()) {
 
 	replicationLogger := leaderOpts.Logger.With("component", "replication")
 
-	replicationServer := replication.NewServer(
-		leaderEngine.GetWAL(),
-		leaderEngine.GetStringStore().(*indexer.StringStore),
-		leaderEngine.GetSnapshotManager(),
-		leaderEngine.GetSnapshotsBaseDir(),
-		replicationLogger,
-	)
+	replicationServer := replication.NewServer(leaderEngine, replicationLogger)
 
 	// Use the provided TCP listener so the manager will serve on that address.
 	leaderManager, err := replication.NewManagerWithListener(leaderCfg.Replication, replicationServer, replicationLogger, lis)

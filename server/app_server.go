@@ -14,7 +14,7 @@ import (
 	"github.com/INLOpen/nexusbase/config"
 	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine2"
-	"github.com/INLOpen/nexusbase/indexer"
+
 	"github.com/INLOpen/nexusbase/replication"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"golang.org/x/sync/errgroup"
@@ -145,13 +145,7 @@ func NewAppServerWithListeners(eng engine2.StorageEngineInterface, cfg *config.C
 
 		if cfg.Replication.Mode == "leader" {
 			// Create the replication gRPC server (Leader side)
-			replicationServer := replication.NewServer(
-				eng.GetWAL(),
-				eng.GetStringStore().(*indexer.StringStore), // Type assertion
-				eng.GetSnapshotManager(),
-				eng.GetSnapshotsBaseDir(),
-				replicationLogger,
-			)
+			replicationServer := replication.NewServer(eng, replicationLogger)
 			// Provide a function so the replication server can report the latest
 			// applied sequence number in HealthCheck responses.
 			replicationServer.LatestSeqProvider = func() uint64 { return eng.GetLatestAppliedSeqNum() }
