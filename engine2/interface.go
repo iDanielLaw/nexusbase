@@ -55,9 +55,6 @@ type StorageEngineInterface interface {
 	GetLatestAppliedSeqNum() uint64
 	ReplaceWithSnapshot(snapshotDir string) error
 
-	// CleanupEngine is intended for internal use by the constructor to clean up
-	// resources if initialization fails.
-	CleanupEngine()
 	Start() error
 	Close() error
 

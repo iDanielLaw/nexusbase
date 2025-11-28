@@ -200,12 +200,12 @@ func main() {
 	systemCollector := server.NewSystemCollector(cfg.Engine.DataDir, 2*time.Second, logger)
 	systemCollector.Start()
 
-	eng2Inst, eng2Err := engine2.NewEngine2(cfg.Engine.DataDir)
+	engAi, eng2Err := engine2.NewStorageEngine(engine2.StorageEngineOptions{DataDir: cfg.Engine.DataDir, HookManager: hookManager, Logger: logger})
 	if eng2Err != nil {
 		logger.Error("Failed to create Engine2 instance", "error", eng2Err)
 		os.Exit(1)
 	}
-	eng2Adapter := engine2.NewEngine2AdapterWithHooks(eng2Inst, hookManager)
+	eng2Adapter := engAi.(*engine2.Engine2Adapter)
 	// Apply configured max chunk bytes to engine2 adapter if provided.
 	if cfg.Engine.MaxChunkBytes > 0 {
 		eng2Adapter.SetMaxChunkBytes(cfg.Engine.MaxChunkBytes)

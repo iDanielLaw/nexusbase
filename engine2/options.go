@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/levels"
 	"github.com/INLOpen/nexuscore/utils/clock"
 	"go.opentelemetry.io/otel/trace"
@@ -67,6 +68,10 @@ type StorageEngineOptions struct {
 	IntraL0CompactionMaxFileSizeBytes int64
 	ReplicationMode                   string
 	LeaderAddress                     string
+	// Optional HookManager to be attached to the adapter created by
+	// compatibility helpers. When present, the adapter will be created with
+	// this hook manager so callers can receive hook events.
+	HookManager hooks.HookManager
 }
 
 // RoundingRule mirrors the helper type used by engine tests for relative

@@ -93,6 +93,11 @@ type Engine2Adapter struct {
 	// deleted series tracking used by tag index manager
 	deletedSeries   map[string]uint64
 	deletedSeriesMu sync.RWMutex
+	// (compaction manager created on Start and reused)
+
+	// persistent compaction manager (created on Start and stopped on Close)
+	compactionMgr CompactionManagerInterface
+	compactionWg  sync.WaitGroup
 
 	// Engine metrics instance (cached so tests and runtime observe the same struct)
 	metrics *EngineMetrics
@@ -243,34 +248,6 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 			ps.Publish(upd)
 		}
 
-		// Optional diagnostic: read-after-write for specific metrics.
-		if point.Metric == "system.load" {
-			if v, et, ok := a.mem.Get(entry.Key); ok {
-				valStr := "<empty>"
-				if et == core.EntryTypePutEvent && len(v) > 0 {
-					if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
-						if vv, ok := fv["value"]; ok {
-							valStr = fmt.Sprintf("%v", vv)
-						} else {
-							for _, vv := range fv {
-								valStr = fmt.Sprintf("%v", vv)
-								break
-							}
-						}
-					} else {
-						valStr = fmt.Sprintf("decode_err:%v", derr)
-					}
-				}
-				vp := ""
-				if len(v) > 0 {
-					vp = fmt.Sprintf("%p", &v[0])
-				}
-				slog.Default().Info("Engine2Adapter: post-Put memtable read", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", entry.Key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
-			} else {
-				slog.Default().Warn("Engine2Adapter: post-Put memtable missing key", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", entry.Key))
-			}
-		}
-
 		return nil
 	}
 
@@ -304,34 +281,6 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 				Timestamp:  point.Timestamp,
 			}
 			ps.Publish(upd)
-		}
-	}
-
-	// Diagnostic read-after-write for fallback path.
-	if point.Metric == "system.load" {
-		if v, et, ok := a.mem.Get(key); ok {
-			valStr := "<empty>"
-			if et == core.EntryTypePutEvent && len(v) > 0 {
-				if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
-					if vv, ok := fv["value"]; ok {
-						valStr = fmt.Sprintf("%v", vv)
-					} else {
-						for _, vv := range fv {
-							valStr = fmt.Sprintf("%v", vv)
-							break
-						}
-					}
-				} else {
-					valStr = fmt.Sprintf("decode_err:%v", derr)
-				}
-			}
-			vp := ""
-			if len(v) > 0 {
-				vp = fmt.Sprintf("%p", &v[0])
-			}
-			slog.Default().Info("Engine2Adapter: post-Put memtable read (fallback)", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
-		} else {
-			slog.Default().Warn("Engine2Adapter: post-Put memtable missing key (fallback)", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", key))
 		}
 	}
 
@@ -795,7 +744,7 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 				if len(n.Value) > 0 {
 					vp = fmt.Sprintf("%p", &n.Value[0])
 				}
-				slog.Default().Info("MEM-DUMP-DBG",
+				slog.Default().Debug("MEM-DUMP-DBG",
 					"adapter_id", a.adapterID,
 					"series_key_hex", hex.EncodeToString(seriesKey),
 					"ts", ts,
@@ -971,7 +920,7 @@ func (it *engine2QueryResultIterator) At() (*core.QueryResultItem, error) {
 	if len(value) > 0 {
 		valueHex = hex.EncodeToString(value)
 	}
-	slog.Default().Info("QUERY-DBG",
+	slog.Default().Debug("QUERY-DBG",
 		"adapter_id", it.engine.adapterID,
 		"metric", metric,
 		"metric_id", metricID,
@@ -1206,9 +1155,51 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 	}
 	return nil
 }
-func (a *Engine2Adapter) TriggerCompaction() {}
+func (a *Engine2Adapter) TriggerCompaction() {
+	// Only trigger compaction via the persistent CompactionManager created in Start().
+	if a == nil {
+		return
+	}
+	if a.compactionMgr == nil {
+		slog.Default().Warn("TriggerCompaction: compaction manager not initialized; call Start() before triggering compaction")
+		return
+	}
+	a.compactionMgr.Trigger()
+}
+
 func (a *Engine2Adapter) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
-	return fmt.Errorf("CreateIncrementalSnapshot not implemented")
+	// Create an incremental snapshot by ensuring the memtables are flushed
+	// and delegating snapshot creation to the snapshot.Manager.
+	if err := a.CheckStarted(); err != nil {
+		return err
+	}
+	// Always flush memtables so snapshot captures consistent on-disk state.
+	if err := a.ForceFlush(context.Background(), true); err != nil {
+		return fmt.Errorf("failed to flush memtables for incremental snapshot: %w", err)
+	}
+
+	// Use provided base dir if given, otherwise fall back to adapter default.
+	baseDir := snapshotsBaseDir
+	if baseDir == "" {
+		baseDir = a.GetSnapshotsBaseDir()
+	}
+	if baseDir == "" {
+		return fmt.Errorf("snapshots base dir not configured")
+	}
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create snapshots base dir: %w", err)
+	}
+
+	mgr := a.GetSnapshotManager()
+	if mgr == nil {
+		return fmt.Errorf("snapshot manager not available")
+	}
+	// Delegate to snapshot.Manager.CreateIncremental which accepts a context
+	// and the base directory where snapshots are kept.
+	if err := mgr.CreateIncremental(context.Background(), baseDir); err != nil {
+		return fmt.Errorf("failed to create incremental snapshot: %w", err)
+	}
+	return nil
 }
 func (a *Engine2Adapter) VerifyDataConsistency() []error {
 	var out []error
@@ -1360,16 +1351,24 @@ func (a *Engine2Adapter) RestoreFromSnapshot(ctx context.Context, path string, o
 // `series_mapping.log`, or `index_sst/` presence. This is used to enforce
 // the `overwrite` flag semantics before attempting a restore.
 func (a *Engine2Adapter) isDataDirNonEmpty() bool {
-	if a == nil || a.dataRoot == "" {
+	if a == nil {
 		return false
 	}
+
+	dataDir := a.GetDataDir()
+	if fi, err := os.Stat(dataDir); dataDir == "" || err != nil || !fi.IsDir() {
+		// data dir does not exist or is not a directory -> consider empty
+		return false
+	}
+
+	// check known paths for presence of files/directories indicating non-empty DB
 	checkPaths := []string{
-		filepath.Join(a.dataRoot, "sstables"),
-		filepath.Join(a.dataRoot, "sst"),
-		filepath.Join(a.dataRoot, "wal"),
-		filepath.Join(a.dataRoot, "index_sst"),
-		filepath.Join(a.dataRoot, "string_mapping.log"),
-		filepath.Join(a.dataRoot, "series_mapping.log"),
+		filepath.Join(dataDir, "sstables"),
+		filepath.Join(dataDir, "sst"),
+		filepath.Join(dataDir, "wal"),
+		filepath.Join(dataDir, "index_sst"),
+		filepath.Join(dataDir, "string_mapping.log"),
+		filepath.Join(dataDir, "series_mapping.log"),
 	}
 	for _, p := range checkPaths {
 		if fi, err := os.Stat(p); err == nil {
@@ -1833,19 +1832,28 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	// Use memtable's FlushToSSTable if available: create a writer and delegate.
 	id := a.GetNextSSTableID()
 	// Write SST files into `sstables/` (tests and helpers expect SST files there)
-	sstDir := filepath.Join(a.dataRoot, "sstables")
+	sstDir := filepath.Join(a.GetDataDir(), "sstables")
 	blockSize := sstable.DefaultBlockSize
 	if a.sstableDefaultBlockSize > 0 {
 		blockSize = a.sstableDefaultBlockSize
+	}
+	// derive writer options from configured storage engine options where available
+	bfRate := 0.01
+	if a.options.BloomFilterFalsePositiveRate > 0 {
+		bfRate = a.options.BloomFilterFalsePositiveRate
+	}
+	comp := core.Compressor(&compressors.NoCompressionCompressor{})
+	if a.options.SSTableCompressor != nil {
+		comp = a.options.SSTableCompressor
 	}
 	writerOpts := core.SSTableWriterOptions{
 		DataDir:                      sstDir,
 		ID:                           id,
 		EstimatedKeys:                0, // best-effort, memtable will write whatever it has
-		BloomFilterFalsePositiveRate: 0.01,
+		BloomFilterFalsePositiveRate: bfRate,
 		BlockSize:                    blockSize,
-		Compressor:                   &compressors.NoCompressionCompressor{},
-		Logger:                       nil,
+		Compressor:                   comp,
+		Logger:                       a.GetLogger(),
 	}
 	writer, err := sstable.NewSSTableWriter(writerOpts)
 	if err != nil {
@@ -1869,7 +1877,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: id}
 	// Diagnostic logging: show writer path, manifest path and dir contents to help
 	// debug cases where the wrong file (e.g., manifest.json) is being loaded.
-	manifestPathLoc := filepath.Join(a.dataRoot, "sstables", "manifest.json")
+	manifestPathLoc := filepath.Join(a.GetDataDir(), "sstables", "manifest.json")
 	slog.Default().Info("FlushMemtableToL0: about to load sstable", "writer_path", writer.FilePath(), "manifest_path", manifestPathLoc)
 	if files, derr := os.ReadDir(sstDir); derr == nil {
 		names := make([]string, 0, len(files))
@@ -1880,7 +1888,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	} else {
 		slog.Default().Debug("FlushMemtableToL0: failed to read sst dir", "dir", sstDir, "err", derr)
 	}
-	sstablesDir := filepath.Join(a.dataRoot, "sstables")
+	sstablesDir := filepath.Join(a.GetDataDir(), "sstables")
 	if files2, derr2 := os.ReadDir(sstablesDir); derr2 == nil {
 		names2 := make([]string, 0, len(files2))
 		for _, f := range files2 {
@@ -1900,7 +1908,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	// ensure a copy exists under `<dataRoot>/sst`. This keeps the canonical
 	// manifest in `sstables/manifest.json` but provides the legacy location
 	// so tests and tools that read `sst/` continue to work.
-	legacySstDir := filepath.Join(a.dataRoot, "sst")
+	legacySstDir := filepath.Join(a.GetDataDir(), "sst")
 	_ = os.MkdirAll(legacySstDir, 0o755)
 	baseName := filepath.Base(writer.FilePath())
 	legacyPath := filepath.Join(legacySstDir, baseName)
@@ -1915,7 +1923,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	entry := SSTableManifestEntry{ID: id, FilePath: writer.FilePath(), KeyCount: sst.KeyCount(), CreatedAt: time.Now().UTC()}
 	// Manifest is maintained under `sstables/manifest.json` while SST files live
 	// under `sst/` to match repository test expectations.
-	manifestPath := filepath.Join(a.dataRoot, "sstables", "manifest.json")
+	manifestPath := filepath.Join(a.GetDataDir(), "sstables", "manifest.json")
 	if a.manifestMgr != nil {
 		if err := a.manifestMgr.AddEntry(entry); err != nil {
 			return fmt.Errorf("failed to persist manifest entry: %w", err)
@@ -1938,7 +1946,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	// discover a per-block index even when the engine does not yet populate
 	// it with real symbol/series data. This mirrors the behavior in
 	// ForceFlush to ensure a block index exists for freshly created tables.
-	blockDir := filepath.Join(a.dataRoot, "blocks", fmt.Sprintf("%d", id))
+	blockDir := filepath.Join(a.GetDataDir(), "blocks", fmt.Sprintf("%d", id))
 	if err := os.MkdirAll(blockDir, 0o755); err == nil {
 		// Build named series by iterating the memtable so index contains real data
 		// We must NOT call into `a.stringStore` while holding the memtable's
@@ -2227,7 +2235,7 @@ func (a *Engine2Adapter) GetSnapshotManager() snapshot.ManagerInterface {
 
 func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 	// Wipe current data directory then restore snapshot into it.
-	dataDir := a.dataRoot
+	dataDir := a.GetDataDir()
 	if dataDir == "" {
 		return fmt.Errorf("data dir not configured")
 	}
@@ -2311,7 +2319,7 @@ func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 	return nil
 }
 
-func (a *Engine2Adapter) CleanupEngine() {}
+// CleanupEngine removed: Close() performs cleanup now.
 func (a *Engine2Adapter) Start() error {
 	// local flag to indicate we performed a fallback scan (no manifest entries)
 	didFallbackScanLocal := false
@@ -2657,6 +2665,78 @@ func (a *Engine2Adapter) Start() error {
 
 	// (diagnostics removed) start-complete status previously printed here
 
+	// create and start persistent compaction manager so manual triggers
+	// can reuse the same manager rather than creating transient instances.
+	if a.compactionMgr == nil {
+		// derive compaction options from configured storage engine options
+		maxL0Files := 4
+		if a.options.MaxL0Files > 0 {
+			maxL0Files = a.options.MaxL0Files
+		}
+		l0TriggerSize := a.options.L0CompactionTriggerSize
+		targetSSTableSize := int64(1 << 20)
+		if a.options.TargetSSTableSize > 0 {
+			targetSSTableSize = a.options.TargetSSTableSize
+		}
+		levelsTargetMultiplier := 10
+		if a.options.LevelsTargetSizeMultiplier > 0 {
+			levelsTargetMultiplier = a.options.LevelsTargetSizeMultiplier
+		}
+		compactionInterval := 60
+		if a.options.CompactionIntervalSeconds > 0 {
+			compactionInterval = a.options.CompactionIntervalSeconds
+		}
+		maxConcurrentLN := a.options.MaxConcurrentLNCompactions
+		intraL0TriggerFiles := 2
+		if a.options.IntraL0CompactionTriggerFiles > 0 {
+			intraL0TriggerFiles = a.options.IntraL0CompactionTriggerFiles
+		}
+		intraL0MaxFileSize := a.options.IntraL0CompactionMaxFileSizeBytes
+		var sstCompressor core.Compressor = &compressors.NoCompressionCompressor{}
+		if a.options.SSTableCompressor != nil {
+			sstCompressor = a.options.SSTableCompressor
+		}
+
+		cmParams := CompactionManagerParams{
+			Engine:        a,
+			LevelsManager: a.GetLevelsManager(),
+			DataDir:       filepath.Join(a.GetDataDir(), "sstables"),
+			Opts: CompactionOptions{
+				MaxL0Files:                        maxL0Files,
+				L0CompactionTriggerSize:           l0TriggerSize,
+				TargetSSTableSize:                 targetSSTableSize,
+				LevelsTargetSizeMultiplier:        levelsTargetMultiplier,
+				CompactionIntervalSeconds:         compactionInterval,
+				MaxConcurrentLNCompactions:        maxConcurrentLN,
+				IntraL0CompactionTriggerFiles:     intraL0TriggerFiles,
+				IntraL0CompactionMaxFileSizeBytes: intraL0MaxFileSize,
+				SSTableCompressor:                 sstCompressor,
+			},
+			Logger:               a.GetLogger(),
+			Tracer:               a.GetTracer(),
+			IsSeriesDeleted:      a.isSeriesDeleted,
+			IsRangeDeleted:       a.isRangeDeleted,
+			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			BlockCache:           nil,
+			Metrics:              a.metrics,
+			FileRemover:          nil,
+			SSTableWriterFactory: nil,
+			ShutdownChan:         nil,
+		}
+		cmIface, cerr := NewCompactionManager(cmParams)
+		if cerr != nil {
+			slog.Default().Warn("Start: failed to create CompactionManager; continuing without background compaction", "err", cerr)
+		} else {
+			a.compactionMgr = cmIface
+			// wire metrics counters if available
+			if a.metrics != nil {
+				a.compactionMgr.SetMetricsCounters(a.metrics.CompactionTotal, a.metrics.CompactionLatencyHist, a.metrics.CompactionDataReadBytesTotal, a.metrics.CompactionDataWrittenBytesTotal, a.metrics.CompactionTablesMergedTotal)
+			}
+			// start background compaction loop
+			a.compactionMgr.Start(&a.compactionWg)
+		}
+	}
+
 	// mark started for snapshot provider
 	a.started.Store(true)
 	return nil
@@ -2697,6 +2777,14 @@ func (a *Engine2Adapter) Close() error {
 	// drop memtable reference
 	a.mem = nil
 
+	// stop compaction manager if running
+	if a.compactionMgr != nil {
+		// Best-effort stop; Stop() is idempotent.
+		a.compactionMgr.Stop()
+		// wait for background compaction loop to exit if Start() added to wg
+		a.compactionWg.Wait()
+	}
+
 	// reset sequence number
 	a.sequenceNumber.Store(0)
 
@@ -2715,7 +2803,9 @@ func (a *Engine2Adapter) GetPubSub() (PubSubInterface, error) {
 	})
 	return a.pubsub, nil
 }
-func (a *Engine2Adapter) GetSnapshotsBaseDir() string { return filepath.Join(a.dataRoot, "snapshots") }
+func (a *Engine2Adapter) GetSnapshotsBaseDir() string {
+	return filepath.Join(a.GetDataDir(), "snapshots")
+}
 func (a *Engine2Adapter) Metrics() (*EngineMetrics, error) {
 	if a.metrics == nil {
 		a.metrics = NewEngineMetrics(false, "")
@@ -2728,9 +2818,9 @@ func (a *Engine2Adapter) GetHookManager() hooks.HookManager {
 	}
 	return hooks.NewHookManager(nil)
 }
-func (a *Engine2Adapter) GetDLQDir() string     { return filepath.Join(a.dataRoot, "dlq") }
-func (a *Engine2Adapter) GetDataDir() string    { return a.dataRoot }
-func (a *Engine2Adapter) GetWALPath() string    { return filepath.Join(a.dataRoot, "wal") }
+func (a *Engine2Adapter) GetDLQDir() string     { return filepath.Join(a.GetDataDir(), "dlq") }
+func (a *Engine2Adapter) GetDataDir() string    { return a.options.DataDir }
+func (a *Engine2Adapter) GetWALPath() string    { return filepath.Join(a.GetDataDir(), "wal") }
 func (a *Engine2Adapter) GetClock() clock.Clock { return clock.SystemClockDefault }
 func (a *Engine2Adapter) GetWAL() wal.WALInterface {
 	// Prefer the leader WAL if present (tests and replication expect a WAL

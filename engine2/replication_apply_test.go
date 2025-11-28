@@ -39,11 +39,9 @@ func (f *fakeTagIndexManager) LoadFromFile(dataDir string) error            { re
 
 func TestApplyReplicatedEntry_PutAndDeleteSeries(t *testing.T) {
 	dataDir := t.TempDir()
-	e, err := NewEngine2(dataDir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: dataDir, HookManager: hooks.NewHookManager(nil)})
 	require.NoError(t, err)
-
-	hm := hooks.NewHookManager(nil)
-	a := NewEngine2AdapterWithHooks(e, hm)
+	a := ai.(*Engine2Adapter)
 	// inject fake tag index
 	fake := &fakeTagIndexManager{}
 	a.tagIndexManager = fake

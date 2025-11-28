@@ -159,10 +159,6 @@ func (m *MockStorageEngine) GetHookManager() hooks.HookManager {
 	return args.Get(0).(hooks.HookManager)
 }
 
-func (m *MockStorageEngine) CleanupEngine() {
-	m.Called()
-}
-
 func (m *MockStorageEngine) Close() error {
 	args := m.Called()
 	return args.Error(0)

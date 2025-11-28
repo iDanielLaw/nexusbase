@@ -17,11 +17,11 @@ func TestReplaceWithSnapshot_E2E(t *testing.T) {
 
 	// leader data dir
 	leaderDir := filepath.Join(t.TempDir(), "leader")
-	leaderEngine, err := NewEngine2(leaderDir)
+	ai, err := NewStorageEngine(StorageEngineOptions{DataDir: leaderDir})
 	if err != nil {
 		t.Fatalf("failed to create leader engine: %v", err)
 	}
-	leaderAdapter := NewEngine2AdapterWithHooks(leaderEngine, nil)
+	leaderAdapter := ai.(*Engine2Adapter)
 	if err := leaderAdapter.Start(); err != nil {
 		t.Fatalf("failed to start leader adapter: %v", err)
 	}
@@ -94,11 +94,11 @@ func TestReplaceWithSnapshot_E2E(t *testing.T) {
 	}
 
 	// After restore, construct a fresh engine instance over the same data dir to validate contents
-	newEngine, err := NewEngine2(leaderDir)
+	newAi, err := NewStorageEngine(StorageEngineOptions{DataDir: leaderDir})
 	if err != nil {
 		t.Fatalf("failed to open engine after restore: %v", err)
 	}
-	newAdapter := NewEngine2AdapterWithHooks(newEngine, nil)
+	newAdapter := newAi.(*Engine2Adapter)
 	if err := newAdapter.Start(); err != nil {
 		t.Fatalf("failed to start adapter after restore: %v", err)
 	}

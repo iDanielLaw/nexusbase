@@ -25,14 +25,16 @@ var (
 
 // Engine2 is a minimal engine implementation that manages per-database filesystem layout.
 type Engine2 struct {
-	dataRoot string
-	mu       sync.Mutex
-	wal      *WAL
-	mem      *memtable.Memtable2
+	options StorageEngineOptions
+	mu      sync.Mutex
+	wal     *WAL
+	mem     *memtable.Memtable2
 }
 
 // NewEngine2 constructs a new Engine2 rooted at dataRoot.
-func NewEngine2(dataRoot string) (*Engine2, error) {
+func NewEngine2(opts StorageEngineOptions) (*Engine2, error) {
+	options := opts // copy
+	dataRoot := opts.DataDir
 	if dataRoot == "" {
 		return nil, fmt.Errorf("dataRoot must be specified")
 	}
@@ -45,7 +47,16 @@ func NewEngine2(dataRoot string) (*Engine2, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WAL: %w", err)
 	}
-	m := memtable.NewMemtable2(1<<30, clock.SystemClockDefault)
+	// choose memtable threshold from options if provided
+	memThreshold := int64(1 << 30)
+	if opts.MemtableThreshold > 0 {
+		memThreshold = opts.MemtableThreshold
+	}
+	var clk clock.Clock = clock.SystemClockDefault
+	if opts.Clock != nil {
+		clk = opts.Clock
+	}
+	m := memtable.NewMemtable2(memThreshold, clk)
 
 	// replay WAL into memtable (Memtable2 expects DataPoint-centric Put)
 	if err := w.Replay(func(dp *core.DataPoint) error {
@@ -57,10 +68,10 @@ func NewEngine2(dataRoot string) (*Engine2, error) {
 		return nil, fmt.Errorf("failed to replay WAL: %w", err)
 	}
 
-	return &Engine2{dataRoot: dataRoot, wal: w, mem: m}, nil
+	return &Engine2{options: options, wal: w, mem: m}, nil
 }
 
-func (e *Engine2) GetDataRoot() string { return e.dataRoot }
+func (e *Engine2) GetDataRoot() string { return e.options.DataDir }
 
 // Validate DB name: starts with letter, followed by letters, digits, underscore or hyphen, max 64 chars.
 var dbNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`)
@@ -75,7 +86,7 @@ func (e *Engine2) CreateDatabase(ctx context.Context, name string, opts CreateDB
 		return ErrInvalidName
 	}
 
-	dbMetaPath := filepath.Join(e.dataRoot, name, "metadata")
+	dbMetaPath := filepath.Join(e.GetDataRoot(), name, "metadata")
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -91,7 +102,7 @@ func (e *Engine2) CreateDatabase(ctx context.Context, name string, opts CreateDB
 	}
 
 	// create directories
-	if err := EnsureDBDirs(e.dataRoot, name); err != nil {
+	if err := EnsureDBDirs(e.GetDataRoot(), name); err != nil {
 		return fmt.Errorf("failed to create db dirs: %w", err)
 	}
 

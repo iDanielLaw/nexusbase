@@ -10,12 +10,12 @@ import (
 
 func TestQueryAndDeletes(t *testing.T) {
 	dir := t.TempDir()
-	eng, err := NewEngine2(dir)
+	a, err := NewStorageEngine(StorageEngineOptions{DataDir: dir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
-	ad := NewEngine2Adapter(eng)
-	defer ad.Close()
+	defer a.Close()
+	ad := a
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

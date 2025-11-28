@@ -1,6 +1,7 @@
 package engine2
 
 import (
+	"log/slog"
 	"testing"
 
 	"github.com/INLOpen/nexusbase/compressors"
@@ -20,12 +21,23 @@ func NewStorageEngine(opts StorageEngineOptions) (StorageEngineInterface, error)
 	// Construct an engine2-backed storage engine and adapt it to the
 	// repository StorageEngineInterface so callers get an engine2-backed
 	// StorageEngine with minimal changes to their callsites.
-	e, err := NewEngine2(opts.DataDir)
+	e, err := NewEngine2(opts)
 	if err != nil {
 		return nil, err
 	}
+	// If a specific logger was provided, use it as the temporary global
+	// default while constructing components that consult slog.Default().
+	// Restore the previous default afterwards.
+	var prevLogger *slog.Logger
+	if opts.Logger != nil {
+		prevLogger = slog.Default()
+		slog.SetDefault(opts.Logger)
+	}
 	// Wrap Engine2 in the adapter which implements engine2.StorageEngineInterface
-	a := NewEngine2AdapterWithHooks(e, nil)
+	a := NewEngine2AdapterWithHooks(e, opts.HookManager)
+	if prevLogger != nil {
+		slog.SetDefault(prevLogger)
+	}
 	// If caller provided a custom clock or metrics in options, apply them
 	// to the adapter so behaviors like relative-time queries and metrics
 	// visibility match the caller's expectations (tests pass a mock clock).

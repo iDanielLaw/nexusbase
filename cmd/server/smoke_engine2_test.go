@@ -23,11 +23,11 @@ func TestAppServerAcceptsEngine2Adapter(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	eng2, err := engine2.NewEngine2(tmpDir)
+	ai, err := engine2.NewStorageEngine(engine2.StorageEngineOptions{DataDir: tmpDir})
 	if err != nil {
-		t.Fatalf("NewEngine2 failed: %v", err)
+		t.Fatalf("NewStorageEngine failed: %v", err)
 	}
-	ad := engine2.NewEngine2AdapterWithHooks(eng2, nil)
+	ad := ai.(*engine2.Engine2Adapter)
 	if err := ad.Start(); err != nil {
 		_ = ad.Close()
 		t.Fatalf("failed to start engine2 adapter: %v", err)
