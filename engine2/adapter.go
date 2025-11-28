@@ -177,6 +177,7 @@ func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapte
 		// propagate sstable writer tuning options to the tag index manager
 		timOpts.EnableSSTablePreallocate = e.options.EnableSSTablePreallocate
 		timOpts.SSTableRestartPointInterval = e.options.SSTableRestartPointInterval
+		timOpts.SSTablePreallocMultiplier = e.options.SSTablePreallocMultiplier
 		if tim, err := indexer.NewTagIndexManager(timOpts, deps, slog.Default(), nil); err == nil {
 			a.tagIndexManager = tim
 		}
@@ -1880,6 +1881,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 		Tracer:                       tracer,
 		Logger:                       log,
 		Preallocate:                  a.options.EnableSSTablePreallocate,
+		PreallocMultiplier:           a.options.SSTablePreallocMultiplier,
 		RestartPointInterval:         a.options.SSTableRestartPointInterval,
 	}
 	writer, err := sstable.NewSSTableWriter(writerOpts)
@@ -2749,6 +2751,7 @@ func (a *Engine2Adapter) Start() error {
 			FileRemover:                 nil,
 			SSTableWriterFactory:        nil,
 			EnableSSTablePreallocate:    a.options.EnableSSTablePreallocate,
+			SSTablePreallocMultiplier:   a.options.SSTablePreallocMultiplier,
 			SSTableRestartPointInterval: a.options.SSTableRestartPointInterval,
 			ShutdownChan:                nil,
 		}

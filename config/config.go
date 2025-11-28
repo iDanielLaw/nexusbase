@@ -37,6 +37,16 @@ type SSTableConfig struct {
 	Compression       string  `yaml:"compression"`
 	BloomFilterFPRate float64 `yaml:"bloom_filter_fp_rate"`
 	Preallocate       bool    `yaml:"preallocate"`
+	// PreallocMultiplierBytesPerKey controls the number of bytes to
+	// preallocate per estimated key when `preallocate` is true. If zero,
+	// a conservative default (128 bytes per key) is used. This setting
+	// allows tuning the preallocation size based on expected key/value
+	// sizes in your workload.
+	PreallocMultiplierBytesPerKey int `yaml:"prealloc_multiplier_bytes_per_key"`
+	// RestartPointInterval controls how many entries between restart
+	// points emitted by SSTable writers. If zero, the writer uses its
+	// own internal default.
+	RestartPointInterval int `yaml:"restart_point_interval"`
 }
 
 // CacheConfig holds cache-specific configurations.
@@ -207,10 +217,11 @@ func Load(r io.Reader) (*Config, error) {
 				FlushInterval:      "1s",
 			},
 			SSTable: SSTableConfig{
-				BlockSizeBytes:    8 * 1024, // 8 KiB
-				Compression:       "snappy",
-				BloomFilterFPRate: 0.01,
-				Preallocate:       true,
+				BlockSizeBytes:                8 * 1024, // 8 KiB
+				Compression:                   "snappy",
+				BloomFilterFPRate:             0.01,
+				Preallocate:                   true,
+				PreallocMultiplierBytesPerKey: 128,
 			},
 			Cache: CacheConfig{
 				BlockCacheCapacity: 1024,

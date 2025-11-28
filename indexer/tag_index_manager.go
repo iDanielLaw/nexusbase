@@ -128,6 +128,9 @@ type TagIndexManagerOptions struct {
 	// sstable writers (number of entries per restart point). If zero, writer
 	// defaults are used.
 	SSTableRestartPointInterval int
+	// SSTablePreallocMultiplier controls bytes-per-estimated-key used when
+	// preallocating index SSTable files. If zero, the writer default is used.
+	SSTablePreallocMultiplier int
 }
 
 // TagIndexManager manages the LSM-tree for the secondary tag index.
@@ -969,6 +972,7 @@ func (tim *TagIndexManager) createNewIndexWriter() (core.SSTableWriterInterface,
 	// Propagate optional tuning from manager options
 	writerOpts.Preallocate = tim.opts.EnableSSTablePreallocate
 	writerOpts.RestartPointInterval = tim.opts.SSTableRestartPointInterval
+	writerOpts.PreallocMultiplier = tim.opts.SSTablePreallocMultiplier
 	writer, err := tim.sstableWriterFactory(writerOpts)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create index SSTable writer: %w", err)

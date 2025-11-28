@@ -85,6 +85,9 @@ type CompactionManagerParams struct {
 	// SSTableRestartPointInterval sets the restart point interval for writers
 	// created by the compaction manager. If zero, writers use their defaults.
 	SSTableRestartPointInterval int
+	// SSTablePreallocMultiplier controls bytes-per-estimated-key used when
+	// preallocating SSTable files. If zero, the writer default is used.
+	SSTablePreallocMultiplier int
 }
 
 // CompactionManager is responsible for managing and executing compaction tasks.
@@ -122,6 +125,7 @@ type CompactionManager struct {
 	sstableCompressor           core.Compressor
 	enableSSTablePreallocate    bool
 	sstableRestartPointInterval int
+	sstablePreallocMultiplier   int
 
 	metrics *EngineMetrics
 }
@@ -336,6 +340,7 @@ func NewCompactionManager(params CompactionManagerParams) (CompactionManagerInte
 		metrics:                     params.Metrics,
 		enableSSTablePreallocate:    params.EnableSSTablePreallocate,
 		sstableRestartPointInterval: params.SSTableRestartPointInterval,
+		sstablePreallocMultiplier:   params.SSTablePreallocMultiplier,
 	}
 
 	if params.FileRemover != nil {
@@ -632,6 +637,7 @@ func (cm *CompactionManager) startNewSSTableWriter(fileID *uint64) (core.SSTable
 		Compressor:                   cm.sstableCompressor,
 		Logger:                       cm.logger.With("sstable_writer_id", *fileID),
 		Preallocate:                  cm.enableSSTablePreallocate,
+		PreallocMultiplier:           cm.sstablePreallocMultiplier,
 		RestartPointInterval:         cm.sstableRestartPointInterval,
 	})
 	if writerErr != nil {

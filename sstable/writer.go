@@ -121,10 +121,16 @@ func NewSSTableWriter(opts core.SSTableWriterOptions) (core.SSTableWriterInterfa
 	// best-effort; failures are non-fatal and return ErrPreallocNotSupported
 	// for platforms/filesystems that don't support it.
 	if opts.Preallocate && opts.EstimatedKeys > 0 {
-		// Conservative estimate: average 128 bytes per entry (key+value+overhead).
+		// Determine the per-entry multiplier. Use the option if provided,
+		// otherwise fall back to the conservative default of 128 bytes per entry.
+		multiplier := int64(core.DefaultSSTablePreallocMultiplier)
+		if opts.PreallocMultiplier > 0 {
+			multiplier = int64(opts.PreallocMultiplier)
+		}
+		// Conservative estimate: multiplier bytes per entry (key+value+overhead).
 		// This is a heuristic; it's intentionally conservative to avoid under-
 		// allocating in common workloads.
-		preallocSize := int64(opts.EstimatedKeys) * int64(128)
+		preallocSize := int64(opts.EstimatedKeys) * multiplier
 		if preallocSize > 0 {
 			if err := sys.Preallocate(file, preallocSize); err != nil {
 				// If preallocation is not supported, treat as informational.

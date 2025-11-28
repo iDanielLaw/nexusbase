@@ -14,7 +14,9 @@ import (
 
 	// Generated gRPC code
 	// Core utilities
+	"github.com/INLOpen/nexusbase/compressors"
 	"github.com/INLOpen/nexusbase/config"
+	"github.com/INLOpen/nexusbase/core"
 	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/hooks/listeners"
@@ -199,8 +201,33 @@ func main() {
 	// System metrics collector
 	systemCollector := server.NewSystemCollector(cfg.Engine.DataDir, 2*time.Second, logger)
 	systemCollector.Start()
+	// Choose compressor implementation based on config string.
+	var sstCompressor core.Compressor
+	switch strings.ToLower(cfg.Engine.SSTable.Compression) {
+	case "snappy":
+		sstCompressor = compressors.NewSnappyCompressor()
+	case "lz4":
+		sstCompressor = compressors.NewLz4Compressor()
+	case "zstd":
+		sstCompressor = compressors.NewZstdCompressor()
+	case "none":
+		sstCompressor = &compressors.NoCompressionCompressor{}
+	default:
+		logger.Warn("Unknown sstable compressor; defaulting to snappy", "requested", cfg.Engine.SSTable.Compression)
+		sstCompressor = compressors.NewSnappyCompressor()
+	}
 
-	engAi, eng2Err := engine2.NewStorageEngine(engine2.StorageEngineOptions{DataDir: cfg.Engine.DataDir, HookManager: hookManager, Logger: logger})
+	engAi, eng2Err := engine2.NewStorageEngine(engine2.StorageEngineOptions{
+		DataDir:                      cfg.Engine.DataDir,
+		HookManager:                  hookManager,
+		Logger:                       logger,
+		EnableSSTablePreallocate:     cfg.Engine.SSTable.Preallocate,
+		SSTablePreallocMultiplier:    cfg.Engine.SSTable.PreallocMultiplierBytesPerKey,
+		SSTableDefaultBlockSize:      int(cfg.Engine.SSTable.BlockSizeBytes),
+		BloomFilterFalsePositiveRate: cfg.Engine.SSTable.BloomFilterFPRate,
+		SSTableCompressor:            sstCompressor,
+		SSTableRestartPointInterval:  cfg.Engine.SSTable.RestartPointInterval,
+	})
 	if eng2Err != nil {
 		logger.Error("Failed to create Engine2 instance", "error", eng2Err)
 		os.Exit(1)

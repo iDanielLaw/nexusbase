@@ -58,6 +58,11 @@ type StorageEngineOptions struct {
 
 	EnableSSTablePreallocate bool
 
+	// SSTablePreallocMultiplier controls the number of bytes to preallocate
+	// per estimated key when SSTable preallocation is enabled. A sensible
+	// default is 128 (bytes per estimated key) when zero.
+	SSTablePreallocMultiplier int
+
 	// SSTableRestartPointInterval sets the default restart-point interval
 	// for SSTable writers created by the engine adapter. If zero, the
 	// writer's internal default is used.
