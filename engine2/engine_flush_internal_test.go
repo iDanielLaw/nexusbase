@@ -138,7 +138,7 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 
 	t.Run("Failure_MovesToDLQ", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		e, err := NewEngine2(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
 		a := NewEngine2AdapterWithHooks(e, nil)
 		require.NoError(t, a.Start())
@@ -167,7 +167,7 @@ func Test_ProcessImmutableUsingAdapter(t *testing.T) {
 
 	t.Run("Failure_RequeuedOnShutdown", func(t *testing.T) {
 		dir := t.TempDir()
-		e, err := NewEngine2(dir)
+		e, err := NewEngine2(StorageEngineOptions{DataDir: dir})
 		require.NoError(t, err)
 		a := NewEngine2AdapterWithHooks(e, nil)
 		require.NoError(t, a.Start())

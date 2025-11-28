@@ -1407,16 +1407,16 @@ func (a *Engine2Adapter) RestoreFromSnapshot(ctx context.Context, path string, o
 // `series_mapping.log`, or `index_sst/` presence. This is used to enforce
 // the `overwrite` flag semantics before attempting a restore.
 func (a *Engine2Adapter) isDataDirNonEmpty() bool {
-	if a == nil || a.dataRoot == "" {
+	if a == nil || a.GetDataDir() == "" {
 		return false
 	}
 	checkPaths := []string{
-		filepath.Join(a.dataRoot, "sstables"),
-		filepath.Join(a.dataRoot, "sst"),
-		filepath.Join(a.dataRoot, "wal"),
-		filepath.Join(a.dataRoot, "index_sst"),
-		filepath.Join(a.dataRoot, "string_mapping.log"),
-		filepath.Join(a.dataRoot, "series_mapping.log"),
+		filepath.Join(a.GetDataDir(), "sstables"),
+		filepath.Join(a.GetDataDir(), "sst"),
+		filepath.Join(a.GetDataDir(), "wal"),
+		filepath.Join(a.GetDataDir(), "index_sst"),
+		filepath.Join(a.GetDataDir(), "string_mapping.log"),
+		filepath.Join(a.GetDataDir(), "series_mapping.log"),
 	}
 	for _, p := range checkPaths {
 		if fi, err := os.Stat(p); err == nil {
@@ -1880,7 +1880,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	// Use memtable's FlushToSSTable if available: create a writer and delegate.
 	id := a.GetNextSSTableID()
 	// Write SST files into `sstables/` (tests and helpers expect SST files there)
-	sstDir := filepath.Join(a.dataRoot, "sstables")
+	sstDir := filepath.Join(a.GetDataDir(), "sstables")
 	blockSize := sstable.DefaultBlockSize
 	if a.sstableDefaultBlockSize > 0 {
 		blockSize = a.sstableDefaultBlockSize
@@ -1916,7 +1916,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	loadOpts := sstable.LoadSSTableOptions{FilePath: writer.FilePath(), ID: id}
 	// Diagnostic logging: show writer path, manifest path and dir contents to help
 	// debug cases where the wrong file (e.g., manifest.json) is being loaded.
-	manifestPathLoc := filepath.Join(a.dataRoot, "sstables", "manifest.json")
+	manifestPathLoc := filepath.Join(a.GetDataDir(), "sstables", "manifest.json")
 	slog.Default().Info("FlushMemtableToL0: about to load sstable", "writer_path", writer.FilePath(), "manifest_path", manifestPathLoc)
 	if files, derr := os.ReadDir(sstDir); derr == nil {
 		names := make([]string, 0, len(files))
@@ -1927,7 +1927,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	} else {
 		slog.Default().Debug("FlushMemtableToL0: failed to read sst dir", "dir", sstDir, "err", derr)
 	}
-	sstablesDir := filepath.Join(a.dataRoot, "sstables")
+	sstablesDir := filepath.Join(a.GetDataDir(), "sstables")
 	if files2, derr2 := os.ReadDir(sstablesDir); derr2 == nil {
 		names2 := make([]string, 0, len(files2))
 		for _, f := range files2 {
@@ -1947,7 +1947,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	// ensure a copy exists under `<dataRoot>/sst`. This keeps the canonical
 	// manifest in `sstables/manifest.json` but provides the legacy location
 	// so tests and tools that read `sst/` continue to work.
-	legacySstDir := filepath.Join(a.dataRoot, "sst")
+	legacySstDir := filepath.Join(a.GetDataDir(), "sst")
 	_ = os.MkdirAll(legacySstDir, 0o755)
 	baseName := filepath.Base(writer.FilePath())
 	legacyPath := filepath.Join(legacySstDir, baseName)
@@ -1962,7 +1962,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	entry := SSTableManifestEntry{ID: id, FilePath: writer.FilePath(), KeyCount: sst.KeyCount(), CreatedAt: time.Now().UTC()}
 	// Manifest is maintained under `sstables/manifest.json` while SST files live
 	// under `sst/` to match repository test expectations.
-	manifestPath := filepath.Join(a.dataRoot, "sstables", "manifest.json")
+	manifestPath := filepath.Join(a.GetDataDir(), "sstables", "manifest.json")
 	if a.manifestMgr != nil {
 		if err := a.manifestMgr.AddEntry(entry); err != nil {
 			return fmt.Errorf("failed to persist manifest entry: %w", err)
@@ -1985,7 +1985,7 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	// discover a per-block index even when the engine does not yet populate
 	// it with real symbol/series data. This mirrors the behavior in
 	// ForceFlush to ensure a block index exists for freshly created tables.
-	blockDir := filepath.Join(a.dataRoot, "blocks", fmt.Sprintf("%d", id))
+	blockDir := filepath.Join(a.GetDataDir(), "blocks", fmt.Sprintf("%d", id))
 	if err := os.MkdirAll(blockDir, 0o755); err == nil {
 		// Build named series by iterating the memtable so index contains real data
 		// We must NOT call into `a.stringStore` while holding the memtable's
@@ -2274,7 +2274,7 @@ func (a *Engine2Adapter) GetSnapshotManager() snapshot.ManagerInterface {
 
 func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 	// Wipe current data directory then restore snapshot into it.
-	dataDir := a.dataRoot
+	dataDir := a.GetDataDir()
 	if dataDir == "" {
 		return fmt.Errorf("data dir not configured")
 	}
@@ -2707,20 +2707,49 @@ func (a *Engine2Adapter) Start() error {
 	// create and start persistent compaction manager so manual triggers
 	// can reuse the same manager rather than creating transient instances.
 	if a.compactionMgr == nil {
+		// derive compaction options from configured storage engine options
+		maxL0Files := 4
+		if a.options.MaxL0Files > 0 {
+			maxL0Files = a.options.MaxL0Files
+		}
+		l0TriggerSize := a.options.L0CompactionTriggerSize
+		targetSSTableSize := int64(1 << 20)
+		if a.options.TargetSSTableSize > 0 {
+			targetSSTableSize = a.options.TargetSSTableSize
+		}
+		levelsTargetMultiplier := 10
+		if a.options.LevelsTargetSizeMultiplier > 0 {
+			levelsTargetMultiplier = a.options.LevelsTargetSizeMultiplier
+		}
+		compactionInterval := 60
+		if a.options.CompactionIntervalSeconds > 0 {
+			compactionInterval = a.options.CompactionIntervalSeconds
+		}
+		maxConcurrentLN := a.options.MaxConcurrentLNCompactions
+		intraL0TriggerFiles := 2
+		if a.options.IntraL0CompactionTriggerFiles > 0 {
+			intraL0TriggerFiles = a.options.IntraL0CompactionTriggerFiles
+		}
+		intraL0MaxFileSize := a.options.IntraL0CompactionMaxFileSizeBytes
+		var sstCompressor core.Compressor = &compressors.NoCompressionCompressor{}
+		if a.options.SSTableCompressor != nil {
+			sstCompressor = a.options.SSTableCompressor
+		}
+
 		cmParams := CompactionManagerParams{
 			Engine:        a,
 			LevelsManager: a.GetLevelsManager(),
-			DataDir:       filepath.Join(a.dataRoot, "sstables"),
+			DataDir:       filepath.Join(a.GetDataDir(), "sstables"),
 			Opts: CompactionOptions{
-				MaxL0Files:                        4,
-				L0CompactionTriggerSize:           0,
-				TargetSSTableSize:                 1 << 20,
-				LevelsTargetSizeMultiplier:        10,
-				CompactionIntervalSeconds:         60,
-				MaxConcurrentLNCompactions:        0,
-				IntraL0CompactionTriggerFiles:     2,
-				IntraL0CompactionMaxFileSizeBytes: 0,
-				SSTableCompressor:                 &compressors.NoCompressionCompressor{},
+				MaxL0Files:                        maxL0Files,
+				L0CompactionTriggerSize:           l0TriggerSize,
+				TargetSSTableSize:                 targetSSTableSize,
+				LevelsTargetSizeMultiplier:        levelsTargetMultiplier,
+				CompactionIntervalSeconds:         compactionInterval,
+				MaxConcurrentLNCompactions:        maxConcurrentLN,
+				IntraL0CompactionTriggerFiles:     intraL0TriggerFiles,
+				IntraL0CompactionMaxFileSizeBytes: intraL0MaxFileSize,
+				SSTableCompressor:                 sstCompressor,
 			},
 			Logger:               a.GetLogger(),
 			Tracer:               a.GetTracer(),
@@ -2813,7 +2842,9 @@ func (a *Engine2Adapter) GetPubSub() (PubSubInterface, error) {
 	})
 	return a.pubsub, nil
 }
-func (a *Engine2Adapter) GetSnapshotsBaseDir() string { return filepath.Join(a.dataRoot, "snapshots") }
+func (a *Engine2Adapter) GetSnapshotsBaseDir() string {
+	return filepath.Join(a.GetDataDir(), "snapshots")
+}
 func (a *Engine2Adapter) Metrics() (*EngineMetrics, error) {
 	if a.metrics == nil {
 		a.metrics = NewEngineMetrics(false, "")
@@ -2826,9 +2857,9 @@ func (a *Engine2Adapter) GetHookManager() hooks.HookManager {
 	}
 	return hooks.NewHookManager(nil)
 }
-func (a *Engine2Adapter) GetDLQDir() string     { return filepath.Join(a.dataRoot, "dlq") }
-func (a *Engine2Adapter) GetDataDir() string    { return a.dataRoot }
-func (a *Engine2Adapter) GetWALPath() string    { return filepath.Join(a.dataRoot, "wal") }
+func (a *Engine2Adapter) GetDLQDir() string     { return filepath.Join(a.GetDataDir(), "dlq") }
+func (a *Engine2Adapter) GetDataDir() string    { return a.options.DataDir }
+func (a *Engine2Adapter) GetWALPath() string    { return filepath.Join(a.GetDataDir(), "wal") }
 func (a *Engine2Adapter) GetClock() clock.Clock { return clock.SystemClockDefault }
 func (a *Engine2Adapter) GetWAL() wal.WALInterface {
 	// Prefer the leader WAL if present (tests and replication expect a WAL

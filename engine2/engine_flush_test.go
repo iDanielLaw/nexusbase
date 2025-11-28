@@ -66,7 +66,7 @@ func TestAdapter_FlushMemtableToL0_Success(t *testing.T) {
 // by performing two write+swap cycles and flushing each swapped memtable.
 func TestAdapter_FlushRemainingMemtables(t *testing.T) {
 	dir := t.TempDir()
-	e, err := NewEngine2(dir)
+	e, err := NewEngine2(StorageEngineOptions{DataDir: dir})
 	require.NoError(t, err)
 	a := NewEngine2AdapterWithHooks(e, nil)
 	require.NoError(t, a.Start())
