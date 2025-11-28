@@ -248,34 +248,6 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 			ps.Publish(upd)
 		}
 
-		// Optional diagnostic: read-after-write for specific metrics.
-		if point.Metric == "system.load" {
-			if v, et, ok := a.mem.Get(entry.Key); ok {
-				valStr := "<empty>"
-				if et == core.EntryTypePutEvent && len(v) > 0 {
-					if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
-						if vv, ok := fv["value"]; ok {
-							valStr = fmt.Sprintf("%v", vv)
-						} else {
-							for _, vv := range fv {
-								valStr = fmt.Sprintf("%v", vv)
-								break
-							}
-						}
-					} else {
-						valStr = fmt.Sprintf("decode_err:%v", derr)
-					}
-				}
-				vp := ""
-				if len(v) > 0 {
-					vp = fmt.Sprintf("%p", &v[0])
-				}
-				slog.Default().Info("Engine2Adapter: post-Put memtable read", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", entry.Key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
-			} else {
-				slog.Default().Warn("Engine2Adapter: post-Put memtable missing key", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", entry.Key))
-			}
-		}
-
 		return nil
 	}
 
@@ -309,34 +281,6 @@ func (a *Engine2Adapter) Put(ctx context.Context, point core.DataPoint) error {
 				Timestamp:  point.Timestamp,
 			}
 			ps.Publish(upd)
-		}
-	}
-
-	// Diagnostic read-after-write for fallback path.
-	if point.Metric == "system.load" {
-		if v, et, ok := a.mem.Get(key); ok {
-			valStr := "<empty>"
-			if et == core.EntryTypePutEvent && len(v) > 0 {
-				if fv, derr := core.DecodeFieldsFromBytes(v); derr == nil {
-					if vv, ok := fv["value"]; ok {
-						valStr = fmt.Sprintf("%v", vv)
-					} else {
-						for _, vv := range fv {
-							valStr = fmt.Sprintf("%v", vv)
-							break
-						}
-					}
-				} else {
-					valStr = fmt.Sprintf("decode_err:%v", derr)
-				}
-			}
-			vp := ""
-			if len(v) > 0 {
-				vp = fmt.Sprintf("%p", &v[0])
-			}
-			slog.Default().Info("Engine2Adapter: post-Put memtable read (fallback)", "metric", point.Metric, "ts", point.Timestamp, "entry_type", et, "val", valStr, "key_hex", fmt.Sprintf("%x", key), "value_hex", fmt.Sprintf("%x", v), "value_ptr", vp)
-		} else {
-			slog.Default().Warn("Engine2Adapter: post-Put memtable missing key (fallback)", "metric", point.Metric, "ts", point.Timestamp, "key_hex", fmt.Sprintf("%x", key))
 		}
 	}
 
@@ -800,7 +744,7 @@ func (a *Engine2Adapter) Query(ctx context.Context, params core.QueryParams) (co
 				if len(n.Value) > 0 {
 					vp = fmt.Sprintf("%p", &n.Value[0])
 				}
-				slog.Default().Info("MEM-DUMP-DBG",
+				slog.Default().Debug("MEM-DUMP-DBG",
 					"adapter_id", a.adapterID,
 					"series_key_hex", hex.EncodeToString(seriesKey),
 					"ts", ts,
@@ -976,7 +920,7 @@ func (it *engine2QueryResultIterator) At() (*core.QueryResultItem, error) {
 	if len(value) > 0 {
 		valueHex = hex.EncodeToString(value)
 	}
-	slog.Default().Info("QUERY-DBG",
+	slog.Default().Debug("QUERY-DBG",
 		"adapter_id", it.engine.adapterID,
 		"metric", metric,
 		"metric_id", metricID,
@@ -1407,16 +1351,24 @@ func (a *Engine2Adapter) RestoreFromSnapshot(ctx context.Context, path string, o
 // `series_mapping.log`, or `index_sst/` presence. This is used to enforce
 // the `overwrite` flag semantics before attempting a restore.
 func (a *Engine2Adapter) isDataDirNonEmpty() bool {
-	if a == nil || a.GetDataDir() == "" {
+	if a == nil {
 		return false
 	}
+
+	dataDir := a.GetDataDir()
+	if fi, err := os.Stat(dataDir); dataDir == "" || err != nil || !fi.IsDir() {
+		// data dir does not exist or is not a directory -> consider empty
+		return false
+	}
+
+	// check known paths for presence of files/directories indicating non-empty DB
 	checkPaths := []string{
-		filepath.Join(a.GetDataDir(), "sstables"),
-		filepath.Join(a.GetDataDir(), "sst"),
-		filepath.Join(a.GetDataDir(), "wal"),
-		filepath.Join(a.GetDataDir(), "index_sst"),
-		filepath.Join(a.GetDataDir(), "string_mapping.log"),
-		filepath.Join(a.GetDataDir(), "series_mapping.log"),
+		filepath.Join(dataDir, "sstables"),
+		filepath.Join(dataDir, "sst"),
+		filepath.Join(dataDir, "wal"),
+		filepath.Join(dataDir, "index_sst"),
+		filepath.Join(dataDir, "string_mapping.log"),
+		filepath.Join(dataDir, "series_mapping.log"),
 	}
 	for _, p := range checkPaths {
 		if fi, err := os.Stat(p); err == nil {
@@ -1885,14 +1837,23 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	if a.sstableDefaultBlockSize > 0 {
 		blockSize = a.sstableDefaultBlockSize
 	}
+	// derive writer options from configured storage engine options where available
+	bfRate := 0.01
+	if a.options.BloomFilterFalsePositiveRate > 0 {
+		bfRate = a.options.BloomFilterFalsePositiveRate
+	}
+	comp := core.Compressor(&compressors.NoCompressionCompressor{})
+	if a.options.SSTableCompressor != nil {
+		comp = a.options.SSTableCompressor
+	}
 	writerOpts := core.SSTableWriterOptions{
 		DataDir:                      sstDir,
 		ID:                           id,
 		EstimatedKeys:                0, // best-effort, memtable will write whatever it has
-		BloomFilterFalsePositiveRate: 0.01,
+		BloomFilterFalsePositiveRate: bfRate,
 		BlockSize:                    blockSize,
-		Compressor:                   &compressors.NoCompressionCompressor{},
-		Logger:                       nil,
+		Compressor:                   comp,
+		Logger:                       a.GetLogger(),
 	}
 	writer, err := sstable.NewSSTableWriter(writerOpts)
 	if err != nil {
