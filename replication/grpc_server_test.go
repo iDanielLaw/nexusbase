@@ -171,6 +171,19 @@ func (m *MockSnapshotStreamServer) Context() context.Context {
 	return m.ctx
 }
 
+// NewServerFromComponents is a test-friendly constructor that mirrors the
+// previous API (accepting individual components). Prefer `NewServer(eng, logger)`
+// in production code; this helper exists to simplify tests that mock pieces.
+func NewServerFromComponents(w wal.WALInterface, indexer *indexer.StringStore, snapshotMgr snapshot.ManagerInterface, snapshotDir string, logger *slog.Logger) *Server {
+	return &Server{
+		wal:         w,
+		indexer:     indexer,
+		snapshotMgr: snapshotMgr,
+		snapshotDir: snapshotDir,
+		logger:      logger.With("component", "replication_grpc_server"),
+	}
+}
+
 // setupServerTest is a helper to reduce boilerplate in server tests
 func setupServerTest(t *testing.T) (*Server, *MockWAL, *indexer.StringStore) {
 	t.Helper()
@@ -187,7 +200,7 @@ func setupServerTest(t *testing.T) (*Server, *MockWAL, *indexer.StringStore) {
 	})
 
 	mockWal := new(MockWAL)
-	server := NewServer(mockWal, stringStore, nil, "", logger)
+	server := NewServerFromComponents(mockWal, stringStore, nil, "", logger)
 	return server, mockWal, stringStore
 }
 

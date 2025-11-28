@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 
 	"github.com/INLOpen/nexusbase/core"
+	"github.com/INLOpen/nexusbase/engine2"
 	"github.com/INLOpen/nexusbase/indexer"
 	pb "github.com/INLOpen/nexusbase/replication/proto"
 	"github.com/INLOpen/nexusbase/snapshot"
@@ -40,14 +41,17 @@ type Server struct {
 	LatestSeqProvider func() uint64
 }
 
-// NewServer สร้าง instance ใหม่ของ gRPC Replication Server
-func NewServer(w wal.WALInterface, indexer *indexer.StringStore, snapshotMgr snapshot.ManagerInterface, snapshotDir string, logger *slog.Logger) *Server {
+// NewServer creates a replication gRPC server backed by the given engine.
+// The server extracts the components it needs (WAL, string store, snapshot
+// manager and snapshot base dir) from the provided engine interface.
+func NewServer(eng engine2.StorageEngineInterface, logger *slog.Logger) *Server {
 	return &Server{
-		wal:         w,
-		indexer:     indexer,
-		snapshotMgr: snapshotMgr,
-		snapshotDir: snapshotDir,
-		logger:      logger.With("component", "replication_grpc_server"),
+		wal:               eng.GetWAL(),
+		indexer:           eng.GetStringStore().(*indexer.StringStore),
+		snapshotMgr:       eng.GetSnapshotManager(),
+		snapshotDir:       eng.GetSnapshotsBaseDir(),
+		logger:            logger.With("component", "replication_grpc_server"),
+		LatestSeqProvider: func() uint64 { return eng.GetLatestAppliedSeqNum() },
 	}
 }
 

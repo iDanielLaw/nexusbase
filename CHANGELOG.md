@@ -31,6 +31,14 @@ All notable changes to this project are documented in this file.
     m.PutRaw(key, value, core.EntryTypePutEvent, pointID)
     ```
 
+- Engine: Add configurable SSTable writer options
+  - New config keys under `engine.sstable`:
+    - `prealloc_multiplier_bytes_per_key` — bytes reserved per estimated key (default 128).
+    - `restart_point_interval` — optional restart-point interval for block encoding.
+    - `preallocate` — enable best-effort file preallocation for SSTable writes.
+  - These options are wired through `engine2.StorageEngineOptions` and used by SSTable writers and compaction.
+  - Fixed compressor selection in server startup to use the correct constructors for Snappy/LZ4/ZSTD/None.
+
 
 ## Past Releases
 

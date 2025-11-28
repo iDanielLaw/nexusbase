@@ -16,6 +16,7 @@ import (
 
 	"github.com/INLOpen/nexusbase/cache"
 	"github.com/INLOpen/nexusbase/core"
+	internalpkg "github.com/INLOpen/nexusbase/engine2/internal"
 	"github.com/INLOpen/nexusbase/hooks"
 	"github.com/INLOpen/nexusbase/iterator"
 	"github.com/INLOpen/nexusbase/levels"
@@ -56,7 +57,14 @@ type CompactionOptions struct {
 
 // CompactionManagerParams groups parameters for NewCompactionManager.
 type CompactionManagerParams struct {
-	Engine               StorageEngineInterface
+	// Engine must provide both the external API (hooks, snapshots, metrics)
+	// and the internal API (GetClock, GetNextSSTableID, etc.). Use an
+	// anonymous interface combining both surfaces so callers may pass our
+	// concrete adapter which implements the full aggregated interface.
+	Engine interface {
+		internalpkg.StorageEngineInternal
+		StorageEngineExternal
+	}
 	LevelsManager        levels.Manager
 	DataDir              string
 	Opts                 CompactionOptions
@@ -70,11 +78,24 @@ type CompactionManagerParams struct {
 	FileRemover          core.FileRemover
 	SSTableWriterFactory core.SSTableWriterFactory
 	ShutdownChan         chan struct{}
+
+	// EnableSSTablePreallocate instructs created sstable writers to attempt
+	// platform/file-system preallocation when creating files.
+	EnableSSTablePreallocate bool
+	// SSTableRestartPointInterval sets the restart point interval for writers
+	// created by the compaction manager. If zero, writers use their defaults.
+	SSTableRestartPointInterval int
+	// SSTablePreallocMultiplier controls bytes-per-estimated-key used when
+	// preallocating SSTable files. If zero, the writer default is used.
+	SSTablePreallocMultiplier int
 }
 
 // CompactionManager is responsible for managing and executing compaction tasks.
 type CompactionManager struct {
-	Engine        StorageEngineInterface
+	Engine interface {
+		internalpkg.StorageEngineInternal
+		StorageEngineExternal
+	}
 	levelsManager levels.Manager
 	dataDir       string
 	opts          CompactionOptions
@@ -102,6 +123,9 @@ type CompactionManager struct {
 	isRangeDeletedChecker       iterator.RangeDeletedChecker
 	extractSeriesKeyFuncForIter iterator.SeriesKeyExtractorFunc
 	sstableCompressor           core.Compressor
+	enableSSTablePreallocate    bool
+	sstableRestartPointInterval int
+	sstablePreallocMultiplier   int
 
 	metrics *EngineMetrics
 }
@@ -314,6 +338,9 @@ func NewCompactionManager(params CompactionManagerParams) (CompactionManagerInte
 		sstableCompressor:           params.Opts.SSTableCompressor,
 		blockCache:                  params.BlockCache,
 		metrics:                     params.Metrics,
+		enableSSTablePreallocate:    params.EnableSSTablePreallocate,
+		sstableRestartPointInterval: params.SSTableRestartPointInterval,
+		sstablePreallocMultiplier:   params.SSTablePreallocMultiplier,
 	}
 
 	if params.FileRemover != nil {
@@ -609,6 +636,9 @@ func (cm *CompactionManager) startNewSSTableWriter(fileID *uint64) (core.SSTable
 		Tracer:                       cm.tracer,
 		Compressor:                   cm.sstableCompressor,
 		Logger:                       cm.logger.With("sstable_writer_id", *fileID),
+		Preallocate:                  cm.enableSSTablePreallocate,
+		PreallocMultiplier:           cm.sstablePreallocMultiplier,
+		RestartPointInterval:         cm.sstableRestartPointInterval,
 	})
 	if writerErr != nil {
 		return nil, fmt.Errorf("failed to create new sstable writer: %w", writerErr)

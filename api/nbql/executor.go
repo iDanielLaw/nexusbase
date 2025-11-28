@@ -15,12 +15,12 @@ import (
 
 // Executor processes parsed AST commands and interacts with the storage engine.
 type Executor struct {
-	engine engine2.StorageEngineInterface
+	engine engine2.StorageEngineExternal
 	clock  clock.Clock
 }
 
 // NewExecutor creates a new command executor.
-func NewExecutor(eng engine2.StorageEngineInterface, clock clock.Clock) *Executor {
+func NewExecutor(eng engine2.StorageEngineExternal, clock clock.Clock) *Executor {
 	return &Executor{engine: eng, clock: clock}
 }
 

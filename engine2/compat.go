@@ -59,7 +59,7 @@ func NewStorageEngine(opts StorageEngineOptions) (StorageEngineInterface, error)
 // switch imports to `engine2` can still obtain an active series snapshot
 // without importing the legacy package directly. This is a temporary shim
 // during migration and will be removed when helper functions are ported.
-func GetActiveSeriesSnapshot(e StorageEngineInterface) ([]string, error) {
+func GetActiveSeriesSnapshot(e StorageEngineExternal) ([]string, error) {
 	// If it's the engine2 adapter, extract active series directly.
 	if a, ok := e.(*Engine2Adapter); ok {
 		a.activeSeriesMu.RLock()

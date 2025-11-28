@@ -174,6 +174,10 @@ func NewEngine2AdapterWithHooks(e *Engine2, hm hooks.HookManager) *Engine2Adapte
 			SSTNextID:       a.GetNextSSTableID,
 		}
 		timOpts := indexer.TagIndexManagerOptions{DataDir: e.GetDataRoot()}
+		// propagate sstable writer tuning options to the tag index manager
+		timOpts.EnableSSTablePreallocate = e.options.EnableSSTablePreallocate
+		timOpts.SSTableRestartPointInterval = e.options.SSTableRestartPointInterval
+		timOpts.SSTablePreallocMultiplier = e.options.SSTablePreallocMultiplier
 		if tim, err := indexer.NewTagIndexManager(timOpts, deps, slog.Default(), nil); err == nil {
 			a.tagIndexManager = tim
 		}
@@ -1846,14 +1850,39 @@ func (a *Engine2Adapter) FlushMemtableToL0(mem *memtable.Memtable2, parentCtx co
 	if a.options.SSTableCompressor != nil {
 		comp = a.options.SSTableCompressor
 	}
+	// Estimate keys from the memtable where possible so the bloom filter
+	// can be sized appropriately. Fall back to 0 when unknown.
+	estKeys := uint64(0)
+	if mem != nil {
+		estKeys = uint64(mem.Len())
+	}
+
+	// Tracer: prefer the configured tracer provider, otherwise use noop tracer.
+	var tracer trace.Tracer
+	if a.options.TracerProvider != nil {
+		tracer = a.options.TracerProvider.Tracer("sstable")
+	} else {
+		tracer = noop.NewTracerProvider().Tracer("sstable")
+	}
+
+	// Logger: prefer configured logger in options, otherwise fall back to adapter logger.
+	log := a.GetLogger()
+	if a.options.Logger != nil {
+		log = a.options.Logger
+	}
+
 	writerOpts := core.SSTableWriterOptions{
 		DataDir:                      sstDir,
 		ID:                           id,
-		EstimatedKeys:                0, // best-effort, memtable will write whatever it has
+		EstimatedKeys:                estKeys,
 		BloomFilterFalsePositiveRate: bfRate,
 		BlockSize:                    blockSize,
 		Compressor:                   comp,
-		Logger:                       a.GetLogger(),
+		Tracer:                       tracer,
+		Logger:                       log,
+		Preallocate:                  a.options.EnableSSTablePreallocate,
+		PreallocMultiplier:           a.options.SSTablePreallocMultiplier,
+		RestartPointInterval:         a.options.SSTableRestartPointInterval,
 	}
 	writer, err := sstable.NewSSTableWriter(writerOpts)
 	if err != nil {
@@ -2712,16 +2741,19 @@ func (a *Engine2Adapter) Start() error {
 				IntraL0CompactionMaxFileSizeBytes: intraL0MaxFileSize,
 				SSTableCompressor:                 sstCompressor,
 			},
-			Logger:               a.GetLogger(),
-			Tracer:               a.GetTracer(),
-			IsSeriesDeleted:      a.isSeriesDeleted,
-			IsRangeDeleted:       a.isRangeDeleted,
-			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
-			BlockCache:           nil,
-			Metrics:              a.metrics,
-			FileRemover:          nil,
-			SSTableWriterFactory: nil,
-			ShutdownChan:         nil,
+			Logger:                      a.GetLogger(),
+			Tracer:                      a.GetTracer(),
+			IsSeriesDeleted:             a.isSeriesDeleted,
+			IsRangeDeleted:              a.isRangeDeleted,
+			ExtractSeriesKeyFunc:        func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			BlockCache:                  nil,
+			Metrics:                     a.metrics,
+			FileRemover:                 nil,
+			SSTableWriterFactory:        nil,
+			EnableSSTablePreallocate:    a.options.EnableSSTablePreallocate,
+			SSTablePreallocMultiplier:   a.options.SSTablePreallocMultiplier,
+			SSTableRestartPointInterval: a.options.SSTableRestartPointInterval,
+			ShutdownChan:                nil,
 		}
 		cmIface, cerr := NewCompactionManager(cmParams)
 		if cerr != nil {
