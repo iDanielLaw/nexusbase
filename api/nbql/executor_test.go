@@ -130,10 +130,6 @@ func (m *MockStorageEngine) VerifyDataConsistency() []error {
 	return args.Get(0).([]error)
 }
 
-func (m *MockStorageEngine) CleanupEngine() {
-	m.Called()
-}
-
 func (m *MockStorageEngine) Start() error {
 	args := m.Called()
 	return args.Error(0)

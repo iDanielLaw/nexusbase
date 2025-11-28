@@ -371,7 +371,7 @@ func (s *storageEngineShim) ApplyReplicatedEntry(ctx context.Context, entry *cor
 }
 func (s *storageEngineShim) GetLatestAppliedSeqNum() uint64               { return 0 }
 func (s *storageEngineShim) ReplaceWithSnapshot(snapshotDir string) error { return nil }
-func (s *storageEngineShim) CleanupEngine()                               {}
+
 func (s *storageEngineShim) GetSnapshotsBaseDir() string {
 	return filepath.Join(s.dataDir, "snapshots")
 }

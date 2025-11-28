@@ -278,12 +278,12 @@ func (t *testEngine) ApplyReplicatedEntry(ctx context.Context, entry *proto.WALE
 }
 func (t *testEngine) GetLatestAppliedSeqNum() uint64               { return 0 }
 func (t *testEngine) ReplaceWithSnapshot(snapshotDir string) error { return nil }
-func (t *testEngine) CleanupEngine()                               {}
-func (t *testEngine) Start() error                                 { return nil }
-func (t *testEngine) Close() error                                 { return nil }
-func (t *testEngine) GetPubSub() (PubSubInterface, error)          { return nil, nil }
-func (t *testEngine) GetSnapshotsBaseDir() string                  { return filepath.Join(t.dataDir, "snapshots") }
-func (t *testEngine) Metrics() (*EngineMetrics, error)             { return nil, nil }
+
+func (t *testEngine) Start() error                        { return nil }
+func (t *testEngine) Close() error                        { return nil }
+func (t *testEngine) GetPubSub() (PubSubInterface, error) { return nil, nil }
+func (t *testEngine) GetSnapshotsBaseDir() string         { return filepath.Join(t.dataDir, "snapshots") }
+func (t *testEngine) Metrics() (*EngineMetrics, error)    { return nil, nil }
 func (t *testEngine) GetHookManager() hooks.HookManager {
 	if t.hookManager == nil {
 		if t.logger == nil {
