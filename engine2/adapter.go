@@ -93,6 +93,9 @@ type Engine2Adapter struct {
 	// deleted series tracking used by tag index manager
 	deletedSeries   map[string]uint64
 	deletedSeriesMu sync.RWMutex
+	// compaction guard to avoid concurrent manual compaction runs
+	compactionMu      sync.Mutex
+	compactionRunning bool
 
 	// Engine metrics instance (cached so tests and runtime observe the same struct)
 	metrics *EngineMetrics
@@ -1206,9 +1209,112 @@ func (a *Engine2Adapter) ForceFlush(ctx context.Context, wait bool) error {
 	}
 	return nil
 }
-func (a *Engine2Adapter) TriggerCompaction() {}
+func (a *Engine2Adapter) TriggerCompaction() {
+	// Create and run a one-off CompactionManager compaction cycle.
+	if a == nil {
+		return
+	}
+
+	a.compactionMu.Lock()
+	if a.compactionRunning {
+		a.compactionMu.Unlock()
+		slog.Default().Info("TriggerCompaction: compaction already running, skipping")
+		return
+	}
+	a.compactionRunning = true
+	a.compactionMu.Unlock()
+
+	// Run asynchronously so callers don't block. We perform a single
+	// synchronous compaction cycle inside the goroutine by constructing
+	// a CompactionManager and invoking its internal cycle method.
+	go func() {
+		defer func() {
+			a.compactionMu.Lock()
+			a.compactionRunning = false
+			a.compactionMu.Unlock()
+		}()
+
+		// Ensure memtables are flushed before compaction to materialize
+		// any in-memory data into SSTables.
+		_ = a.ForceFlush(context.Background(), true)
+
+		// Build compaction manager params using adapter state.
+		cmParams := CompactionManagerParams{
+			Engine:        a,
+			LevelsManager: a.GetLevelsManager(),
+			DataDir:       filepath.Join(a.dataRoot, "sstables"),
+			Opts: CompactionOptions{
+				MaxL0Files:                        4,
+				L0CompactionTriggerSize:           0,
+				TargetSSTableSize:                 1 << 20,
+				LevelsTargetSizeMultiplier:        10,
+				CompactionIntervalSeconds:         60,
+				MaxConcurrentLNCompactions:        0,
+				IntraL0CompactionTriggerFiles:     2,
+				IntraL0CompactionMaxFileSizeBytes: 0,
+				SSTableCompressor:                 &compressors.NoCompressionCompressor{},
+			},
+			Logger:               a.GetLogger(),
+			Tracer:               a.GetTracer(),
+			IsSeriesDeleted:      a.isSeriesDeleted,
+			IsRangeDeleted:       a.isRangeDeleted,
+			ExtractSeriesKeyFunc: func(key []byte) ([]byte, error) { return key[:len(key)-8], nil },
+			BlockCache:           nil,
+			Metrics:              a.metrics,
+			FileRemover:          nil,
+			SSTableWriterFactory: nil,
+			ShutdownChan:         nil,
+		}
+
+		cmIface, err := NewCompactionManager(cmParams)
+		if err != nil {
+			slog.Default().Warn("TriggerCompaction: failed to create CompactionManager", "err", err)
+			return
+		}
+		cm := cmIface.(*CompactionManager)
+		// wire metrics counters if metrics are available
+		if a.metrics != nil {
+			cm.SetMetricsCounters(a.metrics.CompactionTotal, a.metrics.CompactionLatencyHist, a.metrics.CompactionDataReadBytesTotal, a.metrics.CompactionDataWrittenBytesTotal, a.metrics.CompactionTablesMergedTotal)
+		}
+
+		// perform a single compaction cycle synchronously
+		cm.performCompactionCycle()
+	}()
+}
+
 func (a *Engine2Adapter) CreateIncrementalSnapshot(snapshotsBaseDir string) error {
-	return fmt.Errorf("CreateIncrementalSnapshot not implemented")
+	// Create an incremental snapshot by ensuring the memtables are flushed
+	// and delegating snapshot creation to the snapshot.Manager.
+	if err := a.CheckStarted(); err != nil {
+		return err
+	}
+	// Always flush memtables so snapshot captures consistent on-disk state.
+	if err := a.ForceFlush(context.Background(), true); err != nil {
+		return fmt.Errorf("failed to flush memtables for incremental snapshot: %w", err)
+	}
+
+	// Use provided base dir if given, otherwise fall back to adapter default.
+	baseDir := snapshotsBaseDir
+	if baseDir == "" {
+		baseDir = a.GetSnapshotsBaseDir()
+	}
+	if baseDir == "" {
+		return fmt.Errorf("snapshots base dir not configured")
+	}
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create snapshots base dir: %w", err)
+	}
+
+	mgr := a.GetSnapshotManager()
+	if mgr == nil {
+		return fmt.Errorf("snapshot manager not available")
+	}
+	// Delegate to snapshot.Manager.CreateIncremental which accepts a context
+	// and the base directory where snapshots are kept.
+	if err := mgr.CreateIncremental(context.Background(), baseDir); err != nil {
+		return fmt.Errorf("failed to create incremental snapshot: %w", err)
+	}
+	return nil
 }
 func (a *Engine2Adapter) VerifyDataConsistency() []error {
 	var out []error
