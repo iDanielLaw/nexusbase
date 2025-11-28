@@ -2319,27 +2319,7 @@ func (a *Engine2Adapter) ReplaceWithSnapshot(snapshotDir string) error {
 	return nil
 }
 
-func (a *Engine2Adapter) CleanupEngine() {
-	if a == nil {
-		return
-	}
-	// Stop background compaction manager if present and wait for it to finish.
-	if a.compactionMgr != nil {
-		a.compactionMgr.Stop()
-		a.compactionWg.Wait()
-	}
-	// Close manifest manager background worker if present.
-	if a.manifestMgr != nil {
-		a.manifestMgr.Close()
-	}
-	// Close WAL if initialized.
-	if a.wal != nil {
-		_ = a.wal.Close()
-	}
-	// Do not remove the engine data directory here: callers may expect
-	// persistent data to remain after a failed initialization. CleanupEngine
-	// only stops background workers and closes open handles.
-}
+// CleanupEngine removed: Close() performs cleanup now.
 func (a *Engine2Adapter) Start() error {
 	// local flag to indicate we performed a fallback scan (no manifest entries)
 	didFallbackScanLocal := false
